@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Term Code</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <!-- COLUMN 1 — Files / Project (left sidebar) -->
+    <aside class="col-files pane">
+      <header class="pane-titlebar">
+        <div>
+          <span class="eyebrow">Files</span>
+          <strong>Term Code</strong>
+        </div>
+        <button class="icon-button" type="button" title="New file" aria-label="New file">+</button>
+      </header>
+      <nav class="file-list" aria-label="Project files">
+        <div class="file-item">app.json</div>
+        <div class="file-item">index.html</div>
+        <div class="file-item">style.css</div>
+        <div class="file-item">icon.svg</div>
+        <div class="file-item">AGENTS.md</div>
+      </nav>
+    </aside>
+
+    <!-- COLUMN 2 — AI chat (middle) -->
+    <section class="col-chat pane">
+      <header class="pane-titlebar">
+        <div>
+          <span class="eyebrow">AI Chat</span>
+          <strong>Ask the agent</strong>
+        </div>
+        <select id="model-picker" class="model-picker" aria-label="Model"></select>
+      </header>
+      <div id="chat-log" class="chat-log" aria-live="polite">
+        <p class="chat-hint">Start a conversation to build your app. The agent can read and edit these files.</p>
+      </div>
+      <form id="chat-form" class="chat-form">
+        <textarea id="chat-input" class="chat-input" placeholder="Ask the agent to build something…" rows="2"></textarea>
+        <button type="submit" class="send-button">Send</button>
+      </form>
+    </section>
+
+    <!-- COLUMN 3 — App content (right) -->
+    <section class="col-content pane">
+      <header class="pane-titlebar">
+        <div>
+          <span class="eyebrow">Preview</span>
+          <strong>Term Code</strong>
+        </div>
+      </header>
+      <div class="content-body">
+        <h1>👋 Welcome to your new ChatOSS app</h1>
+        <p>
+          This is the starter template for a <strong>.aip app</strong> — a folder of
+          plain HTML, CSS, and JavaScript with an <code>app.json</code> manifest, zipped
+          and installed into ChatOSS. No frameworks, no build step, no npm.
+        </p>
+
+        <h2>How building a .aip app works</h2>
+        <ol>
+          <li>Edit the files in the left sidebar — <code>index.html</code> is the entry point, <code>style.css</code> holds your styles, and <code>app.json</code> is the manifest.</li>
+          <li>The live preview (right side in Create mode, or install the .aip to run it for real) shows your app exactly as it will run in the ChatOSS sandbox.</li>
+          <li>Use the AI chat (middle column) to ask an agent to build or modify features for you. The agent can read and write these files.</li>
+          <li>When you're done, <strong>Publish</strong> packages the folder into a .aip and installs it in your dock.</li>
+        </ol>
+
+        <h2>Suggested design pattern</h2>
+        <p>
+          This template uses the standard ChatOSS three-column layout that works well for
+          most project- or collection-based apps:
+        </p>
+        <ul>
+          <li><strong>Left — files / project library:</strong> list, create, and select the things your app organizes.</li>
+          <li><strong>Middle — AI chat:</strong> a model picker from <code>window.chatoss.chat.listModels()</code> plus per-project chat history, with the current project state included in the system message.</li>
+          <li><strong>Right — app content / canvas:</strong> the product-specific surface. This is the only column that should fundamentally change between apps — replace it with your own UI.</li>
+        </ul>
+        <p>
+          Small single-purpose utilities may drop the pattern, but it is the default. Keep
+          a light, clean look (system-ui font, hairline borders, one accent color) and
+          define dark colors under <code>@media (prefers-color-scheme: dark)</code> so
+          ChatOSS Light/Dark flows through.
+        </p>
+
+        <h2>Where to find documentation</h2>
+        <ul>
+          <li><strong>AGENTS.md</strong> in this project contains the full ChatOSS .aip app guide — every <code>window.chatoss.*</code> API, the manifest schema, capabilities, and permissions. The AI agent reads it automatically.</li>
+          <li>The <strong>Docs app</strong> in your ChatOSS dock has an API reference and a worked example (Sticky Notes) you can study and install.</li>
+        </ul>
+
+        <h2>Quick start</h2>
+        <p>Try asking the AI chat: <em>"Give the left column a working project list that saves to scopedData."</em></p>
+      </div>
+    </section>
+  </main>
+
+  <!-- A starter script: wires the model picker from the ChatOSS chat API.
+       This is a skeleton — the AI agent will flesh it out as you build. -->
+  <script>
+    (async function () {
+      // The chat API is available because app.json declares the "chatApi" capability.
+      const chat = window.chatoss && window.chatoss.chat;
+      if (!chat) return;
+      try {
+        const models = await chat.listModels();
+        const picker = document.getElementById('model-picker');
+        const def = await chat.getDefaultModel();
+        for (const m of models) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.name + (m.available ? '' : ' (unavailable)');
+          opt.disabled = !m.available;
+          if (m.id === def) opt.selected = true;
+          picker.appendChild(opt);
+        }
+      } catch (err) {
+        console.warn('Could not load models', err);
+      }
+    })();
+  </script>
+</body>
+</html>

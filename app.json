@@ -1,0 +1,16 @@
+{
+  "id": "com.example.term-code",
+  "name": "Term Code",
+  "version": "1.0.0",
+  "description": "A new ChatOSS app. Replace this with what your app does.",
+  "icon": "icon.svg",
+  "entry": "index.html",
+  "capabilities": [
+    "chatApi"
+  ],
+  "scopedDataKeys": [
+    "term-code.state"
+  ],
+  "dataStoreRequests": [],
+  "toolsStoreRequests": []
+}
