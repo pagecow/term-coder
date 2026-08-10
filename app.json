@@ -1,16 +1,12 @@
 {
-  "id": "com.example.term-code",
+  "id": "com.thetjmccarty.termcode",
   "name": "Term Code",
   "version": "1.0.0",
-  "description": "A new ChatOSS app. Replace this with what your app does.",
+  "description": "AI agent orchestrator with live terminals — build software with Codex/Claude CLI sessions.",
   "icon": "icon.svg",
   "entry": "index.html",
-  "capabilities": [
-    "chatApi"
-  ],
-  "scopedDataKeys": [
-    "term-code.state"
-  ],
+  "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications"],
+  "scopedDataKeys": ["term-code.state"],
   "dataStoreRequests": [],
   "toolsStoreRequests": []
 }
