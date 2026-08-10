@@ -673,18 +673,27 @@ button { font-family: inherit; }
   justify-content: center;
   text-align: center;
   color: var(--muted);
-  padding: 64px 24px;
+  padding: 72px 24px;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-lg);
   font-size: 14px;
+  background: var(--bg);
 }
 .term-empty-glyph {
-  font-size: 28px;
-  color: var(--accent);
-  margin-bottom: 12px;
+  width: 52px; height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: var(--term-bg);
+  color: #3fb950;
+  font-family: var(--mono);
+  font-size: 22px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-md);
 }
-.term-empty p { margin: 2px 0; }
-.term-empty-sub { font-size: 12.5px; }
+.term-empty p { margin: 2px 0; font-weight: 600; color: var(--text-2); }
+.term-empty-sub { font-size: 12.5px; font-weight: 400 !important; color: var(--muted) !important; }
 
 /* Terminal square */
 .term-square {
@@ -692,7 +701,7 @@ button { font-family: inherit; }
   flex-direction: column;
   height: 300px;
   border: 1px solid var(--term-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   background: var(--term-bg);
   overflow: hidden;
   box-shadow: var(--shadow-md);
