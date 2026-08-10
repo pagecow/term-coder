@@ -33,18 +33,18 @@
     <!-- COLUMN 2 — Orchestrator chat -->
     <section class="col-chat pane">
       <header class="pane-titlebar chat-titlebar">
-        <div class="chat-title-left">
-          <span class="pane-label">Orchestrator</span>
+        <div class="chat-title-row">
           <strong id="chat-title" class="chat-title">New conversation</strong>
-        </div>
-        <div class="chat-title-right">
-          <select id="model-picker" class="pill-select" aria-label="Model" title="Chat model"></select>
-          <select id="effort-picker" class="pill-select hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
           <span id="board-chip" class="board-chip hidden" title="Attached Kanban board">
             <span class="board-chip-icon">▦</span>
             <span id="attached-board-name" class="board-chip-name"></span>
             <button id="detach-board-btn" class="board-chip-x" type="button" title="Detach board" aria-label="Detach board">&times;</button>
           </span>
+        </div>
+        <div class="chat-controls-row">
+          <select id="model-picker" class="pill-select" aria-label="Model" title="Chat model"></select>
+          <select id="effort-picker" class="pill-select hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
+          <span class="chat-controls-spacer"></span>
           <button id="attach-board-btn" class="btn btn-ghost btn-small" type="button" title="Attach a Kanban board">▦ Board</button>
         </div>
       </header>
@@ -97,12 +97,12 @@
         <button id="spawn-cancel-x" class="icon-button" type="button" title="Cancel" aria-label="Cancel">&times;</button>
       </header>
       <div class="modal-body">
-        <p class="modal-hint">You're in control — pick what to run, then Start.</p>
+        <p class="modal-hint">Launch a coding agent in its own terminal. It picks its model after it starts.</p>
         <label class="form-row">
-          <span class="form-label">CLI</span>
+          <span class="form-label">Agent</span>
           <select id="spawn-cli" class="form-input"></select>
         </label>
-        <label class="form-row" id="spawn-model-row">
+        <label class="form-row hidden" id="spawn-model-row">
           <span class="form-label">Model</span>
           <select id="spawn-model" class="form-input"></select>
         </label>

@@ -303,24 +303,33 @@ button { font-family: inherit; }
    Column 2 — Chat
    ============================================================ */
 .chat-titlebar {
-  flex-wrap: wrap;
-  row-gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
   border-bottom: 1px solid var(--border);
-  padding: 12px 14px;
+  padding: 14px 16px 12px;
 }
-.chat-title-left { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.chat-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .chat-title {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 650;
+  letter-spacing: -0.01em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
-.chat-title-right {
+.chat-controls-row {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  justify-content: flex-end;
 }
+.chat-controls-spacer { flex: 1; }
 
 .pill-select {
   border: 1px solid var(--border-strong);
