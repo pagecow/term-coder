@@ -6,6 +6,20 @@ const STORE_KEY = "term-code.state";
 const SETTINGS_KEY = "term-code.settings";
 const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
 const DETECT_TTL_MS = 60 * 1000;
+// CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
+const OLLAMA_LAUNCH_TOOLS = ["claude", "codex", "chatgpt", "hermes", "openclaw", "opencode", "copilot", "droid"];
+
+// Resolved absolute path to the ollama binary (found at detect time). The
+// sandboxed terminal runs a NON-login shell, so PATH is minimal and "ollama"
+// often isn't on it even though it works in the user's terminal.
+let ollamaPath = null;
+const OLLAMA_GUESSES = ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/usr/bin/ollama", "/bin/ollama", "/snap/bin/ollama"];
+
+// Wrap a command so it runs in a login shell (full user PATH) when possible.
+// Falls back to the bare command if we can't build a wrapper.
+function loginShell(command) {
+  return "zsh -lic " + JSON.stringify(command);
+}
 
 // ---------- State ----------
 let state = {
@@ -50,6 +64,8 @@ const el = {
   effortPicker: $("effort-picker"),
   attachBoardBtn: $("attach-board-btn"),
   attachedBoardName: $("attached-board-name"),
+  boardChip: $("board-chip"),
+  detachBoardBtn: $("detach-board-btn"),
   chatLog: $("chat-log"),
   chatStatus: $("chat-status"),
   chatForm: $("chat-form"),
@@ -186,11 +202,31 @@ async function detectTools(force = false) {
   if (codexR !== null) fresh.codex = codexR.exitCode === 0 && String(codexR.output || "").trim().length > 0;
   const claudeR = await probe("which claude");
   if (claudeR !== null) fresh.claude = claudeR.exitCode === 0 && String(claudeR.output || "").trim().length > 0;
+
+  // Resolve ollama's absolute path — the sandbox shell has a minimal PATH, so
+  // "which ollama" may fail even though ollama is installed. Try `which`, then
+  // a login shell, then well-known locations.
+  ollamaPath = null;
   const ollamaR = await probe("which ollama");
-  if (ollamaR !== null) fresh.ollama = ollamaR.exitCode === 0 && String(ollamaR.output || "").trim().length > 0;
+  if (ollamaR !== null && ollamaR.exitCode === 0 && String(ollamaR.output || "").trim()) {
+    ollamaPath = String(ollamaR.output).trim().split("\n")[0].trim();
+  }
+  if (!ollamaPath) {
+    const lr = await probe(loginShell("which ollama"));
+    if (lr !== null && lr.exitCode === 0 && String(lr.output || "").trim()) {
+      ollamaPath = String(lr.output).trim().split("\n")[0].trim();
+    }
+  }
+  if (!ollamaPath) {
+    for (const g of OLLAMA_GUESSES) {
+      const tr = await probe("test -x " + JSON.stringify(g) + " && echo ok");
+      if (tr !== null && tr.exitCode === 0 && /ok/.test(String(tr.output))) { ollamaPath = g; break; }
+    }
+  }
+  fresh.ollama = !!ollamaPath;
 
   if (fresh.ollama) {
-    const listR = await probe("ollama list");
+    const listR = await probe(JSON.stringify(ollamaPath) + " list");
     if (listR !== null && listR.exitCode === 0) {
       fresh.models = parseOllamaModels(listR.output);
     }
@@ -448,34 +484,30 @@ async function toolHandler(name, args) {
 }
 
 // ---------- Spawn modal (the heart: ask the user every time) ----------
+// "ollama launch <tool>" starts an agent CLI (claude, codex, …) and opens its
+// OWN interactive model picker inside the terminal — so we don't pass a model.
 function buildCliOptions() {
   const opts = [];
   const push = (value, label, detected) => {
     opts.push({ value, label: detected ? label : label + " (not detected)" });
   };
-  push("ollama", "ollama run <model>", detection.ollama);
-  push("codex", "codex", detection.codex);
-  push("claude", "claude", detection.claude);
+  push("claude", "ollama launch claude  (Claude Code)", detection.ollama);
+  push("codex", "ollama launch codex  (Codex)", detection.ollama);
+  push("chatgpt", "ollama launch chatgpt  (ChatGPT)", detection.ollama);
+  push("hermes", "ollama launch hermes  (Hermes Agent)", detection.ollama);
+  push("opencode", "ollama launch opencode  (OpenCode)", detection.ollama);
+  push("copilot", "ollama launch copilot  (Copilot CLI)", detection.ollama);
+  // Raw binaries, only if actually installed on PATH.
+  if (detection.claude) push("raw:claude", "claude  (direct binary)", true);
+  if (detection.codex) push("raw:codex", "codex  (direct binary)", true);
   return opts;
 }
 
-function populateSpawnModelSelect(selected) {
-  el.spawnModel.innerHTML = "";
-  const all = (detection.models && detection.models.length ? detection.models : FALLBACK_MODELS);
-  for (const m of all) {
-    const opt = document.createElement("option");
-    opt.value = m;
-    opt.textContent = m;
-    el.spawnModel.appendChild(opt);
-  }
-  if (selected && all.includes(selected)) el.spawnModel.value = selected;
-  else if (all.length) el.spawnModel.value = all[0];
-}
-
 function syncSpawnModelRow() {
-  const isOllama = el.spawnCli.value === "ollama";
-  el.spawnModelRow.classList.toggle("hidden", !isOllama);
-  el.spawnModel.disabled = !isOllama;
+  // "ollama launch <tool>" opens its own model picker inside the terminal, so
+  // there's no separate model dropdown — always hide that row.
+  el.spawnModelRow.classList.add("hidden");
+  el.spawnModel.disabled = true;
 }
 
 /**
@@ -518,14 +550,10 @@ function openSpawnModal(opts) {
       if (!preselectCli && settings.cliDefault && settings.cliDefault !== "ask" && cliOpts.some((o) => o.value === settings.cliDefault)) {
         preselectCli = settings.cliDefault;
       }
-      if (!preselectCli) {
-        if (detection.ollama) preselectCli = "ollama";        // ollama is the default when installed
-        else if (detection.codex) preselectCli = "codex";
-        else if (detection.claude) preselectCli = "claude";
-        else preselectCli = "ollama";                          // nothing detected — still let the user try
+      if (!preselectCli || !cliOpts.some((o) => o.value === preselectCli)) {
+        preselectCli = detection.claude ? "claude" : (detection.codex ? "codex" : (cliOpts[0] ? cliOpts[0].value : "claude"));
       }
       el.spawnCli.value = preselectCli;
-      populateSpawnModelSelect(settings.modelDefault !== "ask" ? settings.modelDefault : null);
       syncSpawnModelRow();
 
       // cwd: tool call > settings default > active project folder
@@ -562,18 +590,15 @@ function closeSpawnModal(choice) {
 async function onSpawnStart() {
   if (!spawnResolve) return;
   const cli = el.spawnCli.value;
-  const model = cli === "ollama" ? el.spawnModel.value : null;
   const cwd = el.spawnCwd.value.trim();
   const prompt = el.spawnPrompt.value.trim();
   const remember = el.spawnRemember.checked;
 
-  if (!cli) { el.spawnStatus.textContent = "Pick a CLI."; return; }
-  if (cli === "ollama" && !model) { el.spawnStatus.textContent = "Pick an ollama model."; return; }
+  if (!cli) { el.spawnStatus.textContent = "Pick what to launch."; return; }
   if (!cwd) { el.spawnStatus.textContent = "Enter a working directory."; return; }
 
   if (remember) {
     settings.cliDefault = cli;
-    settings.modelDefault = cli === "ollama" ? model : "ask";
     settings.cwdDefault = cwd;
     saveSettings();
   }
@@ -581,13 +606,18 @@ async function onSpawnStart() {
   el.spawnStart.disabled = true;
   el.spawnStatus.textContent = "Starting…";
   try {
-    const session = await spawnChosen({ cli, model, cwd, prompt });
+    const session = await spawnChosen({ cli, cwd, prompt });
     if (!session) {
-      el.spawnStatus.textContent = "Terminal permission denied for “" + cli + "”. Approve it in the system prompt and try again, or cancel.";
+      el.spawnStatus.textContent = "Terminal permission denied. Approve it in the system prompt and try again, or cancel.";
       el.spawnStart.disabled = false;
       return; // keep the modal open so the user can retry/cancel
     }
-    closeSpawnModal({ cli, model, cwd, prompt, session });
+    if (session.error) {
+      el.spawnStatus.textContent = session.error;
+      el.spawnStart.disabled = false;
+      return;
+    }
+    closeSpawnModal({ cli, cwd, prompt, session });
   } catch (e) {
     el.spawnStatus.textContent = "Error: " + (e && e.message ? e.message : String(e));
     el.spawnStart.disabled = false;
@@ -599,19 +629,35 @@ function onSpawnCancel() {
 }
 
 async function spawnChosen(choice) {
-  let cmd, args;
-  if (choice.cli === "ollama") {
-    cmd = "ollama";
-    args = ["run", choice.model];
-  } else {
-    cmd = choice.cli;   // codex | claude
+  // choice.cli is either a launch tool ("claude"|"codex"|…) or "raw:<bin>".
+  let cmd, args, label;
+  if (choice.cli.startsWith("raw:")) {
+    const bin = choice.cli.slice(4);
+    cmd = bin;
     args = [];
+    label = bin + " · " + basename(choice.cwd);
+  } else {
+    // ollama launch <tool> — resolve ollama's absolute path (sandbox PATH is minimal).
+    const bin = ollamaPath || "ollama";
+    cmd = bin;
+    args = ["launch", choice.cli];
+    label = choice.cli + " · " + basename(choice.cwd);
   }
-  const session = await window.chatoss.terminal.spawn(cmd, { args, cwd: choice.cwd, cols: 90, rows: 22 });
-  if (!session || !session.id) return null;
-  const label = choice.cli === "ollama"
-    ? "ollama · " + choice.model
-    : choice.cli + " · " + basename(choice.cwd);
+
+  let session = null;
+  try {
+    session = await window.chatoss.terminal.spawn(cmd, { args, cwd: choice.cwd, cols: 90, rows: 22 });
+  } catch (e) {
+    return { error: "Failed to start “" + cmd + "”: " + (e && e.message ? e.message : String(e)) };
+  }
+  if (!session || !session.id) {
+    // spawn returns null when denied. If it failed because the binary wasn't
+    // found, surface that clearly.
+    if (!ollamaPath && !choice.cli.startsWith("raw:")) {
+      return { error: "Could not find ollama. It isn't on PATH in the sandbox — install it or grant terminal permission so detection can locate it." };
+    }
+    return null; // denied
+  }
   registerSession(session.id, cmd, args, choice.cwd, label);
   if (choice.prompt) {
     try { await window.chatoss.terminal.write(session.id, choice.prompt + "\n"); } catch (e) { /* non-fatal */ }
@@ -654,41 +700,18 @@ function renderDetectedList() {
 
 function openSettings() {
   el.setCli.value = settings.cliDefault || "ask";
-  populateSettingsModelSelect(settings.modelDefault !== "ask" ? settings.modelDefault : null);
-  syncSettingsModelRow();
   el.setCwd.value = settings.cwdDefault || "";
   renderDetectedList();
   el.settingsPanel.classList.remove("hidden");
 }
 
-function populateSettingsModelSelect(selected) {
-  el.setModel.innerHTML = "";
-  const ask = document.createElement("option");
-  ask.value = "ask";
-  ask.textContent = "Ask me every time";
-  el.setModel.appendChild(ask);
-  const all = (settings.detected && settings.detected.models && settings.detected.models.length
-    ? settings.detected.models : detection.models && detection.models.length
-      ? detection.models : FALLBACK_MODELS);
-  for (const m of all) {
-    const opt = document.createElement("option");
-    opt.value = m;
-    opt.textContent = m;
-    el.setModel.appendChild(opt);
-  }
-  if (selected && all.includes(selected)) el.setModel.value = selected;
-  else el.setModel.value = "ask";
-}
-
 function syncSettingsModelRow() {
-  const isOllama = el.setCli.value === "ollama";
-  el.setModelRow.classList.toggle("hidden", !isOllama);
-  el.setModel.disabled = !isOllama;
+  // Model is chosen inside the launched terminal — no settings model row.
+  if (el.setModelRow) el.setModelRow.classList.add("hidden");
 }
 
 function saveSettingsFromPanel() {
   settings.cliDefault = el.setCli.value;
-  settings.modelDefault = el.setModel.value || "ask";
   settings.cwdDefault = el.setCwd.value.trim();
   saveSettings();
   el.settingsPanel.classList.add("hidden");
@@ -716,9 +739,10 @@ async function openBoardPicker() {
       btn.style.textAlign = "left";
       btn.onclick = () => {
         c.boardId = b.id;
+        boardNameCache[b.id] = b.name;
         saveState();
         el.boardPicker.classList.add("hidden");
-        renderChat();
+        renderBoardChip();
       };
       el.boardPickerList.appendChild(btn);
     }
@@ -903,23 +927,62 @@ function deleteConversation(p, c) {
   renderChat();
 }
 
+// Resolve a board's display name (cached) so the attached chip shows the real name.
+const boardNameCache = {};
+async function resolveBoardName(boardId) {
+  if (!boardId) return "";
+  if (boardNameCache[boardId]) return boardNameCache[boardId];
+  try {
+    const b = await window.chatoss.boards.get(boardId);
+    const n = b && b.name ? b.name : "Board";
+    boardNameCache[boardId] = n;
+    return n;
+  } catch (e) {
+    return "Board";
+  }
+}
+async function renderBoardChip() {
+  const c = activeConversation();
+  const chip = el.boardChip;
+  if (!chip) return;
+  if (c && c.boardId) {
+    chip.classList.remove("hidden");
+    el.attachedBoardName.textContent = "…";
+    el.attachBoardBtn.classList.add("hidden");
+    const name = await resolveBoardName(c.boardId);
+    // conversation may have changed while awaiting
+    const cur = activeConversation();
+    if (cur && cur.boardId === c.boardId) el.attachedBoardName.textContent = name;
+  } else {
+    chip.classList.add("hidden");
+    el.attachBoardBtn.classList.remove("hidden");
+  }
+}
+function detachBoard() {
+  const c = activeConversation();
+  if (!c) return;
+  c.boardId = null;
+  saveState();
+  renderBoardChip();
+}
+
 // ---------- Render: middle column (chat) ----------
 function renderChat() {
   const c = activeConversation();
   el.chatLog.innerHTML = "";
   if (!c) {
     el.chatTitle.textContent = "Ask the agent";
-    el.attachedBoardName.textContent = "No board";
     el.chatInput.placeholder = "Select or create a conversation…";
     renderModelPicker();
     renderEffortPicker();
+    renderBoardChip();
     return;
   }
   el.chatTitle.textContent = c.name;
-  el.chatInput.placeholder = "Ask the orchestrator to build something… (Enter to send, ⇧Enter for newline)";
-  el.attachedBoardName.textContent = c.boardId ? "Board attached" : "No board";
+  el.chatInput.placeholder = "Ask the orchestrator to build something…";
   renderModelPicker();
   renderEffortPicker();
+  renderBoardChip();
 
   for (const m of c.messages) {
     renderMessage(m);
@@ -999,7 +1062,7 @@ async function buildSystemPrompt() {
   const p = getProject(state.activeProjectId);
   let sys = [
     "You are Term Code, an autonomous software-building orchestrator (like a coding agent).",
-    "You build software by spawning sub-agent CLI sessions (ollama run <model>, codex, or claude) inside git worktrees, reading Kanban board tasks, and marking cards done when work is complete.",
+    "You build software by spawning sub-agent CLI sessions (via `ollama launch <tool>` — e.g. claude, codex) inside git worktrees, reading Kanban board tasks, and marking cards done when work is complete.",
     "",
     "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
     "",
@@ -1378,6 +1441,7 @@ async function init() {
 
   // middle column
   el.attachBoardBtn.addEventListener("click", openBoardPicker);
+  if (el.detachBoardBtn) el.detachBoardBtn.addEventListener("click", detachBoard);
   el.chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
     if (running) { if (abortController) abortController.abort(); return; }

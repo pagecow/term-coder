@@ -40,8 +40,12 @@
         <div class="chat-title-right">
           <select id="model-picker" class="pill-select" aria-label="Model" title="Chat model"></select>
           <select id="effort-picker" class="pill-select hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
-          <button id="attach-board-btn" class="btn btn-ghost btn-small" type="button" title="Attach a Kanban board">Board</button>
-          <span id="attached-board-name" class="attached-board-name" title="Attached board"></span>
+          <span id="board-chip" class="board-chip hidden" title="Attached Kanban board">
+            <span class="board-chip-icon">▦</span>
+            <span id="attached-board-name" class="board-chip-name"></span>
+            <button id="detach-board-btn" class="board-chip-x" type="button" title="Detach board" aria-label="Detach board">&times;</button>
+          </span>
+          <button id="attach-board-btn" class="btn btn-ghost btn-small" type="button" title="Attach a Kanban board">▦ Board</button>
         </div>
       </header>
 
@@ -147,15 +151,18 @@
         <h3 class="settings-section-title">Defaults</h3>
         <p class="modal-hint">Defaults pre-fill the spawn modal — it always appears and you can change anything before starting.</p>
         <label class="form-row">
-          <span class="form-label">Default CLI</span>
+          <span class="form-label">Default agent</span>
           <select id="set-cli" class="form-input">
             <option value="ask">Ask me every time</option>
-            <option value="ollama">ollama run</option>
-            <option value="codex">codex</option>
-            <option value="claude">claude</option>
+            <option value="claude">ollama launch claude (Claude Code)</option>
+            <option value="codex">ollama launch codex (Codex)</option>
+            <option value="chatgpt">ollama launch chatgpt (ChatGPT)</option>
+            <option value="hermes">ollama launch hermes (Hermes)</option>
+            <option value="opencode">ollama launch opencode (OpenCode)</option>
+            <option value="copilot">ollama launch copilot (Copilot)</option>
           </select>
         </label>
-        <label class="form-row" id="set-model-row">
+        <label class="form-row hidden" id="set-model-row">
           <span class="form-label">Default model</span>
           <select id="set-model" class="form-input"></select>
         </label>
