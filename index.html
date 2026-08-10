@@ -16,115 +16,109 @@
         <strong>Term Code</strong>
       </div>
       <div class="topbar-actions">
+        <button id="new-session-btn" class="btn btn-primary btn-small" type="button" title="Start a new sub-agent session">+ Session</button>
         <button id="settings-btn" class="icon-button" type="button" title="Settings" aria-label="Settings">⚙</button>
       </div>
     </header>
 
-    <!-- COLUMN 1 — Projects (left sidebar) -->
+    <!-- COLUMN 1 — Projects -->
     <aside class="col-projects pane">
       <header class="pane-titlebar">
-        <div>
-          <span class="eyebrow">Projects</span>
-          <strong>Workspaces</strong>
-        </div>
-        <div class="titlebar-actions">
-          <button id="new-project-btn" class="btn btn-primary btn-small" type="button">+ Project</button>
-        </div>
+        <span class="pane-label">Projects</span>
+        <button id="new-project-btn" class="icon-button" type="button" title="New project" aria-label="New project">+</button>
       </header>
-      <nav id="project-list" class="project-list" aria-label="Projects">
-        <!-- app.js fills this with .project-item elements -->
-      </nav>
+      <nav id="project-list" class="project-list" aria-label="Projects"></nav>
     </aside>
 
-    <!-- COLUMN 2 — Orchestrator chat (middle) -->
+    <!-- COLUMN 2 — Orchestrator chat -->
     <section class="col-chat pane">
       <header class="pane-titlebar chat-titlebar">
         <div class="chat-title-left">
-          <span class="eyebrow">Orchestrator</span>
-          <strong id="chat-title">Ask the agent</strong>
+          <span class="pane-label">Orchestrator</span>
+          <strong id="chat-title" class="chat-title">New conversation</strong>
         </div>
         <div class="chat-title-right">
-          <select id="model-picker" class="model-picker" aria-label="Model" title="Chat model"></select>
-          <select id="effort-picker" class="effort-picker hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
-          <button id="attach-board-btn" class="btn btn-small" type="button" title="Attach a Kanban board">Board</button>
-          <span id="attached-board-name" class="attached-board-name" title="Attached board">No board</span>
+          <select id="model-picker" class="pill-select" aria-label="Model" title="Chat model"></select>
+          <select id="effort-picker" class="pill-select hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
+          <button id="attach-board-btn" class="btn btn-ghost btn-small" type="button" title="Attach a Kanban board">Board</button>
+          <span id="attached-board-name" class="attached-board-name" title="Attached board"></span>
         </div>
       </header>
 
-      <div id="chat-log" class="chat-log" aria-live="polite">
-        <!-- app.js fills this with .msg rows -->
-      </div>
+      <div id="chat-log" class="chat-log" aria-live="polite"></div>
 
       <div id="chat-status" class="chat-status" aria-live="polite"></div>
 
-      <form id="chat-form" class="chat-form">
-        <textarea id="chat-input" class="chat-input" placeholder="Ask the orchestrator to build something… (Enter to send, ⇧Enter for newline)" rows="2"></textarea>
-        <button id="send-btn" type="submit" class="btn btn-primary send-button">Send</button>
-      </form>
+      <div class="composer-wrap">
+        <form id="chat-form" class="composer">
+          <textarea id="chat-input" class="composer-input" placeholder="Message the orchestrator…" rows="1"></textarea>
+          <button id="send-btn" type="submit" class="composer-send" title="Send" aria-label="Send">
+            <span class="send-icon">↑</span>
+            <span class="stop-icon hidden">■</span>
+          </button>
+        </form>
+        <div class="composer-hint">Enter to send · ⇧Enter for newline</div>
+      </div>
 
       <div id="session-info" class="session-info"></div>
     </section>
 
-    <!-- COLUMN 3 — Terminal squares (right) -->
+    <!-- COLUMN 3 — Terminal grid -->
     <section class="col-terminals pane">
       <header class="pane-titlebar">
-        <div>
-          <span class="eyebrow">Terminals</span>
-          <strong>Sessions</strong>
+        <div class="term-title-left">
+          <span class="pane-label">Sessions</span>
+          <span id="term-count" class="term-count">0</span>
         </div>
-        <button id="new-session-btn" class="btn btn-primary btn-small" type="button" title="Start a new session">+ New session</button>
+        <button id="new-session-btn-2" class="btn btn-ghost btn-small" type="button" title="Start a new session">+ New</button>
       </header>
 
-      <form id="manual-session-form" class="manual-session-form">
-        <select id="manual-cli" class="form-input manual-cli" aria-label="CLI" title="CLI"></select>
-        <input id="manual-cwd" class="form-input manual-cwd" type="text" placeholder="Working directory" title="Working directory" />
-        <button id="manual-start-btn" class="btn btn-primary btn-small" type="submit">Start</button>
-      </form>
-
-      <div id="term-tabs" class="term-tabs"></div>
-
-      <div id="term-host" class="term-host">
-        <div class="term-empty">No active sessions. Click “+ New session” or ask the orchestrator to spawn one.</div>
+      <div id="term-grid" class="term-grid">
+        <div class="term-empty" id="term-empty">
+          <div class="term-empty-glyph">▮</div>
+          <p>No active sessions.</p>
+          <p class="term-empty-sub">Click <strong>+ New</strong> or ask the orchestrator to build something.</p>
+        </div>
       </div>
     </section>
 
   </main>
 
-  <!-- SPAWN MODAL — the user always decides what runs -->
+  <!-- SPAWN MODAL -->
   <div id="spawn-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="spawn-title">
     <div class="modal-backdrop" data-close="spawn"></div>
     <div class="modal-card">
       <header class="modal-header">
-        <strong id="spawn-title">Start sub-agent session</strong>
+        <strong id="spawn-title">New session</strong>
         <button id="spawn-cancel-x" class="icon-button" type="button" title="Cancel" aria-label="Cancel">&times;</button>
       </header>
       <div class="modal-body">
-        <p class="settings-hint">You are always in control — pick what to run, then Start. This choice is never made for you.</p>
+        <p class="modal-hint">You're in control — pick what to run, then Start.</p>
         <label class="form-row">
           <span class="form-label">CLI</span>
           <select id="spawn-cli" class="form-input"></select>
         </label>
         <label class="form-row" id="spawn-model-row">
-          <span class="form-label">Model (ollama)</span>
+          <span class="form-label">Model</span>
           <select id="spawn-model" class="form-input"></select>
         </label>
         <label class="form-row">
-          <span class="form-label">Task prompt</span>
-          <textarea id="spawn-prompt" class="form-input" rows="3" placeholder="Optional prompt written to the session's stdin after spawn…"></textarea>
+          <span class="form-label">Working directory</span>
+          <input id="spawn-cwd" class="form-input" type="text" placeholder="/path/to/project or worktree" />
         </label>
         <label class="form-row">
-          <span class="form-label">Working directory</span>
-          <input id="spawn-cwd" class="form-input" type="text" placeholder="e.g. /path/to/project or a worktree path" />
+          <span class="form-label">Task</span>
+          <textarea id="spawn-prompt" class="form-input" rows="3" placeholder="What should this agent work on?"></textarea>
         </label>
         <label class="form-row form-row-inline">
           <input id="spawn-remember" type="checkbox" />
-          <span>Remember these choices for next time</span>
+          <span>Remember as defaults</span>
         </label>
         <div id="spawn-status" class="modal-status"></div>
       </div>
       <footer class="modal-footer">
-        <button id="spawn-cancel" class="btn" type="button">Cancel</button>
-        <button id="spawn-start" class="btn btn-primary" type="button">Start</button>
+        <button id="spawn-cancel" class="btn btn-ghost" type="button">Cancel</button>
+        <button id="spawn-start" class="btn btn-primary" type="button">Start session</button>
       </footer>
     </div>
   </div>
@@ -134,16 +128,14 @@
     <div class="modal-backdrop" data-close="board"></div>
     <div class="modal-card">
       <header class="modal-header">
-        <strong id="board-picker-title">Attach Kanban board</strong>
+        <strong id="board-picker-title">Attach board</strong>
         <button id="board-picker-x" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button>
       </header>
-      <div class="modal-body" id="board-picker-list">
-        <!-- filled by app.js -->
-      </div>
+      <div class="modal-body" id="board-picker-list"></div>
     </div>
   </div>
 
-  <!-- SETTINGS PANEL -->
+  <!-- SETTINGS -->
   <div id="settings-panel" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-backdrop" data-close="settings"></div>
     <div class="modal-card">
@@ -153,7 +145,7 @@
       </header>
       <div class="modal-body">
         <h3 class="settings-section-title">Defaults</h3>
-        <p class="settings-hint">Defaults only pre-fill the spawn modal — the modal always appears and you can always change everything before starting.</p>
+        <p class="modal-hint">Defaults pre-fill the spawn modal — it always appears and you can change anything before starting.</p>
         <label class="form-row">
           <span class="form-label">Default CLI</span>
           <select id="set-cli" class="form-input">
@@ -164,7 +156,7 @@
           </select>
         </label>
         <label class="form-row" id="set-model-row">
-          <span class="form-label">Default model (ollama)</span>
+          <span class="form-label">Default model</span>
           <select id="set-model" class="form-input"></select>
         </label>
         <label class="form-row">
@@ -173,20 +165,25 @@
         </label>
         <div class="settings-actions">
           <button id="settings-save" class="btn btn-primary" type="button">Save</button>
-          <button id="settings-cancel" class="btn" type="button">Cancel</button>
+          <button id="settings-cancel" class="btn btn-ghost" type="button">Cancel</button>
         </div>
 
         <h3 class="settings-section-title">Detected tools</h3>
         <div id="detected-list" class="detected-list">
           <div class="detected-scanning">Scanning…</div>
         </div>
-        <button id="rescan-btn" class="btn btn-small" type="button">Re-scan</button>
-        <p class="settings-hint">Detection uses the terminal API (runs which / ollama list). If nothing is detected, check that terminal permission is granted.</p>
+        <button id="rescan-btn" class="btn btn-ghost btn-small" type="button">Re-scan</button>
+        <p class="modal-hint">Detection runs <code>which</code> / <code>ollama list</code> via the terminal API.</p>
       </div>
     </div>
   </div>
 
-  <div id="app-loading" class="app-loading">Loading…</div>
+  <div id="app-loading" class="app-loading">
+    <div class="app-loading-inner">
+      <span class="topbar-mark">▮</span>
+      <span>Term Code</span>
+    </div>
+  </div>
 
   <script type="module" src="app.js"></script>
 </body>

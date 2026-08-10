@@ -55,15 +55,16 @@ const el = {
   chatForm: $("chat-form"),
   chatInput: $("chat-input"),
   sendBtn: $("send-btn"),
+  sendIcon: document.querySelector("#send-btn .send-icon"),
+  stopIcon: document.querySelector("#send-btn .stop-icon"),
   chatTitle: $("chat-title"),
   sessionInfo: $("session-info"),
   // right
   newSessionBtn: $("new-session-btn"),
-  manualForm: $("manual-session-form"),
-  manualCli: $("manual-cli"),
-  manualCwd: $("manual-cwd"),
-  termTabs: $("term-tabs"),
-  termHost: $("term-host"),
+  newSessionBtn2: $("new-session-btn-2"),
+  termCount: $("term-count"),
+  termGrid: $("term-grid"),
+  termEmpty: $("term-empty"),
   // spawn modal
   spawnModal: $("spawn-modal"),
   spawnCli: $("spawn-cli"),
@@ -527,10 +528,9 @@ function openSpawnModal(opts) {
       populateSpawnModelSelect(settings.modelDefault !== "ask" ? settings.modelDefault : null);
       syncSpawnModelRow();
 
-      // cwd: tool call > settings default > active project folder > manual form
+      // cwd: tool call > settings default > active project folder
       let cwd = (opts.cwd || "").trim();
       if (!cwd) cwd = (settings.cwdDefault || "").trim();
-      if (!cwd && el.manualCwd.value.trim()) cwd = el.manualCwd.value.trim();
       if (!cwd) {
         const p = getProject(state.activeProjectId);
         cwd = p ? p.folderPath : "";
@@ -1038,8 +1038,11 @@ async function buildSystemPrompt() {
 // ---------- Send message ----------
 function setRunning(r) {
   running = r;
-  el.sendBtn.textContent = r ? "Stop" : "Send";
   el.sendBtn.classList.toggle("is-running", r);
+  el.sendBtn.title = r ? "Stop" : "Send";
+  el.sendBtn.setAttribute("aria-label", r ? "Stop" : "Send");
+  if (el.sendIcon) el.sendIcon.classList.toggle("hidden", r);
+  if (el.stopIcon) el.stopIcon.classList.toggle("hidden", !r);
   el.chatInput.disabled = r;
 }
 
@@ -1171,30 +1174,19 @@ async function sendMessage() {
   }
 }
 
-// ---------- Right column: terminal squares ----------
+// ---------- Right column: terminal grid ----------
 function ensureEmptyHint() {
-  let hint = el.termHost.querySelector(".term-empty");
-  if (!hint) {
-    hint = document.createElement("div");
-    hint.className = "term-empty";
-    hint.textContent = "No active sessions. Click “+ New session” or ask the orchestrator to spawn one.";
-    el.termHost.appendChild(hint);
-  }
-  hint.style.display = sessions.size ? "none" : "";
+  if (el.termEmpty) el.termEmpty.style.display = sessions.size ? "none" : "";
+  if (el.termCount) el.termCount.textContent = String(sessions.size);
 }
 
 function renderTabs() {
-  el.termTabs.innerHTML = "";
-  if (!sessions.size) return;
+  // Grid layout — no tab bar. Keep the active square visually marked and the
+  // count badge in sync. (Name kept so existing call sites don't change.)
   for (const rec of sessions.values()) {
-    const tab = document.createElement("button");
-    tab.type = "button";
-    tab.className = "term-tab" + (rec.id === state.activeSessionId ? " active" : "") + (rec.active ? "" : " exited");
-    tab.textContent = rec.label;
-    tab.title = rec.label + " @ " + rec.cwd;
-    tab.onclick = () => selectSession(rec.id);
-    el.termTabs.appendChild(tab);
+    rec.squareEl.classList.toggle("active", rec.id === state.activeSessionId);
   }
+  if (el.termCount) el.termCount.textContent = String(sessions.size);
 }
 
 function selectSession(id) {
@@ -1220,6 +1212,10 @@ function registerSession(id, cmd, args, cwd, label) {
   const lab = document.createElement("span");
   lab.className = "term-label";
   lab.textContent = label;
+  const cwdEl = document.createElement("span");
+  cwdEl.className = "term-cwd";
+  cwdEl.textContent = basename(cwd);
+  cwdEl.title = cwd;
   const expandBtn = document.createElement("button");
   expandBtn.className = "term-head-btn";
   expandBtn.type = "button";
@@ -1233,6 +1229,7 @@ function registerSession(id, cmd, args, cwd, label) {
 
   header.appendChild(dot);
   header.appendChild(lab);
+  header.appendChild(cwdEl);
   header.appendChild(expandBtn);
   header.appendChild(closeBtn);
 
@@ -1241,7 +1238,12 @@ function registerSession(id, cmd, args, cwd, label) {
 
   square.appendChild(header);
   square.appendChild(mountEl);
-  el.termHost.appendChild(square);
+  // insert before the empty-state card so the grid stays clean
+  if (el.termEmpty && el.termEmpty.parentNode === el.termGrid) el.termGrid.insertBefore(square, el.termEmpty);
+  else el.termGrid.appendChild(square);
+
+  // clicking a square selects it
+  square.addEventListener("click", () => selectSession(id));
 
   const rec = { id, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false };
   sessions.set(id, rec);
@@ -1389,17 +1391,14 @@ async function init() {
     }
   });
 
-  // right column — manual start goes through the SAME spawn modal
-  el.newSessionBtn.addEventListener("click", () => {
+  // right column — both "new session" buttons open the SAME spawn modal
+  const openManualSpawn = () => {
     openSpawnModal({ source: "manual" }).then((choice) => {
-      if (!choice) return; // cancelled
-      // session already started + mounted inside onSpawnStart; nothing else to do
+      if (!choice) return; // cancelled — session already started inside onSpawnStart
     });
-  });
-  el.manualForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    openSpawnModal({ source: "manual", cliHint: el.manualCli.value, cwd: el.manualCwd.value.trim() });
-  });
+  };
+  el.newSessionBtn.addEventListener("click", openManualSpawn);
+  if (el.newSessionBtn2) el.newSessionBtn2.addEventListener("click", openManualSpawn);
 
   // spawn modal
   el.spawnCli.addEventListener("change", syncSpawnModelRow);
@@ -1452,17 +1451,6 @@ async function init() {
     }, 120);
   });
 
-  // manual CLI select mirrors detection
-  el.manualCli.innerHTML = "";
-  const cliOpts = buildCliOptions();
-  for (const o of cliOpts) {
-    const opt = document.createElement("option");
-    opt.value = o.value;
-    opt.textContent = o.label;
-    el.manualCli.appendChild(opt);
-  }
-  el.manualCli.value = detection.ollama ? "ollama" : (detection.codex ? "codex" : (detection.claude ? "claude" : "ollama"));
-
   // initial render
   renderProjects();
   renderChat();
@@ -1475,16 +1463,7 @@ async function init() {
 
   // auto-detection at startup (non-blocking; cached 60s). If terminal is
   // denied, everything degrades to "ask" mode — no crash.
-  detectTools(true).then(() => {
-    // refresh the manual CLI select + settings list once real results land
-    el.manualCli.innerHTML = "";
-    for (const o of buildCliOptions()) {
-      const opt = document.createElement("option");
-      opt.value = o.value;
-      opt.textContent = o.label;
-      el.manualCli.appendChild(opt);
-    }
-  }).catch((e) => console.warn("detect", e));
+  detectTools(true).catch((e) => console.warn("detect", e));
 }
 
 init().catch((e) => {
