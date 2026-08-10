@@ -1160,11 +1160,13 @@ async function buildSystemPrompt() {
     "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
     "",
     "Workflow:",
-    "1. Inspect the project with list_project_files({}) and get_current_git_branch({}).",
+    "1. Quickly inspect with list_project_files({}) and get_current_git_branch({}) — do this ONCE, don't loop.",
     "2. Create an isolated git worktree with create_worktree({}) for the work (returns a path).",
-    "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }). The user approves and picks the CLI/model; the agent starts in a terminal square.",
-    "4. Drive the session with send_to_session({ sessionId, text }) as needed.",
-    "5. Read the attached Kanban board with get_board({}), pick the next card, and when finished call update_card({ cardId, done:true }).",
+    "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }) to SPIN UP A CODING AGENT in a terminal. The user approves and picks the CLI/model. This is the main way work gets done — the sub-agent writes the code, not you.",
+    "4. Drive the running session with send_to_session({ sessionId, text }).",
+    "5. Read the attached Kanban board with get_board({}), and when a task is finished call update_card({ cardId, done:true }).",
+    "",
+    "ACT, don't just explore. When the user asks you to build or change something, your job is to SPIN UP one or more coding agents (start_cli_session) to do the work in their own terminals — then coordinate them. Don't try to write all the code yourself in chat; delegate it to sub-agents.",
     "",
   ];
   if (p) {
