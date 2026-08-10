@@ -819,9 +819,82 @@ function renderProjects() {
     }
 
     item.appendChild(convList);
+
+    // File tree (only for the selected project) — toggle with the ▸ triangle
+    if (p.id === state.activeProjectId) {
+      const filesWrap = document.createElement("div");
+      filesWrap.className = "file-tree";
+      renderFileTree(p, filesWrap);
+      item.appendChild(filesWrap);
+    }
+
     name.onclick = () => selectProject(p.id);
     el.projectList.appendChild(item);
   }
+}
+
+// ---------- File tree (terminal 'ls' — files.listDir does not exist) ----------
+const fileTreeCache = new Map(); // projectPath -> { ts, lines }
+async function renderFileTree(project, container) {
+  container.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "file-tree-head";
+  head.innerHTML = '<span class="file-tree-title">Files</span>';
+  const refresh = document.createElement("button");
+  refresh.className = "btn-icon";
+  refresh.title = "Refresh";
+  refresh.textContent = "⟳";
+  refresh.onclick = (e) => { e.stopPropagation(); fileTreeCache.delete(project.folderPath); renderFileTree(project, container); };
+  head.appendChild(refresh);
+  container.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "file-tree-body";
+  body.innerHTML = '<div class="file-tree-loading">Loading…</div>';
+  container.appendChild(body);
+
+  const cached = fileTreeCache.get(project.folderPath);
+  if (cached && Date.now() - cached.ts < 30000) { paintFileTree(body, cached.lines); return; }
+
+  let res = null;
+  try {
+    res = await window.chatoss.terminal.exec(
+      loginShell('ls -Ap | grep -v "^\\.git/" | head -60'),
+      { cwd: project.folderPath, timeoutMs: 8000 }
+    );
+  } catch (e) { res = null; }
+  if (!res) {
+    body.innerHTML = '<div class="file-tree-loading">Terminal permission needed to list files.</div>';
+    return;
+  }
+  const lines = (res.output || "").split("\n").map(s => s.trim()).filter(Boolean);
+  fileTreeCache.set(project.folderPath, { ts: Date.now(), lines });
+  paintFileTree(body, lines);
+}
+
+function paintFileTree(body, lines) {
+  body.innerHTML = "";
+  if (!lines.length) { body.innerHTML = '<div class="file-tree-loading">Empty folder</div>'; return; }
+  for (const line of lines) {
+    const isDir = line.endsWith("/");
+    const row = document.createElement("div");
+    row.className = "file-row" + (isDir ? " is-dir" : "");
+    const icon = document.createElement("span");
+    icon.className = "file-icon";
+    icon.textContent = isDir ? "▸" : fileIcon(line);
+    const nm = document.createElement("span");
+    nm.className = "file-name";
+    nm.textContent = isDir ? line.slice(0, -1) : line;
+    row.appendChild(icon);
+    row.appendChild(nm);
+    body.appendChild(row);
+  }
+}
+
+function fileIcon(name) {
+  const ext = name.split(".").pop().toLowerCase();
+  const map = { js:"JS", ts:"TS", json:"{}", html:"<>", css:"#", md:"M↓", svg:"◈", png:"▦", jpg:"▦", txt:"≡" };
+  return map[ext] || "·";
 }
 
 // Inline rename (no window.prompt — blocked in the sandbox)
