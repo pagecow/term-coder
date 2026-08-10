@@ -149,18 +149,22 @@ function defaultCwd() {
 }
 function setStatus(t) { el.chatStatus.textContent = t || ""; }
 
-// Normalize a tool call delivered by runTurn's onToolCall. The engine may pass
-// { name, arguments: "…json…" } (OpenAI-style) or { name, args: {…} } — handle both.
+// Normalize a tool call delivered by runTurn's onToolCall. The documented shape is
+// { function: { name, arguments } } where arguments is ALREADY an object — but some
+// engines pass { name, args } or { name, arguments: "<json string>" }. Handle all.
 function normalizeToolCall(call) {
   call = call || {};
-  const name = call.name || call.function?.name || "unknown";
+  const fn = call.function || {};
+  const name = call.name || fn.name || "unknown";
   let args = {};
-  if (call.args && typeof call.args === "object" && !Array.isArray(call.args)) {
-    args = call.args;
-  } else if (typeof call.arguments === "string") {
-    try { args = JSON.parse(call.arguments); } catch (e) { args = {}; }
-  } else if (call.arguments && typeof call.arguments === "object") {
-    args = call.arguments;
+  const candidates = [call.args, call.arguments, fn.arguments, fn.args];
+  for (const cand of candidates) {
+    if (cand == null) continue;
+    if (typeof cand === "string") {
+      try { const parsed = JSON.parse(cand); if (parsed && typeof parsed === "object") { args = parsed; break; } } catch (e) { /* try next */ }
+    } else if (typeof cand === "object" && !Array.isArray(cand)) {
+      args = cand; break;
+    }
   }
   return { name, args };
 }
@@ -252,11 +256,11 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "create_worktree",
-      description: "Create a git worktree (an isolated working directory on a new branch) inside the project's .chatoss/worktrees folder. Returns the worktree path.",
+      description: "Create a git worktree (an isolated working directory on a new branch) inside the project's .chatoss/worktrees folder. Returns the worktree path. Uses the active project unless projectId is given.",
       parameters: {
         type: "object",
         properties: {
-          projectId: { type: "string", description: "The project id to create the worktree in." },
+          projectId: { type: "string", description: "Optional. Defaults to the active project." },
           branchName: { type: "string", description: "Optional branch name. Defaults to worktree-<timestamp>." },
         },
       },
@@ -266,14 +270,13 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "start_cli_session",
-      description: "Ask the user to start a new sub-agent CLI session (ollama run / codex / claude) in a working directory. The USER decides the CLI and model in a confirmation dialog — call this when you need an agent shell to work in, then wait for the returned session id.",
+      description: "Ask the user to start a new sub-agent CLI session (ollama launch claude / codex, etc.) in a working directory. The USER decides the CLI and model in a confirmation dialog — call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder.",
       parameters: {
         type: "object",
         properties: {
-          cwd: { type: "string", description: "Working directory for the session (a project path or a worktree path)." },
+          cwd: { type: "string", description: "Working directory for the session (a project path or a worktree path). Defaults to the active project folder." },
           taskPrompt: { type: "string", description: "Optional initial task to send to the CLI's stdin after it starts." },
         },
-        required: ["cwd"],
       },
     },
   },
@@ -296,11 +299,10 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "list_project_files",
-      description: "List the files in a project's working directory (ls -la). Returns the directory listing.",
+      description: "List the files in the project's working directory (ls -la). Uses the active project unless projectId is given. Returns the directory listing.",
       parameters: {
         type: "object",
-        properties: { projectId: { type: "string" } },
-        required: ["projectId"],
+        properties: { projectId: { type: "string", description: "Optional. Defaults to the active project." } },
       },
     },
   },
@@ -316,11 +318,10 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "get_board",
-      description: "Fetch a Kanban board's full contents (columns and cards). Returns JSON.",
+      description: "Fetch the attached Kanban board's full contents (columns and cards). Defaults to the conversation's attached board; pass boardId only to read a different one. Returns JSON.",
       parameters: {
         type: "object",
-        properties: { boardId: { type: "string" } },
-        required: ["boardId"],
+        properties: { boardId: { type: "string", description: "Optional. Defaults to the attached board." } },
       },
     },
   },
@@ -328,15 +329,15 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "move_card",
-      description: "Move a Kanban card to a different column.",
+      description: "Move a Kanban card to a different column on the attached board (boardId defaults to the attached board).",
       parameters: {
         type: "object",
         properties: {
-          boardId: { type: "string" },
+          boardId: { type: "string", description: "Optional. Defaults to the attached board." },
           cardId: { type: "string" },
           toColumnId: { type: "string" },
         },
-        required: ["boardId", "cardId", "toColumnId"],
+        required: ["cardId", "toColumnId"],
       },
     },
   },
@@ -344,17 +345,17 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "update_card",
-      description: "Update a Kanban card's title/description or mark it done. When done is true, the card is completed, moved to the Done column, and the user gets a notification.",
+      description: "Update a Kanban card's title/description or mark it done on the attached board (boardId defaults to the attached board). When done is true, the card is completed, moved to the Done column, and the user gets a notification.",
       parameters: {
         type: "object",
         properties: {
-          boardId: { type: "string" },
+          boardId: { type: "string", description: "Optional. Defaults to the attached board." },
           cardId: { type: "string" },
           done: { type: "boolean", description: "Mark the card complete (moves it to Done + notification)." },
           title: { type: "string" },
           description: { type: "string" },
         },
-        required: ["boardId", "cardId"],
+        required: ["cardId"],
       },
     },
   },
@@ -362,28 +363,38 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "get_current_git_branch",
-      description: "Return the current git branch name of a project.",
+      description: "Return the current git branch name of the project (active project unless projectId is given).",
       parameters: {
         type: "object",
-        properties: { projectId: { type: "string" } },
-        required: ["projectId"],
+        properties: { projectId: { type: "string", description: "Optional. Defaults to the active project." } },
       },
     },
   },
 ];
 
 // ---------- Tool handlers (async, always return a string) ----------
+// Resolve the project the model means: the id it passed, else the ACTIVE project.
+// This makes tools work even when the model calls them with {} (the common case).
+function resolveProject(args) {
+  return getProject(args && args.projectId) || getProject(state.activeProjectId) || state.projects[0] || null;
+}
+// Resolve the board the model means: the id it passed, else the conversation's attached board.
+function resolveBoardId(args) {
+  const c = activeConversation();
+  return (args && args.boardId) || (c && c.boardId) || null;
+}
+
 async function toolHandler(name, args) {
   args = args || {};
   try {
     switch (name) {
       case "create_worktree": {
-        const p = getProject(args.projectId);
-        if (!p) return "Error: project not found";
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
         const branch = args.branchName || "worktree-" + Date.now();
         const wtPath = p.folderPath.replace(/\/+$/, "") + "/.chatoss/worktrees/" + branch;
         const r = await window.chatoss.terminal.exec(
-          `git worktree add "${wtPath}" -b "${branch}"`,
+          loginShell(`git worktree add "${wtPath}" -b "${branch}"`),
           { cwd: p.folderPath }
         );
         if (r === null) return "Error: terminal permission denied (approve git to continue)";
@@ -393,9 +404,14 @@ async function toolHandler(name, args) {
       case "start_cli_session": {
         // The USER decides the CLI + model in the spawn modal. The tool WAITS
         // on a promise that resolves when the user hits Start or Cancel.
+        let cwd = (args.cwd || "").trim();
+        if (!cwd) {
+          const p = resolveProject(args);
+          cwd = p ? p.folderPath : "";
+        }
         const choice = await openSpawnModal({
           source: "tool",
-          cwd: args.cwd || "",
+          cwd,
           prompt: args.taskPrompt || "",
         });
         if (!choice) {
@@ -408,7 +424,7 @@ async function toolHandler(name, args) {
       }
       case "send_to_session": {
         const s = sessions.get(args.sessionId);
-        if (!s) return "Error: session not found";
+        if (!s) return "Error: session not found. Live session ids: " + [...sessions.keys()].join(", ");
         try {
           await window.chatoss.terminal.write(args.sessionId, args.text + "\n");
         } catch (e) {
@@ -417,9 +433,9 @@ async function toolHandler(name, args) {
         return "ok";
       }
       case "list_project_files": {
-        const p = getProject(args.projectId);
-        if (!p) return "Error: project not found";
-        const r = await window.chatoss.terminal.exec("ls -la", { cwd: p.folderPath });
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const r = await window.chatoss.terminal.exec(loginShell("ls -la"), { cwd: p.folderPath });
         if (r === null) return "Error: terminal permission denied";
         return r.output || "(empty)";
       }
@@ -432,35 +448,41 @@ async function toolHandler(name, args) {
         }
       }
       case "get_board": {
+        const bid = resolveBoardId(args);
+        if (!bid) return "Error: no board attached to this conversation. Use list_boards, or ask the user to attach one.";
         try {
-          const b = await window.chatoss.boards.get(args.boardId);
+          const b = await window.chatoss.boards.get(bid);
           return JSON.stringify(b);
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
       }
       case "move_card": {
+        const bid = resolveBoardId(args);
+        if (!bid) return "Error: no board attached to this conversation.";
         try {
-          await window.chatoss.boards.moveCard(args.boardId, args.cardId, args.toColumnId);
+          await window.chatoss.boards.moveCard(bid, args.cardId, args.toColumnId);
           return "ok";
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
       }
       case "update_card": {
+        const bid = resolveBoardId(args);
+        if (!bid) return "Error: no board attached to this conversation.";
         const patch = {};
         if (args.done !== undefined && args.done !== null) patch.done = args.done;
         if (args.title !== undefined && args.title !== null) patch.title = args.title;
         if (args.description !== undefined && args.description !== null) patch.description = args.description;
         try {
-          await window.chatoss.boards.updateCard(args.boardId, args.cardId, patch);
+          await window.chatoss.boards.updateCard(bid, args.cardId, patch);
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
         if (patch.done === true) {
           let body = "Card marked complete.";
           try {
-            const b = await window.chatoss.boards.get(args.boardId);
+            const b = await window.chatoss.boards.get(bid);
             const card = b && b.cards ? b.cards.find((c) => c.id === args.cardId) : null;
             if (card && card.title) body = card.title;
           } catch (e) { /* non-fatal */ }
@@ -469,9 +491,9 @@ async function toolHandler(name, args) {
         return "ok";
       }
       case "get_current_git_branch": {
-        const p = getProject(args.projectId);
-        if (!p) return "Error: project not found";
-        const r = await window.chatoss.terminal.exec("git branch --show-current", { cwd: p.folderPath });
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const r = await window.chatoss.terminal.exec(loginShell("git branch --show-current"), { cwd: p.folderPath });
         if (r === null) return "Error: terminal permission denied";
         return (r.output || "").trim() || "(no branch)";
       }
@@ -630,35 +652,31 @@ function onSpawnCancel() {
 
 async function spawnChosen(choice) {
   // choice.cli is either a launch tool ("claude"|"codex"|…) or "raw:<bin>".
-  let cmd, args, label;
+  // ALWAYS spawn through a login shell so `ollama` (and any user-installed CLI)
+  // resolves on the full PATH — the sandboxed default shell has a minimal PATH,
+  // which is exactly what caused "Unable to spawn ollama … not found in PATH".
+  let inner, label;
   if (choice.cli.startsWith("raw:")) {
     const bin = choice.cli.slice(4);
-    cmd = bin;
-    args = [];
+    inner = "exec " + bin;
     label = bin + " · " + basename(choice.cwd);
   } else {
-    // ollama launch <tool> — resolve ollama's absolute path (sandbox PATH is minimal).
     const bin = ollamaPath || "ollama";
-    cmd = bin;
-    args = ["launch", choice.cli];
+    inner = "exec " + JSON.stringify(bin) + " launch " + choice.cli;
     label = choice.cli + " · " + basename(choice.cwd);
   }
 
   let session = null;
   try {
-    session = await window.chatoss.terminal.spawn(cmd, { args, cwd: choice.cwd, cols: 90, rows: 22 });
+    session = await window.chatoss.terminal.spawn("zsh", { args: ["-lic", inner], cwd: choice.cwd, cols: 90, rows: 22 });
   } catch (e) {
-    return { error: "Failed to start “" + cmd + "”: " + (e && e.message ? e.message : String(e)) };
+    return { error: "Failed to start session: " + (e && e.message ? e.message : String(e)) };
   }
   if (!session || !session.id) {
-    // spawn returns null when denied. If it failed because the binary wasn't
-    // found, surface that clearly.
-    if (!ollamaPath && !choice.cli.startsWith("raw:")) {
-      return { error: "Could not find ollama. It isn't on PATH in the sandbox — install it or grant terminal permission so detection can locate it." };
-    }
+    // spawn returns null when denied by the user.
     return null; // denied
   }
-  registerSession(session.id, cmd, args, choice.cwd, label);
+  await registerSession(session.id, "zsh", ["-lic", inner], choice.cwd, label);
   if (choice.prompt) {
     try { await window.chatoss.terminal.write(session.id, choice.prompt + "\n"); } catch (e) { /* non-fatal */ }
   }
@@ -1135,38 +1153,46 @@ async function buildSystemPrompt() {
   const p = getProject(state.activeProjectId);
   let sys = [
     "You are Term Code, an autonomous software-building orchestrator (like a coding agent).",
-    "You build software by spawning sub-agent CLI sessions (via `ollama launch <tool>` — e.g. claude, codex) inside git worktrees, reading Kanban board tasks, and marking cards done when work is complete.",
+    "You build software by spawning sub-agent CLI coding sessions (claude, codex, etc.) in the terminals panel, reading Kanban board tasks, and marking cards done when work is complete.",
+    "",
+    "IMPORTANT — tool arguments: most tools work with NO arguments because they default to the active project and the attached board. Do NOT invent ids. If you are unsure, call the tool with {} and it will use the current context.",
     "",
     "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
     "",
     "Workflow:",
-    "1. Inspect the project with list_project_files / get_current_git_branch.",
-    "2. Create an isolated git worktree with create_worktree for the work.",
-    "3. Call start_cli_session with the worktree path and a task prompt. The user approves the session in the dialog.",
-    "4. Drive the session with send_to_session as needed.",
-    "5. Read the attached Kanban board with get_board, pick the next card, and when finished call update_card with done:true.",
+    "1. Inspect the project with list_project_files({}) and get_current_git_branch({}).",
+    "2. Create an isolated git worktree with create_worktree({}) for the work (returns a path).",
+    "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }). The user approves and picks the CLI/model; the agent starts in a terminal square.",
+    "4. Drive the session with send_to_session({ sessionId, text }) as needed.",
+    "5. Read the attached Kanban board with get_board({}), pick the next card, and when finished call update_card({ cardId, done:true }).",
     "",
   ];
   if (p) {
-    sys.push("Current project: " + p.name);
-    sys.push("Project folder: " + p.folderPath);
+    sys.push("Active project name: " + p.name);
+    sys.push("Active project id: " + p.id);
+    sys.push("Active project folder: " + p.folderPath);
+  } else {
+    sys.push("(No project selected yet — ask the user to add a project folder with the + button.)");
   }
   if (c && c.boardId) {
+    sys.push("", "Attached Kanban board id: " + c.boardId);
     try {
       const b = await window.chatoss.boards.get(c.boardId);
       if (b) {
-        sys.push("", "Attached Kanban board: " + b.name, "Columns: " + (b.columns || []).map((col) => col.name).join(" | "), "", "Tasks:");
+        sys.push("Attached Kanban board: " + b.name, "Columns: " + (b.columns || []).map((col) => col.name + " (" + col.id + ")").join(" | "), "", "Tasks:");
         const cards = b.cards || [];
         if (!cards.length) sys.push("(no cards)");
         for (const card of cards) {
           const col = (b.columns || []).find((x) => x.id === card.columnId);
-          sys.push("- [" + (col ? col.name : "?") + "]" + (card.done ? " (done)" : "") + " " + card.title +
+          sys.push("- cardId " + card.id + " [" + (col ? col.name : "?") + "]" + (card.done ? " (done)" : "") + " " + card.title +
             (card.description ? " — " + card.description : ""));
         }
       }
     } catch (e) {
       sys.push("(Could not read attached board: " + (e && e.message ? e.message : String(e)) + ")");
     }
+  } else {
+    sys.push("", "(No Kanban board attached to this conversation. You can still list_boards to see what exists.)");
   }
   return sys.join("\n");
 }
@@ -1335,7 +1361,7 @@ function selectSession(id) {
   renderSessionInfo();
 }
 
-function registerSession(id, cmd, args, cwd, label) {
+async function registerSession(id, cmd, args, cwd, label) {
   // square
   const square = document.createElement("div");
   square.className = "term-square";
@@ -1384,28 +1410,35 @@ function registerSession(id, cmd, args, cwd, label) {
   const rec = { id, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false };
   sessions.set(id, rec);
 
-  // mount the xterm widget into the square (session is the spawn() result { id })
+  // mount the xterm widget into the square (session is the spawn() result { id }).
+  // mount() returns { dispose() } synchronously and wires the xterm view async.
   try {
-    const handle = window.chatoss.terminal.mount(mountEl, { id }, { fontSize: 12 });
-    rec.dispose = handle && handle.dispose ? handle.dispose : null;
+    const handle = await window.chatoss.terminal.mount(mountEl, { id }, { fontSize: 12 });
+    rec.dispose = handle && handle.dispose ? handle.dispose.bind(handle) : null;
   } catch (e) {
     console.warn("terminal.mount failed:", e);
+    const errEl = document.createElement("div");
+    errEl.className = "term-mount-error";
+    errEl.textContent = "Terminal failed to load: " + (e && e.message ? e.message : String(e));
+    mountEl.appendChild(errEl);
   }
 
-  // stream + exit
-  try { window.chatoss.terminal.onData(id, () => {}); } catch (e) { /* optional */ }
-  window.chatoss.terminal.onExit(id, (exitCode) => {
-    rec.active = false;
-    rec.exitCode = exitCode;
-    dot.classList.add("exited");
-    dot.title = "Exited (" + (exitCode == null ? "killed" : exitCode) + ")";
-    lab.textContent = label + " ✓ (" + (exitCode == null ? "exited" : exitCode) + ")";
-    renderTabs();
-    try {
-      window.chatoss.notifications.send({ title: "Session ended", body: label + " finished" });
-    } catch (e) { /* non-fatal */ }
-    renderSessionInfo();
-  });
+  // stream + exit — guard each bridge method so a missing one can't crash the session.
+  try { if (typeof window.chatoss.terminal.onData === "function") await window.chatoss.terminal.onData(id, () => {}); } catch (e) { /* optional */ }
+  try {
+    if (typeof window.chatoss.terminal.onExit === "function") {
+      await window.chatoss.terminal.onExit(id, (exitCode) => {
+        rec.active = false;
+        rec.exitCode = exitCode;
+        dot.classList.add("exited");
+        dot.title = "Exited (" + (exitCode == null ? "killed" : exitCode) + ")";
+        lab.textContent = label + " ✓ (" + (exitCode == null ? "exited" : exitCode) + ")";
+        renderTabs();
+        try { window.chatoss.notifications.send({ title: "Session ended", body: label + " finished" }); } catch (e) { /* non-fatal */ }
+        renderSessionInfo();
+      });
+    }
+  } catch (e) { console.warn("onExit failed:", e); }
 
   expandBtn.onclick = () => toggleExpand(id);
   closeBtn.onclick = () => confirmDelete(() => closeSession(id), closeBtn);
