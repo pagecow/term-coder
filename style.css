@@ -777,7 +777,16 @@ button { font-family: inherit; }
   position: relative;
   background: var(--term-bg);
 }
-.term-mount .xterm { height: 100%; padding: 6px; }
+.term-mount .xterm {
+  height: 100%;
+  padding: 6px;
+}
+.term-mount .xterm .xterm-viewport {
+  background: var(--term-bg) !important;
+}
+.term-mount .xterm .xterm-screen {
+  background: var(--term-bg) !important;
+}
 .term-mount-error {
   position: absolute;
   inset: 0;

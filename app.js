@@ -1314,11 +1314,15 @@ async function sendMessage() {
 
     liveRow.remove();
     if (liveThink) liveThink.remove();
+    let storedToolCalls = liveToolCalls.length ? liveToolCalls : undefined;
+    if (result && result.toolCalls && result.toolCalls.length) {
+      storedToolCalls = result.toolCalls.map(normalizeToolCall);
+    }
     c.messages.push({
       role: "assistant",
       content: content || "(no response)",
       thinking: thinking || undefined,
-      toolCalls: (result && result.toolCalls) ? result.toolCalls : liveToolCalls.length ? liveToolCalls : undefined,
+      toolCalls: storedToolCalls,
     });
     saveState();
     renderMessage(c.messages[c.messages.length - 1]);
