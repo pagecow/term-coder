@@ -247,6 +247,16 @@ async function detectTools(force = false) {
   };
   saveSettings();
   renderDetectedList();
+
+  // ── live bridge probe: log exactly which terminal methods exist at runtime ──
+  const t = window.chatoss.terminal;
+  const bridgeMethods = t ? Object.keys(t) : [];
+  console.log("[Term Code] window.chatoss.terminal keys:", bridgeMethods);
+  const checks = ["exec", "spawn", "mount", "onData", "onExit", "write", "resize", "kill"];
+  for (const m of checks) {
+    console.log(`[Term Code] terminal.${m}:`, typeof t && t[m]);
+  }
+  detection.bridge = bridgeMethods; // stash for the Settings panel too
   return detection;
 }
 
