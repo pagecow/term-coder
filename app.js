@@ -687,6 +687,25 @@ async function onSpawnStart() {
   if (!cli) { el.spawnStatus.textContent = "Pick what to launch."; return; }
   if (!cwd) { el.spawnStatus.textContent = "Enter a working directory."; return; }
 
+  // ---- Route the session model through the configured Model Selection Mode ----
+  // window.termCoder.resolveSessionModel(taskPrompt) encapsulates all three
+  // modes (manual / always / complexity) and returns the model to use, or null
+  // to cancel. The manual mode renders a pill picker inside the chat stream via
+  // askChoice, so hide the spawn modal while the choice is pending so the pills
+  // are visible and clickable.
+  el.spawnModal.classList.add("hidden");
+  let model = null;
+  try {
+    model = await window.termCoder.resolveSessionModel(prompt);
+  } catch (e) {
+    console.warn("resolveSessionModel", e);
+  }
+  if (!model) {
+    // Dismissed / cancelled / unavailable — do NOT start the session.
+    closeSpawnModal(null);
+    return;
+  }
+
   if (remember) {
     settings.cliDefault = cli;
     settings.cwdDefault = cwd;
@@ -695,8 +714,9 @@ async function onSpawnStart() {
 
   el.spawnStart.disabled = true;
   el.spawnStatus.textContent = "Starting…";
+  el.spawnModal.classList.remove("hidden");
   try {
-    const session = await spawnChosen({ cli, cwd, prompt });
+    const session = await spawnChosen({ cli, cwd, prompt, model });
     if (!session) {
       el.spawnStatus.textContent = "Terminal permission denied. Approve it in the system prompt and try again, or cancel.";
       el.spawnStart.disabled = false;
@@ -731,6 +751,11 @@ async function spawnChosen(choice) {
   } else {
     const bin = ollamaPath || "ollama";
     inner = "exec " + JSON.stringify(bin) + " launch " + choice.cli;
+    // Apply the resolved model (from Model Selection Mode) as a CLI flag so
+    // the launched agent uses it instead of opening its own model picker.
+    if (choice.model) {
+      inner += " --model " + JSON.stringify(choice.model);
+    }
     label = choice.cli + " · " + basename(choice.cwd);
   }
 
@@ -910,6 +935,107 @@ window.termCoder.getModelSelectionConfig = function () {
     complexityModelHigh: modelSelection.complexityModelHigh || "",
     availableModels: availableOllamaModels(),
   };
+};
+
+// ---------- Session model resolution (Model Selection Mode) ----------
+// Encapsulates all three Model Selection Modes so the session-startup code
+// calls a single helper and gets back the model to use (or null to cancel).
+//
+//   window.termCoder.resolveSessionModel(taskPrompt) -> Promise<string|null>
+//
+//   - "manual"     -> prompt via askChoice (pill style), wait, return chosen
+//                     model (or null if dismissed — caller cancels the session).
+//   - "always"     -> return cfg.alwaysModel automatically; if it's unset/empty,
+//                     fall back to askChoice so the user can still pick one.
+//   - "complexity" -> assess the task prompt's complexity (low/medium/high),
+//                     return the corresponding configured model automatically
+//                     (no prompt). Falls back through the other levels, then to
+//                     the first available model if the assessed level is unset.
+//
+// Keep this pure — it knows nothing about the spawn modal. The caller decides
+// whether/how to hide the modal while the pill picker is on screen.
+
+// Lightweight keyword + length heuristic. No chatApi call needed, so it works
+// even before the first orchestrator turn and never adds latency.
+// Returns "low" | "medium" | "high".
+function assessComplexity(taskPrompt) {
+  const text = (taskPrompt || "").toLowerCase();
+  const len = text.length;
+
+  // Words that signal a non-trivial, multi-step, or architecturally
+  // involved task.
+  const HIGH_KEYWORDS = [
+    "refactor", "architect", "architecture", "design", "implement",
+    "migrate", "migration", "database", "security", "performance",
+    "optimize", "optimise", "scale", "auth", "authentication", "authorize",
+    "full", "complete", "system", "multiple", "integrate", "integration",
+    "complex", "deploy", "ci/cd", "pipeline", "infrastructure",
+    "microservice", "concurrent", "async", "distributed", "end-to-end",
+    "comprehensive", "overhaul", "rewrite",
+  ];
+  // Words that signal an ordinary, focused change.
+  const MEDIUM_KEYWORDS = [
+    "add", "create", "build", "fix", "update", "change", "modify",
+    "feature", "component", "screen", "page", "endpoint", "handler",
+    "function", "method", "style", "css", "layout",
+  ];
+
+  let highHits = 0;
+  let medHits = 0;
+  for (const kw of HIGH_KEYWORDS) if (text.includes(kw)) highHits++;
+  for (const kw of MEDIUM_KEYWORDS) if (text.includes(kw)) medHits++;
+
+  // Long, keyword-rich prompts are high complexity.
+  if (len > 200 || highHits >= 3) return "high";
+  // Moderate length or at least one complexity keyword -> medium.
+  if (len > 80 || highHits >= 1 || medHits >= 2) return "medium";
+  // Short, simple, everyday prompts.
+  return "low";
+}
+
+// Single helper that routes through the configured Model Selection Mode.
+// Returns a model string to apply, or null to cancel the session.
+window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPrompt) {
+  const cfg = window.termCoder.getModelSelectionConfig();
+  const models = Array.isArray(cfg.availableModels) ? cfg.availableModels : [];
+
+  // ---- Always: use the configured fixed model, no prompt. ----
+  if (cfg.mode === "always") {
+    if (cfg.alwaysModel) return cfg.alwaysModel;
+    // No always-model configured yet — fall back to a pill picker so the
+    // session can still start, and hint that Settings has the real config.
+    if (models.length) {
+      return await window.termCoder.askChoice({
+        prompt: "No \"always\" model is configured yet — pick one for this session (or set it in Settings):",
+        options: models.map((m) => ({ label: m, value: m })),
+        style: "pill",
+      });
+    }
+    return null;
+  }
+
+  // ---- Complexity: assess + map, no prompt. ----
+  if (cfg.mode === "complexity") {
+    const level = assessComplexity(taskPrompt);
+    const map = {
+      low: cfg.complexityModelLow,
+      medium: cfg.complexityModelMedium,
+      high: cfg.complexityModelHigh,
+    };
+    // Use the assessed level; cascade to a sensible fallback if it's unset.
+    const model = map[level] || map.medium || map.low || map.high;
+    if (model) return model;
+    if (models.length) return models[0]; // last-resort default
+    return null;
+  }
+
+  // ---- Manual (default): prompt via pills and wait for the pick. ----
+  if (!models.length) return null;
+  return await window.termCoder.askChoice({
+    prompt: "Select a model for this session:",
+    options: models.map((m) => ({ label: m, value: m })),
+    style: "pill",
+  });
 };
 
 // ---------- Board picker ----------
