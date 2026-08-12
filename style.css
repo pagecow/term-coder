@@ -162,15 +162,58 @@ button { font-family: inherit; }
 /* ============================================================
    Layout shell
    ============================================================ */
+/* Three resizable columns.
+   The chat column used to be a hard-coded 400px while terminals took 1fr — so
+   every inner max-width in the chat (the 640px empty-state body, the 740px
+   activity card, the 720px choice picker) was dead code that could never be
+   reached, and the column the user actually works in was the narrowest one.
+   Widths now live in CSS variables that the resizer handles write to (persisted
+   in settings.layout), with real minimums so nothing can be crushed to nothing. */
 .app-shell {
+  --col-projects: 264px;
+  --col-chat: minmax(460px, 1fr);
+  --rz-width: 5px;
   display: grid;
   grid-template-rows: 52px 1fr;
-  grid-template-columns: 264px 400px 1fr;
+  grid-template-columns: var(--col-projects) var(--rz-width) var(--col-chat) var(--rz-width) minmax(340px, 1.05fr);
   grid-template-areas:
-    "topbar topbar topbar"
-    "projects chat terminals";
+    "topbar   topbar topbar topbar topbar"
+    "projects rz1    chat   rz2    terminals";
   height: 100vh;
   background: var(--bg);
+}
+
+/* ---------- Column resizers ---------- */
+.col-resizer {
+  position: relative;
+  z-index: 6;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background .15s ease;
+}
+#rz-projects { grid-area: rz1; }
+#rz-chat { grid-area: rz2; }
+/* Widen the grab target well past the 5px visual line. */
+.col-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+}
+.col-resizer:hover,
+.col-resizer:focus-visible,
+.col-resizer.is-dragging { background: var(--accent); outline: none; }
+/* Suppress text selection + iframe pointer capture while dragging. */
+body.is-resizing { cursor: col-resize; user-select: none; }
+body.is-resizing .term-mount { pointer-events: none; }
+
+/* Narrower windows: shrink the projects rail first, then relax the chat floor so
+   the terminal column keeps a usable width instead of collapsing. */
+@media (max-width: 1240px) {
+  .app-shell { --col-projects: 224px; --col-chat: minmax(400px, 1fr); }
+}
+@media (max-width: 1040px) {
+  .app-shell { --col-projects: 196px; --col-chat: minmax(340px, 1fr); }
+  .app-shell { grid-template-columns: var(--col-projects) var(--rz-width) var(--col-chat) var(--rz-width) minmax(260px, 1fr); }
 }
 
 /* ---------- Top bar ---------- */
@@ -208,8 +251,10 @@ button { font-family: inherit; }
   background: var(--bg);
   overflow: hidden;
 }
-.col-projects { grid-area: projects; border-right: 1px solid var(--border); background: var(--surface); }
-.col-chat { grid-area: chat; border-right: 1px solid var(--border); position: relative; }
+/* No border-right on these two: the resizer handle between the columns IS the
+   divider, and a border next to it read as a 7px double rule. */
+.col-projects { grid-area: projects; background: var(--surface); }
+.col-chat { grid-area: chat; position: relative; }
 .col-terminals { grid-area: terminals; background: var(--surface); }
 
 .pane-titlebar {
@@ -401,7 +446,8 @@ button { font-family: inherit; }
   display: flex;
   flex-direction: column;
   gap: 0;
-  max-height: 220px;
+  /* Taller than the old 220px now that directories expand in place. */
+  max-height: 42vh;
   overflow-y: auto;
   font-family: var(--mono);
   font-size: 11.5px;
@@ -424,23 +470,55 @@ button { font-family: inherit; }
   white-space: nowrap;
 }
 .file-row:hover { background: var(--surface-2); color: var(--text); }
-.file-row.is-dir { color: var(--text); font-weight: 600; }
+.file-row.is-dir { color: var(--text); font-weight: 600; cursor: pointer; }
 .file-icon {
   flex: 0 0 14px;
   text-align: center;
   color: var(--muted);
   font-size: 10px;
+  transition: transform .14s ease;
 }
 .file-row.is-dir .file-icon { color: var(--accent); }
+/* Expanded directory — rotate the ▸ caret into ▾. */
+.file-row.is-dir.is-open .file-icon { transform: rotate(90deg); }
 .file-name { overflow: hidden; text-overflow: ellipsis; }
 
+/* Projects column empty state */
 .projects-empty {
-  padding: 32px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 36px 18px;
   text-align: center;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
 }
+.projects-empty-glyph {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 21px;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.projects-empty-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+.projects-empty-body {
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.55;
+}
+.projects-empty-cta { margin-top: 8px; }
 
 /* ============================================================
    Column 2 — Chat
@@ -1261,7 +1339,8 @@ button { font-family: inherit; }
 .tool-chip.is-error .tool-chip-result { color: var(--chat-tool-err); }
 .tool-chip.is-error .tool-chip-result-label { color: var(--chat-tool-err); }
 
-.msg-tools { width: 100%; display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+/* .msg-tools is gone — tool chips live in the activity card (see
+   buildActivityRecord) so history and live runs render identically. */
 
 /* ---------- Typing indicator ---------- */
 .typing-row { align-self: center; max-width: 740px; padding: 4px 0; }
@@ -1307,23 +1386,44 @@ button { font-family: inherit; }
 .chat-jump-btn.hidden { display: none !important; }
 
 /* ---------- Chat overlay for live questions (survives renderChat resets) ---------- */
+/* Overlay for askChoice pickers. Parallel agents can each need an answer at the
+   same time, so this is a bounded, scrollable stack (newest at the bottom, next
+   to the composer) rather than an unbounded column that grew off the top of the
+   chat with no way to reach the older questions. */
 .chat-overlay {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 86px;
+  /* Cleared of the composer stack by measurement (syncOverlayOffset). The old
+     hard-coded 86px was already ~47px short of the real composer + hint +
+     session-info height, so the picker sat on top of the input it was blocking. */
+  bottom: var(--overlay-bottom, 140px);
+  max-height: 62%;
+  overflow-y: auto;
   z-index: 20;
   pointer-events: none;
   padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Keep the newest picker pinned to the bottom of the stack. */
+  justify-content: flex-end;
 }
+/* NOTE: the container stays pointer-events:none so clicks in the empty area fall
+   through to the chat log. Scrolling still works when the stack overflows —
+   a wheel event over a picker (which is pointer-events:auto) chains up to this
+   scrollable ancestor. Do NOT set pointer-events:auto here; it would make this
+   whole region swallow clicks meant for the messages underneath. */
 .chat-overlay .choice-msg {
   pointer-events: auto;
+  flex: 0 0 auto;
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: 0 8px 24px rgba(0,0,0,0.12);
   border-radius: var(--radius-md);
   padding: 16px;
   margin: 0 auto;
+  width: 100%;
   max-width: 720px;
 }
 

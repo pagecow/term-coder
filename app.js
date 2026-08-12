@@ -306,6 +306,9 @@ function setStatus(t) {
     span.textContent = text;
     s.appendChild(span);
   }
+  // The status line appearing/disappearing changes the composer stack height the
+  // askChoice overlay sits above. (Hoisted declaration — safe to call here.)
+  syncOverlayOffset();
 }
 
 // Normalize a tool call delivered by runTurn's onToolCall. The documented shape is
@@ -1896,11 +1899,29 @@ async function openBoardPicker() {
 function renderProjects() {
   el.projectList.innerHTML = "";
   if (!state.projects.length) {
+    // No project → drop the file watcher; it would be watching a folder that is
+    // no longer shown anywhere.
+    if (fileTree.watchStop) resetFileTree(null);
     const empty = document.createElement("div");
-    empty.className = "conversation-item";
-    empty.style.opacity = "0.6";
-    empty.style.cursor = "default";
-    empty.textContent = "No projects yet. Click “+ Project”.";
+    empty.className = "projects-empty";
+    const glyph = document.createElement("div");
+    glyph.className = "projects-empty-glyph";
+    glyph.textContent = "◫";
+    const title = document.createElement("div");
+    title.className = "projects-empty-title";
+    title.textContent = "No projects yet";
+    const bodyText = document.createElement("div");
+    bodyText.className = "projects-empty-body";
+    bodyText.textContent = "Add a folder to work in. Coding agents run in isolated git worktrees inside it.";
+    const cta = document.createElement("button");
+    cta.type = "button";
+    cta.className = "btn btn-primary btn-small projects-empty-cta";
+    cta.textContent = "+ Add a project folder";
+    cta.onclick = newProject;
+    empty.appendChild(glyph);
+    empty.appendChild(title);
+    empty.appendChild(bodyText);
+    empty.appendChild(cta);
     el.projectList.appendChild(empty);
     return;
   }
@@ -1974,62 +1995,207 @@ function renderProjects() {
   }
 }
 
-// ---------- File tree (terminal 'ls' — files.listDir does not exist) ----------
-const fileTreeCache = new Map(); // projectPath -> { ts, lines }
-async function renderFileTree(project, container) {
+// ---------- File tree ----------
+// A lazy, expandable tree over the active project folder that LIVE-UPDATES as
+// coding agents edit files. Reads through window.chatoss.files.listDir (a path
+// from files.pickFolder, which is how projects are added) and falls back to
+// `ls -Ap` on runtimes where listDir is unavailable. files.watch gives us the
+// change stream, which matters a lot here: agents are writing to this tree the
+// whole time the app is running, and the old version was a flat, inert 60-line
+// `ls` snapshot behind a 30s cache.
+const HIDDEN_ENTRIES = new Set([".git", ".chatoss", ".DS_Store"]);
+const MAX_CHILDREN = 300;
+
+const fileTree = {
+  projectPath: null,
+  expanded: new Set(),  // absolute dir paths currently open
+  cache: new Map(),     // absolute dir path -> [{ name, isDir }] | "denied"
+  loading: new Set(),
+  container: null,
+  watchStop: null,
+};
+
+function resetFileTree(projectPath) {
+  fileTree.projectPath = projectPath;
+  fileTree.expanded = new Set();
+  fileTree.cache = new Map();
+  fileTree.loading = new Set();
+  if (fileTree.watchStop) {
+    try { fileTree.watchStop(); } catch (e) { /* non-fatal */ }
+    fileTree.watchStop = null;
+  }
+}
+
+async function listDirEntries(path) {
+  // Preferred: the structured file API — no shell, no per-command approval, and
+  // it reports isDir directly.
+  try {
+    const f = window.chatoss.files;
+    if (f && typeof f.listDir === "function") {
+      const entries = await f.listDir(path);
+      if (Array.isArray(entries)) return entries.map((e) => ({ name: e.name, isDir: !!e.isDir }));
+    }
+  } catch (e) { /* fall through to the shell */ }
+  // Fallback: `ls -Ap` suffixes directories with "/".
+  try {
+    const r = await window.chatoss.terminal.exec(loginShell("ls -Ap"), { cwd: path, timeoutMs: 8000 });
+    if (!r) return "denied";
+    return (r.output || "").split("\n").map((s) => s.trim()).filter(Boolean)
+      .map((n) => (n.endsWith("/") ? { name: n.slice(0, -1), isDir: true } : { name: n, isDir: false }));
+  } catch (e) { return "denied"; }
+}
+
+function sortEntries(entries) {
+  return entries
+    .filter((e) => !HIDDEN_ENTRIES.has(e.name))
+    .sort((a, b) => (a.isDir === b.isDir
+      ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+      : (a.isDir ? -1 : 1)));
+}
+
+async function loadDir(path, repaint) {
+  if (fileTree.loading.has(path)) return;
+  fileTree.loading.add(path);
+  const entries = await listDirEntries(path);
+  fileTree.loading.delete(path);
+  fileTree.cache.set(path, entries === "denied" ? "denied" : sortEntries(entries));
+  if (repaint) repaintFileTree();
+}
+
+// Start (or restart) the live watcher for the active project.
+function ensureFileWatch(projectPath) {
+  if (fileTree.watchStop) return;
+  try {
+    const f = window.chatoss.files;
+    if (!f || typeof f.watch !== "function") return;
+    fileTree.watchStop = f.watch(projectPath, (events) => {
+      // The API debounces (~300ms) and batches. Invalidate the parent directory
+      // of each changed path; only repaint if something visible actually changed.
+      let touched = false;
+      for (const ev of (events || [])) {
+        const p = String(ev && ev.path || "");
+        if (!p || p.includes("/.git/") || p.includes("/.chatoss/")) continue;
+        const parent = p.replace(/\/+[^/]*$/, "") || projectPath;
+        if (fileTree.cache.has(parent)) { fileTree.cache.delete(parent); touched = true; }
+      }
+      if (!touched) return;
+      // Reload every open directory whose cache we just dropped.
+      const dirs = [projectPath, ...fileTree.expanded].filter((d) => !fileTree.cache.has(d));
+      Promise.all(dirs.map((d) => loadDir(d, false))).then(repaintFileTree);
+    });
+  } catch (e) { console.warn("files.watch unavailable", e); }
+}
+
+function renderFileTree(project, container) {
+  // Switching projects resets expansion state and rebinds the watcher.
+  if (fileTree.projectPath !== project.folderPath) resetFileTree(project.folderPath);
+  fileTree.container = container;
+
   container.innerHTML = "";
   const head = document.createElement("div");
   head.className = "file-tree-head";
-  head.innerHTML = '<span class="file-tree-title">Files</span>';
+  const title = document.createElement("span");
+  title.className = "file-tree-title";
+  title.textContent = "Files";
+  head.appendChild(title);
   const refresh = document.createElement("button");
   refresh.className = "btn-icon";
   refresh.title = "Refresh";
   refresh.textContent = "⟳";
-  refresh.onclick = (e) => { e.stopPropagation(); fileTreeCache.delete(project.folderPath); renderFileTree(project, container); };
+  refresh.onclick = (e) => {
+    e.stopPropagation();
+    fileTree.cache.clear();
+    const dirs = [project.folderPath, ...fileTree.expanded];
+    Promise.all(dirs.map((d) => loadDir(d, false))).then(repaintFileTree);
+    repaintFileTree();
+  };
   head.appendChild(refresh);
   container.appendChild(head);
 
   const body = document.createElement("div");
   body.className = "file-tree-body";
-  body.innerHTML = '<div class="file-tree-loading">Loading…</div>';
   container.appendChild(body);
 
-  const cached = fileTreeCache.get(project.folderPath);
-  if (cached && Date.now() - cached.ts < 30000) { paintFileTree(body, cached.lines); return; }
-
-  let res = null;
-  try {
-    res = await window.chatoss.terminal.exec(
-      loginShell('ls -Ap | grep -v "^\\.git/" | head -60'),
-      { cwd: project.folderPath, timeoutMs: 8000 }
-    );
-  } catch (e) { res = null; }
-  if (!res) {
-    body.innerHTML = '<div class="file-tree-loading">Terminal permission needed to list files.</div>';
-    return;
-  }
-  const lines = (res.output || "").split("\n").map(s => s.trim()).filter(Boolean);
-  fileTreeCache.set(project.folderPath, { ts: Date.now(), lines });
-  paintFileTree(body, lines);
+  paintFileTree(body, project.folderPath);
+  // Load the root on first paint (no "Loading…" flash once it's cached).
+  if (!fileTree.cache.has(project.folderPath)) loadDir(project.folderPath, true);
+  ensureFileWatch(project.folderPath);
 }
 
-function paintFileTree(body, lines) {
+// Repaint in place — used by the watcher and by expand/collapse so we never have
+// to rebuild the whole Projects column (which would also blow away the watcher).
+function repaintFileTree() {
+  const container = fileTree.container;
+  if (!container || !container.isConnected || !fileTree.projectPath) return;
+  const body = container.querySelector(".file-tree-body");
+  if (body) paintFileTree(body, fileTree.projectPath);
+}
+
+function paintFileTree(body, rootPath) {
   body.innerHTML = "";
-  if (!lines.length) { body.innerHTML = '<div class="file-tree-loading">Empty folder</div>'; return; }
-  for (const line of lines) {
-    const isDir = line.endsWith("/");
-    const row = document.createElement("div");
-    row.className = "file-row" + (isDir ? " is-dir" : "");
-    const icon = document.createElement("span");
-    icon.className = "file-icon";
-    icon.textContent = isDir ? "▸" : fileIcon(line);
-    const nm = document.createElement("span");
-    nm.className = "file-name";
-    nm.textContent = isDir ? line.slice(0, -1) : line;
-    row.appendChild(icon);
-    row.appendChild(nm);
-    body.appendChild(row);
-  }
+  const rows = document.createDocumentFragment();
+
+  const paintLevel = (dirPath, depth) => {
+    const entries = fileTree.cache.get(dirPath);
+    if (entries === "denied") {
+      rows.appendChild(fileTreeNote("Permission needed to list files.", depth));
+      return;
+    }
+    if (!entries) {
+      rows.appendChild(fileTreeNote("Loading…", depth));
+      return;
+    }
+    if (!entries.length) {
+      rows.appendChild(fileTreeNote("Empty folder", depth));
+      return;
+    }
+    const shown = entries.slice(0, MAX_CHILDREN);
+    for (const entry of shown) {
+      const childPath = dirPath.replace(/\/+$/, "") + "/" + entry.name;
+      const open = entry.isDir && fileTree.expanded.has(childPath);
+      const row = document.createElement("div");
+      row.className = "file-row" + (entry.isDir ? " is-dir" : "") + (open ? " is-open" : "");
+      row.style.paddingLeft = (8 + depth * 12) + "px";
+      const icon = document.createElement("span");
+      icon.className = "file-icon";
+      icon.textContent = entry.isDir ? "▸" : fileIcon(entry.name);
+      const nm = document.createElement("span");
+      nm.className = "file-name";
+      nm.textContent = entry.name;
+      row.appendChild(icon);
+      row.appendChild(nm);
+      if (entry.isDir) {
+        row.title = "Click to " + (open ? "collapse" : "expand");
+        row.onclick = (e) => {
+          e.stopPropagation();
+          if (fileTree.expanded.has(childPath)) fileTree.expanded.delete(childPath);
+          else {
+            fileTree.expanded.add(childPath);
+            if (!fileTree.cache.has(childPath)) loadDir(childPath, true);
+          }
+          repaintFileTree();
+        };
+      } else {
+        row.title = childPath;
+      }
+      rows.appendChild(row);
+      if (open) paintLevel(childPath, depth + 1);
+    }
+    if (entries.length > shown.length) {
+      rows.appendChild(fileTreeNote("+" + (entries.length - shown.length) + " more…", depth));
+    }
+  };
+
+  paintLevel(rootPath, 0);
+  body.appendChild(rows);
+}
+
+function fileTreeNote(text, depth) {
+  const d = document.createElement("div");
+  d.className = "file-tree-loading";
+  d.textContent = text;
+  d.style.paddingLeft = (8 + (depth || 0) * 12) + "px";
+  return d;
 }
 
 function fileIcon(name) {
@@ -2087,12 +2253,15 @@ function selectProject(pid) {
   renderChat();
   renderSessionInfo();
 }
+// Switching conversation must also refresh the footer line, which names the
+// active conversation — it used to keep showing the previous one.
 function selectConversation(pid, cid) {
   state.activeProjectId = pid;
   state.activeConversationId = cid;
   saveState();
   renderProjects();
   renderChat();
+  renderSessionInfo();
 }
 async function newProject() {
   try {
@@ -2130,6 +2299,7 @@ function newConversation(p) {
   saveState();
   renderProjects();
   renderChat();
+  renderSessionInfo();
 }
 function deleteConversation(p, c) {
   p.conversations = p.conversations.filter((x) => x.id !== c.id);
@@ -2139,6 +2309,7 @@ function deleteConversation(p, c) {
   saveState();
   renderProjects();
   renderChat();
+  renderSessionInfo();
 }
 
 // Resolve a board's display name (cached) so the attached chip shows the real name.
@@ -3891,6 +4062,146 @@ window.termCoder.askChoice = function askChoice(config) {
   });
 };
 
+// Keep the askChoice overlay clear of the composer stack. The overlay is
+// absolutely positioned in .col-chat, and the block below it (status line +
+// composer + hint + session info) changes height as the textarea grows and as
+// the status line appears — so its offset has to be measured, not hard-coded.
+function syncOverlayOffset() {
+  const chatCol = document.querySelector(".col-chat");
+  if (!chatCol) return;
+  let h = 0;
+  for (const sel of [".chat-status", ".composer-wrap", ".session-info"]) {
+    const node = chatCol.querySelector(sel);
+    if (node) h += node.getBoundingClientRect().height;
+  }
+  chatCol.style.setProperty("--overlay-bottom", Math.round(h + 10) + "px");
+}
+
+// Held at module scope on purpose: a ResizeObserver with no strong reference can
+// be collected, silently stopping the resync.
+let overlayRO = null;
+function initOverlayOffset() {
+  syncOverlayOffset();
+  window.addEventListener("resize", syncOverlayOffset);
+  // A ResizeObserver catches height changes we don't have an explicit hook for,
+  // but it only delivers on a rendered frame — so the two changes that actually
+  // matter (the textarea growing, the status line appearing) ALSO call
+  // syncOverlayOffset directly from autoResizeInput and setStatus.
+  try {
+    overlayRO = new ResizeObserver(syncOverlayOffset);
+    for (const sel of [".chat-status", ".composer-wrap", ".session-info"]) {
+      const node = document.querySelector(sel);
+      if (node) overlayRO.observe(node);
+    }
+  } catch (e) { /* resize listener + explicit hooks still cover it */ }
+}
+
+// ---------- Column resizers ----------
+// The three columns are grid tracks sized by two CSS variables on .app-shell.
+// Dragging a handle writes px values; with no saved layout the variables keep
+// their responsive defaults (minmax) so the grid still adapts to the window.
+const RZ_W = 5; // keep in sync with --rz-width in style.css
+const COL_MIN = { projects: 180, chat: 360, terminals: 300 };
+
+function shellEl() { return document.querySelector(".app-shell"); }
+
+function currentColWidths() {
+  const shell = shellEl();
+  const proj = document.querySelector(".col-projects");
+  const chat = document.querySelector(".col-chat");
+  return {
+    total: (shell && shell.clientWidth) || window.innerWidth,
+    projects: proj ? proj.getBoundingClientRect().width : 264,
+    chat: chat ? chat.getBoundingClientRect().width : 460,
+  };
+}
+
+// Set both track widths at once, clamped so no column can be crushed below its
+// minimum — including after the window itself has been made smaller than the
+// widths that were saved.
+function applyColWidths(projects, chat, opts) {
+  const o = opts || {};
+  const shell = shellEl();
+  if (!shell) return;
+  const cur = currentColWidths();
+  const avail = cur.total - 2 * RZ_W;
+  let p = Math.round(projects != null ? projects : cur.projects);
+  p = Math.max(COL_MIN.projects, p);
+  p = Math.min(p, Math.max(COL_MIN.projects, avail - COL_MIN.chat - COL_MIN.terminals));
+  let c = Math.round(chat != null ? chat : cur.chat);
+  c = Math.max(COL_MIN.chat, c);
+  c = Math.min(c, Math.max(COL_MIN.chat, avail - p - COL_MIN.terminals));
+  shell.style.setProperty("--col-projects", p + "px");
+  shell.style.setProperty("--col-chat", c + "px");
+  if (o.persist) { settings.layout = { projects: p, chat: c }; saveSettings(); }
+  // Refitting the PTY is relatively expensive, so only do it when the drag ends.
+  if (o.fit) { for (const rec of sessions.values()) fitTerminal(rec); }
+}
+
+// Drop back to the responsive defaults in style.css.
+function resetColWidths() {
+  const shell = shellEl();
+  if (!shell) return;
+  shell.style.removeProperty("--col-projects");
+  shell.style.removeProperty("--col-chat");
+  delete settings.layout;
+  saveSettings();
+  for (const rec of sessions.values()) fitTerminal(rec);
+}
+
+function initColumnResizers() {
+  // Restore a saved layout (clamped to the current window).
+  const L = settings.layout;
+  if (L && L.projects && L.chat) applyColWidths(L.projects, L.chat, { fit: false });
+
+  const bind = (handle, which) => {
+    if (!handle) return;
+    let startX = 0, startP = 0, startC = 0, dragging = false;
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      if (which === "projects") applyColWidths(startP + dx, startC, {});
+      else applyColWidths(startP, startC + dx, {});
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove("is-dragging");
+      document.body.classList.remove("is-resizing");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const cur = currentColWidths();
+      applyColWidths(cur.projects, cur.chat, { persist: true, fit: true });
+    };
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const cur = currentColWidths();
+      startX = e.clientX; startP = cur.projects; startC = cur.chat;
+      dragging = true;
+      handle.classList.add("is-dragging");
+      document.body.classList.add("is-resizing");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    });
+    // Keyboard-resizable (the handle is a focusable role="separator").
+    handle.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? 32 : 8;
+      let d = 0;
+      if (e.key === "ArrowLeft") d = -step;
+      else if (e.key === "ArrowRight") d = step;
+      else return;
+      e.preventDefault();
+      const cur = currentColWidths();
+      if (which === "projects") applyColWidths(cur.projects + d, cur.chat, { persist: true, fit: true });
+      else applyColWidths(cur.projects, cur.chat + d, { persist: true, fit: true });
+    });
+    handle.addEventListener("dblclick", resetColWidths);
+    handle.title = "Drag to resize · double-click to reset";
+  };
+  bind($("rz-projects"), "projects");
+  bind($("rz-chat"), "chat");
+}
+
 // ---------- Init ----------
 async function init() {
   // restore state + settings
@@ -3986,6 +4297,8 @@ async function init() {
   const autoResizeInput = () => {
     el.chatInput.style.height = "auto";
     el.chatInput.style.height = Math.min(el.chatInput.scrollHeight, 160) + "px";
+    // Keep the askChoice overlay above the now-taller composer.
+    syncOverlayOffset();
   };
   el.chatInput.addEventListener("input", autoResizeInput);
 
@@ -4091,11 +4404,18 @@ async function init() {
     else if (!el.boardPicker.classList.contains("hidden")) el.boardPicker.classList.add("hidden");
   });
 
-  // window resize → refit visible terminals
+  // column resizers (restores any saved layout)
+  initColumnResizers();
+
+  // window resize → re-clamp a saved layout, then refit visible terminals
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
+      if (settings.layout && settings.layout.projects && settings.layout.chat) {
+        // Re-clamp: the window may now be narrower than the saved widths.
+        applyColWidths(settings.layout.projects, settings.layout.chat, { fit: false });
+      }
       for (const rec of sessions.values()) fitTerminal(rec);
     }, 120);
   });
@@ -4109,6 +4429,13 @@ async function init() {
 
   // hide loading
   el.loading.classList.add("hidden");
+
+  // Overlay offset tracking — AFTER the first render and after the loading veil
+  // is gone, so the composer stack it measures is actually laid out. Measuring
+  // during event binding read a session-info of height 0 and left the askChoice
+  // picker overlapping the composer until the next resync.
+  initOverlayOffset();
+  requestAnimationFrame(syncOverlayOffset);
 
   // auto-detection at startup (non-blocking; cached 60s). If terminal is
   // denied, everything degrades to "ask" mode — no crash.

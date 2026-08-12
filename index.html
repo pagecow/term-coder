@@ -8,10 +8,17 @@
   <!-- xterm.js + FitAddon: the ChatOSS terminal.mount bridge expects
        window.Terminal and window.FitAddon to be available as constructors.
        The UMD builds expose them as nested objects (window.FitAddon = {FitAddon}),
-       so we flatten FitAddon after load so the bridge can do `new window.FitAddon()`. -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+       so we flatten FitAddon after load so the bridge can do `new window.FitAddon()`.
+
+       VENDORED into libs/ (xterm 5.3.0, xterm-addon-fit 0.8.0). These used to be
+       fetched from cdn.jsdelivr.net, which made every terminal square depend on a
+       live network round-trip at load: if the CDN was slow or blocked, the globals
+       were missing when terminal.mount ran and every session showed
+       "Terminal failed to load". The .aip contract is to vendor browser libs, and
+       there is no npm/build step to do it for us. -->
+  <link rel="stylesheet" href="libs/xterm.css" />
+  <script src="libs/xterm.js"></script>
+  <script src="libs/xterm-addon-fit.js"></script>
   <script>
     // Flatten the UMD global: addon-fit sets window.FitAddon = {FitAddon: class}.
     // The bridge does `new window.FitAddon()`, so it needs the class itself.
@@ -41,6 +48,10 @@
       </header>
       <nav id="project-list" class="project-list" aria-label="Projects"></nav>
     </aside>
+
+    <!-- Drag to resize the Projects column (arrow keys work too). -->
+    <div id="rz-projects" class="col-resizer" role="separator" aria-orientation="vertical"
+         aria-label="Resize the Projects column" tabindex="0"></div>
 
     <!-- COLUMN 2 — Orchestrator chat -->
     <section class="col-chat pane">
@@ -98,6 +109,10 @@
 
       <div id="session-info" class="session-info"></div>
     </section>
+
+    <!-- Drag to resize the Chat column (arrow keys work too). -->
+    <div id="rz-chat" class="col-resizer" role="separator" aria-orientation="vertical"
+         aria-label="Resize the Chat column" tabindex="0"></div>
 
     <!-- COLUMN 3 — Terminal grid -->
     <section class="col-terminals pane">
