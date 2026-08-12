@@ -94,6 +94,7 @@ const el = {
   boardChip: $("board-chip"),
   detachBoardBtn: $("detach-board-btn"),
   chatLog: $("chat-log"),
+  chatEmpty: $("chat-empty"),
   chatScroll: $("chat-scroll"),
   chatOverlay: $("chat-overlay"),
   chatJumpBtn: $("chat-jump-btn"),
@@ -188,7 +189,24 @@ function defaultCwd() {
   if (settings.cwdDefault) return settings.cwdDefault;
   return "/";
 }
-function setStatus(t) { el.chatStatus.textContent = t || ""; }
+function setStatus(t) {
+  const s = el.chatStatus;
+  if (!s) return;
+  const text = t || "";
+  // Show a subtle pulsing dot when the orchestrator is actively working.
+  const active = !!text && /generating|thinking|running|working|polling|waiting/i.test(text);
+  s.innerHTML = "";
+  if (active) {
+    const dot = document.createElement("span");
+    dot.className = "pulse";
+    s.appendChild(dot);
+  }
+  if (text) {
+    const span = document.createElement("span");
+    span.textContent = text;
+    s.appendChild(span);
+  }
+}
 
 // Normalize a tool call delivered by runTurn's onToolCall. The documented shape is
 // { function: { name, arguments } } where arguments is ALREADY an object — but some
@@ -2240,11 +2258,12 @@ function createThinkingWidget(text, opts) {
 }
 
 // ---------- Tool-call activity chip ----------
-// Creates a compact inline chip: "▶ tool_name" with a spinner while running,
-// then a green check when done. Clicking expands the args/result detail.
+// Creates a compact inline chip with a status icon (spinner while running,
+// green check when done, red x on error) plus a live elapsed-time readout so
+// long-running tools never look "stuck". Clicking expands args/result detail.
 function createToolChip(name, args) {
   const chip = document.createElement("div");
-  chip.className = "tool-chip";
+  chip.className = "tool-chip is-running";
   chip.setAttribute("data-state", "collapsed");
 
   const head = document.createElement("button");
@@ -2252,15 +2271,26 @@ function createToolChip(name, args) {
   head.className = "tool-chip-head";
   const icon = document.createElement("span");
   icon.className = "tool-chip-icon";
-  icon.innerHTML = '<span class="tool-chip-play">▶</span><span class="tool-chip-spinner"></span>';
+  icon.innerHTML = '<span class="tool-chip-play"></span><span class="tool-chip-spinner"></span>';
   const label = document.createElement("span");
   label.className = "tool-chip-name";
   label.textContent = name || "tool";
+  // Status badge — a compact pill that reads "running 3s" while the tool works,
+  // then flips to "done" / "error" on completion. This is the key fix for chips
+  // that looked "stuck" in an infinite spinner during long polling loops: the
+  // elapsed counter makes it obvious the tool is actively working.
+  const badge = document.createElement("span");
+  badge.className = "tool-chip-badge";
+  badge.textContent = "running…";
+  const okLabel = document.createElement("span");
+  okLabel.className = "tool-chip-ok";
   const caret = document.createElement("span");
   caret.className = "tool-chip-caret";
   caret.textContent = "▸";
   head.appendChild(icon);
   head.appendChild(label);
+  head.appendChild(badge);
+  head.appendChild(okLabel);
   head.appendChild(caret);
 
   const detail = document.createElement("div");
@@ -2285,19 +2315,46 @@ function createToolChip(name, args) {
     chip.setAttribute("data-state", open ? "collapsed" : "open");
   });
 
-  const markDone = (mark) => {
-    icon.innerHTML = mark;
-    chip.classList.add("is-done");
+  // Live elapsed-time ticker — shows how long the tool has been running so a
+  // long polling loop is obviously "working", not frozen.
+  let startTime = Date.now();
+  let timerId = null;
+  const fmtTime = (ms) => {
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    return m + "m " + (rs < 10 ? "0" : "") + rs + "s";
+  };
+  const startTimer = () => {
+    startTime = Date.now();
+    if (timerId) return;
+    timerId = setInterval(() => {
+      badge.textContent = "running " + fmtTime(Date.now() - startTime);
+    }, 250);
+  };
+  const stopTimer = () => {
+    if (timerId) { clearInterval(timerId); timerId = null; }
+  };
+  startTimer();
+
+  const markDone = (markHtml) => {
+    stopTimer();
+    icon.innerHTML = markHtml;
+    chip.classList.remove("is-running");
   };
   chip._setResult = (res) => {
     markDone('<span class="tool-chip-done">✓</span>');
+    chip.classList.add("is-done");
+    badge.textContent = "done";
     const txt = String(res == null ? "" : res);
     // Truncate very long results in the detail view but keep full text via title.
     resultLine.textContent = txt.length > 1200 ? txt.slice(0, 1200) + "\n…(truncated)" : txt;
   };
   chip._setError = (err) => {
-    icon.innerHTML = '<span class="tool-chip-error">✕</span>';
+    markDone('<span class="tool-chip-error">✕</span>');
     chip.classList.add("is-error");
+    badge.textContent = "error";
     resultLabel.textContent = "Error";
     resultLine.textContent = String(err || "error");
   };
@@ -2342,6 +2399,11 @@ function createTypingIndicator() {
 }
 
 // ---------- Render: middle column (chat) ----------
+function updateChatEmpty() {
+  const c = activeConversation();
+  const hasMessages = !!(c && c.messages && c.messages.length);
+  if (el.chatEmpty) el.chatEmpty.classList.toggle("hidden", hasMessages || !c);
+}
 function renderChat() {
   const c = activeConversation();
   el.chatLog.innerHTML = "";
@@ -2353,6 +2415,7 @@ function renderChat() {
     renderBoardChip();
     chatAutoScroll = true;
     if (el.chatJumpBtn) el.chatJumpBtn.classList.add("hidden");
+    updateChatEmpty();
     return;
   }
   el.chatTitle.textContent = c.name;
@@ -2367,6 +2430,7 @@ function renderChat() {
   // After a full history render, pin to the bottom and reset auto-scroll.
   chatAutoScroll = true;
   scrollChatBottom(false);
+  updateChatEmpty();
 }
 function renderMessage(m) {
   const role = m.role || "system";
@@ -2615,6 +2679,7 @@ async function sendMessage() {
   saveState();
   renderMessage({ role: "user", content: text });
   scrollChatBottom(false);
+  updateChatEmpty();
 
   setRunning(true);
   setStatus("Generating…");
@@ -3229,6 +3294,25 @@ async function init() {
       el.chatForm.requestSubmit();
     }
   });
+  // Smooth auto-resize: the textarea grows with content up to a max height.
+  const autoResizeInput = () => {
+    el.chatInput.style.height = "auto";
+    el.chatInput.style.height = Math.min(el.chatInput.scrollHeight, 160) + "px";
+  };
+  el.chatInput.addEventListener("input", autoResizeInput);
+
+  // Empty-state example prompts — clicking fills the composer and sends.
+  if (el.chatEmpty) {
+    el.chatEmpty.addEventListener("click", (e) => {
+      const btn = e.target.closest && e.target.closest(".chat-empty-prompt");
+      if (!btn) return;
+      const prompt = btn.getAttribute("data-prompt");
+      if (!prompt) return;
+      el.chatInput.value = prompt;
+      autoResizeInput();
+      if (!running) el.chatForm.requestSubmit();
+    });
+  }
 
   // Chat scroll tracking — show the "Jump to latest" button when scrolled up,
   // and pause auto-scroll while streaming so the user can read history.

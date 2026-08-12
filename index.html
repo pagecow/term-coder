@@ -62,6 +62,18 @@
       </header>
 
       <div id="chat-scroll" class="chat-scroll">
+        <div id="chat-empty" class="chat-empty">
+          <div class="chat-empty-glyph">▮</div>
+          <div class="chat-empty-title">Term Coder</div>
+          <div class="chat-empty-body">
+            An autonomous software-building orchestrator. Describe what you want to build and it decomposes the work into parallel subtasks, spawns a coding agent for each, and merges the results.
+          </div>
+          <div class="chat-empty-prompts">
+            <button type="button" class="chat-empty-prompt" data-prompt="Build a todo app with React and a Node/Express API, split into frontend and backend agents working in parallel.">Build a <strong>todo app</strong> — React frontend + Node/Express API, split across two parallel agents</button>
+            <button type="button" class="chat-empty-prompt" data-prompt="Refactor my project's CSS into a design-token system and fix the responsive layout.">Refactor my <strong>CSS</strong> into a design-token system and fix responsive layout</button>
+            <button type="button" class="chat-empty-prompt" data-prompt="Add unit tests and a GitHub Actions CI workflow to my project.">Add <strong>unit tests</strong> and a GitHub Actions CI workflow</button>
+          </div>
+        </div>
         <div id="chat-log" class="chat-log" aria-live="polite"></div>
       </div>
 
