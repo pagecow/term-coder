@@ -102,7 +102,14 @@ async function formatSessionStatusOutput(s, statusOverride) {
       statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: RUNNING | EXIT CODE: n/a]";
     }
     const dirLine = "[WORKING DIR: " + (s.cwd || "(unknown)") + "]";
-    return statusLine + "\n" + dirLine + "\n" + "------------------------------------------------------------\n" + clean;
+    // Surface a blocked-on-prompt signal so the orchestrator knows the coding
+    // agent is waiting for a permission answer (the app auto-approves safe work;
+    // only destructive commands pause for the user).
+    let needsInputLine = "";
+    if (s.active !== false && s.waitingForInput) {
+      needsInputLine = "\n[NEEDS INPUT: yes — the coding agent is asking the user a permission question. The app auto-approves safe edits/commands; a destructive one shows the user an approve/deny picker in chat. Do NOT send keystrokes to it — just keep monitoring.]";
+    }
+    return statusLine + "\n" + dirLine + needsInputLine + "\n" + "------------------------------------------------------------\n" + clean;
   } catch (e) {
     return "Error: " + (e && e.message ? e.message : String(e));
   }
@@ -443,7 +450,7 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "list_sessions",
-      description: "List all terminal sessions with their status. Returns a summary of every coding agent session: id, label, working directory, whether it's still RUNNING or EXITED, and exit code. Use this to coordinate parallel agents — see which are still working and which are done.",
+      description: "List all terminal sessions with their status. Returns a summary of every coding agent session: id, label, working directory, whether it's still RUNNING or EXITED (with exit code), and a NEEDS INPUT flag when an agent is blocked asking the user a permission question. Use this to coordinate parallel agents — see which are still working, which are done, and which are waiting on the user.",
       parameters: {
         type: "object",
         properties: {},
@@ -1030,7 +1037,8 @@ async function toolHandler(name, args) {
             running++;
             statusPart = "RUNNING";
           }
-          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + " | " + (s.cwd || "(unknown)");
+          const needsInput = (s.active !== false && s.waitingForInput) ? " | NEEDS INPUT" : "";
+          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + needsInput + " | " + (s.cwd || "(unknown)");
         });
         return "SESSIONS (" + recs.length + " total, " + running + " running, " + exited + " exited):\n" + lines.join("\n");
       }
@@ -2354,6 +2362,85 @@ function createThinkingWidget(text, opts) {
   return wrap;
 }
 
+// ---------- Live "Working" activity card ----------
+// A single STABLE container that holds the thinking widget + every tool chip
+// during a run. It has a FIXED max height with an internally-scrolling list, so
+// the chat layout never grows or jumps as tools fire — the area stays one
+// consistent card. On completion it collapses to a compact "N tools used" pill.
+function createActivityCard() {
+  const card = document.createElement("div");
+  card.className = "activity-card is-live";
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "activity-card-head";
+  head.setAttribute("aria-expanded", "true");
+  const pulse = document.createElement("span");
+  pulse.className = "activity-pulse";
+  const headLabel = document.createElement("span");
+  headLabel.className = "activity-card-title";
+  headLabel.textContent = "Working…";
+  const count = document.createElement("span");
+  count.className = "activity-card-count";
+  const caret = document.createElement("span");
+  caret.className = "activity-card-caret";
+  caret.textContent = "▸";
+  head.appendChild(pulse);
+  head.appendChild(headLabel);
+  head.appendChild(count);
+  head.appendChild(caret);
+
+  const body = document.createElement("div");
+  body.className = "activity-card-body";
+
+  card.appendChild(head);
+  card.appendChild(body);
+
+  let toolCount = 0;
+  let doneCount = 0;
+  let open = true;
+
+  const setOpen = (v) => {
+    open = v;
+    card.classList.toggle("is-open", open);
+    head.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  setOpen(true);
+  head.addEventListener("click", () => setOpen(!open));
+
+  const refreshCount = () => {
+    count.textContent = toolCount ? (doneCount + "/" + toolCount) : "";
+  };
+
+  // Public API used by the streaming block.
+  card._body = body;
+  card._addThinking = (widget) => { body.appendChild(widget); };
+  card._addChip = (chip) => {
+    toolCount++;
+    body.appendChild(chip);
+    refreshCount();
+    // Keep the newest chip in view inside the scrolling list.
+    body.scrollTop = body.scrollHeight;
+    // Wrap _setResult/_setError so the done counter advances.
+    const origRes = chip._setResult.bind(chip);
+    const origErr = chip._setError.bind(chip);
+    chip._setResult = (r) => { doneCount++; origRes(r); refreshCount(); };
+    chip._setError = (e) => { doneCount++; origErr(e); refreshCount(); };
+  };
+  // Collapse to a compact summary pill when the run finishes.
+  card._finish = () => {
+    card.classList.remove("is-live");
+    card.classList.add("is-finished");
+    pulse.classList.add("is-done");
+    headLabel.textContent = toolCount
+      ? ("Used " + toolCount + (toolCount === 1 ? " tool" : " tools"))
+      : "Done";
+    refreshCount();
+    setOpen(false); // collapse — the area shrinks to a single pill line
+  };
+  return card;
+}
+
 // ---------- Tool-call activity chip ----------
 // Creates a compact inline chip with a status icon (spinner while running,
 // green check when done, red x on error) plus a live elapsed-time readout so
@@ -2687,6 +2774,7 @@ async function buildSystemPrompt() {
     "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
     "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session / wait_for_session to watch. Do not re-send the initial task.",
     "  • The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
+    "  • A session showing NEEDS INPUT (in the read_session status header or list_sessions) means the coding agent is BLOCKED asking the user a permission question. The app auto-approves safe edits/commands itself; only a destructive command pauses for the user to click approve/deny in chat. Do NOT send keystrokes to these prompts — note that the session is awaiting user input and keep monitoring the other agents.",
     "  • If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
     "",
     "STEP 5 — MERGE each worktree back to the parent branch when its agent is done.",
@@ -2827,6 +2915,18 @@ async function sendMessage() {
   const liveToolCalls = [];
   let firstTokenSeen = false;
 
+  // Stable activity card — holds thinking + all tool chips at a fixed height so
+  // the layout never grows/jumps while tools fire. Created lazily on the first
+  // thinking token or tool call, and collapsed to a compact pill on completion.
+  let activityCard = null;
+  const ensureActivityCard = () => {
+    if (!activityCard) {
+      activityCard = createActivityCard();
+      el.chatLog.insertBefore(activityCard, liveRow);
+    }
+    return activityCard;
+  };
+
   // rAF-throttled re-render so a burst of tokens only repaints once per frame —
   // keeps streaming smooth with no layout jank. The streaming cursor is shown
   // while tokens are incoming and removed on the final render.
@@ -2873,11 +2973,11 @@ async function sendMessage() {
         }
         if (!liveThink) {
           liveThink = createThinkingWidget("", { streaming: true });
-          el.chatLog.insertBefore(liveThink, liveRow);
+          ensureActivityCard()._addThinking(liveThink);
+          maybeScrollChatBottom();
         }
         accThink += t;
         liveThink._update(accThink);
-        maybeScrollChatBottom();
       },
       onToolCall: async (call) => {
         const { name, args } = normalizeToolCall(call);
@@ -2888,9 +2988,10 @@ async function sendMessage() {
           typingRow.remove();
           liveRow.style.display = "";
         }
-        // Render a compact activity chip before the live assistant row.
+        // Add a compact chip inside the stable activity card (fixed height,
+        // internal scroll) so the layout never jumps as tools fire.
         const chip = createToolChip(name, args);
-        el.chatLog.insertBefore(chip, liveRow);
+        ensureActivityCard()._addChip(chip);
         maybeScrollChatBottom();
         try {
           const res = await toolHandler(name, args);
@@ -2925,7 +3026,10 @@ async function sendMessage() {
 
     typingRow.remove();
     liveRow.remove();
-    if (liveThink) liveThink.remove();
+    // Collapse the activity card to a compact "N tools used" pill instead of
+    // removing it — keeps the layout stable (no jump) and preserves a tappable
+    // record of what ran. The final renderMessage below adds the saved record.
+    if (activityCard) activityCard._finish();
     let storedToolCalls = liveToolCalls.length ? liveToolCalls : undefined;
     if (result && result.toolCalls && result.toolCalls.length) {
       storedToolCalls = result.toolCalls.map(normalizeToolCall);
@@ -2942,7 +3046,7 @@ async function sendMessage() {
   } catch (e) {
     typingRow.remove();
     liveRow.remove();
-    if (liveThink) liveThink.remove();
+    if (activityCard) activityCard._finish();
     setStatus("");
     const msg = "Error: " + (e && e.message ? e.message : String(e));
     c.messages.push({ role: "system", content: msg });
@@ -3027,62 +3131,93 @@ async function registerSession(session, cmd, args, cwd, label) {
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
 
-  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null };
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false };
   sessions.set(session.id, rec);
 
   // ---------- Persistent command-approval watcher ----------
-  // After startup, Codex shows a command-approval prompt before running each
-  // command: "1. Yes, proceed (y)  2. Yes, and don't ask again...  3. No..."
-  // We auto-approve SAFE commands (press Enter) and ask the user in chat before
-  // approving DANGEROUS ones (rm, delete, drop, format, etc.).
+  // After startup, the coding agent pauses on a permission prompt before making
+  // edits or running commands. Codex and Claude Code use DIFFERENT prompts, and
+  // we must handle both or the session sits blocked with the orchestrator blind:
+  //   Codex:  "1. Yes, proceed (y)  2. Yes, and don't ask again...  3. No..."
+  //   Claude: "Do you want to make this edit to index.html?
+  //            > 1. Yes  2. Yes, allow all edits during this session (shift+tab)  3. No"
+  // We auto-approve SAFE work (file edits, safe commands) by pressing Enter, and
+  // ask the user in chat before approving DANGEROUS commands (rm, delete, drop…).
+
+  // Classify a permission prompt. Returns null when there's no prompt, else
+  // { kind: "safe-edit" } | { kind: "safe-command", command } | { kind: "dangerous", command }.
+  function classifyApprovalPrompt(cleanText, flat) {
+    // Codex command-approval signature.
+    const codexSig = /yes,\s*proceed|press\s*enter\s*to\s*confirm|yes,\s*and\s*don'?t\s*ask\s*again/.test(flat);
+    // Claude permission prompt signatures (edit / create / run / proceed / overwrite).
+    const claudeSig = /do you want to make this edit|do you want to (proceed|create|run|delete|overwrite|make)|allow all edits during this session|esc to cancel/.test(flat);
+    if (!codexSig && !claudeSig) return null;
+
+    // Extract the command/edit target text (the line(s) just above the options).
+    let commandText = "";
+    const ranMatch = cleanText.match(/Ran\s+(.+?)(?=\s*›|\s*1\.\s*Yes)/is);
+    if (ranMatch) commandText = ranMatch[1].trim();
+    if (!commandText) {
+      const beforeYes = cleanText.split(/1\.\s*Yes/i)[0];
+      commandText = (beforeYes.trim().split("\n").pop() || "").trim();
+    }
+
+    // Dangerous command patterns — always ask the user before approving.
+    const dangerous = /\brm\s+-rf?\b|\bdelete\b|\bdrop\s+(table|database)\b|\bformat\b|\btruncate\b|\bsudo\s+rm\b|\bgit\s+push\s+.*--force\b|\bchmod\s+777\b|\bkill\s+-9\b/i.test(commandText);
+    if (dangerous) return { kind: "dangerous", command: commandText };
+
+    // File edit/create prompts are the agent doing its job — always safe.
+    const isEdit = /make this edit|create this (file|directory)|overwrite|allow all edits/.test(flat);
+    if (isEdit) return { kind: "safe-edit", command: commandText };
+
+    return { kind: "safe-command", command: commandText };
+  }
+
   try {
     if (typeof session.onData === "function") {
       let approvalBuffer = "";
       rec.autoApproveUnsub = session.onData((chunk) => {
         if (!rec.active || rec.autoApproveBusy) return;
         approvalBuffer += chunk;
+        // Cap the buffer so a long session can't grow it unbounded — the prompt
+        // is always near the tail, so keeping the last ~4KB is plenty.
+        if (approvalBuffer.length > 8192) approvalBuffer = approvalBuffer.slice(-4096);
         const flat = stripAnsi(approvalBuffer).toLowerCase();
-        // Codex's command-approval prompt signatures
-        if (!/yes,\s*proceed|press\s*enter\s*to\s*confirm|yes,\s*and\s*don'?t\s*ask\s*again/.test(flat)) return;
+        const verdict = classifyApprovalPrompt(stripAnsi(approvalBuffer), flat);
+        if (!verdict) return;
 
-        // Already handled? Check if the approval prompt is still on screen.
-        // (The buffer accumulates, so we check if we've already seen AND acted
-        // on this prompt by tracking autoApproveBusy.)
+        // Mark busy + waiting so we never double-fire on the same prompt, and so
+        // the orchestrator's status tools can report that this session is blocked.
         rec.autoApproveBusy = true;
+        rec.waitingForInput = true;
+        renderTabs();
+        renderSessionInfo();
 
-        // Extract the command text from the approval prompt to check for danger.
-        // The command appears before the "1. Yes, proceed" options. Look for
-        // "ran" prefix (Codex shows "Ran <command>") or the command after "›".
-        const cleanText = stripAnsi(approvalBuffer);
-        let commandText = "";
-        const ranMatch = cleanText.match(/Ran\s+(.+?)(?=\s*›|\s*1\.\s*Yes)/is);
-        if (ranMatch) commandText = ranMatch[1].trim();
-        if (!commandText) {
-          // Fallback: grab everything before the "Yes, proceed" line
-          const beforeYes = cleanText.split(/1\.\s*Yes/i)[0];
-          commandText = beforeYes.trim().split("\n").pop() || "";
-        }
-
-        // Dangerous command patterns — ask the user before approving.
-        const dangerous = /\brm\s+-rf?\b|\bdelete\b|\bdrop\s+(table|database)\b|\bformat\b|\btruncate\b|\bsudo\s+rm\b|\bgit\s+push\s+.*--force\b|\bchmod\s+777\b|\bkill\s+-9\b/i.test(commandText);
-
-        if (dangerous) {
-          // Ask the user in chat before approving.
-          askCommandApproval(rec, commandText).then((approved) => {
+        if (verdict.kind === "dangerous") {
+          // Ask the user in chat before approving a destructive command.
+          askCommandApproval(rec, verdict.command).then((approved) => {
             if (approved) {
-              session.write("\r"); // press Enter = "1. Yes, proceed"
+              session.write("\r"); // press Enter = "1. Yes"
             } else {
-              session.write("\x1b"); // Esc = "3. No, and tell Codex what to do differently"
+              session.write("\x1b"); // Esc = "3. No"
             }
-            // Clear the buffer so we don't re-trigger on the same prompt.
             approvalBuffer = "";
             rec.autoApproveBusy = false;
+            rec.waitingForInput = false;
+            renderTabs();
+            renderSessionInfo();
           });
         } else {
-          // Safe command — auto-approve immediately.
+          // Safe edit / safe command — auto-approve. For Claude the default
+          // highlighted option is "1. Yes", so Enter accepts it (we never pick
+          // option 2 "allow all edits during this session" — that stays the
+          // user's per-edit choice).
           session.write("\r");
           approvalBuffer = "";
           rec.autoApproveBusy = false;
+          rec.waitingForInput = false;
+          renderTabs();
+          renderSessionInfo();
         }
       });
     }

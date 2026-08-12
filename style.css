@@ -984,6 +984,99 @@ button { font-family: inherit; }
   border-top: 1px solid var(--border);
 }
 
+/* ---------- Live "Working" activity card ---------- */
+/* A single stable container that holds the thinking widget + tool chips during
+   a run. Fixed max-height with an internally-scrolling body so the chat layout
+   never grows or jumps as tools fire. Collapses to a compact pill when done. */
+.activity-card {
+  align-self: center;
+  max-width: 740px;
+  width: 100%;
+  margin: 0;
+  border: 1px solid var(--chat-tool-border);
+  border-radius: 12px;
+  background: var(--chat-tool-bg);
+  overflow: hidden;
+  font-size: 12.5px;
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+.activity-card.is-live {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.activity-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  padding: 10px 14px;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  text-align: left;
+  transition: background .12s ease;
+}
+.activity-card-head:hover { background: var(--chat-tool-head-hover); }
+.activity-pulse {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent-tint);
+  animation: activity-pulse 1.2s ease-out infinite;
+}
+.activity-pulse.is-done { background: var(--chat-tool-done); animation: none; }
+@keyframes activity-pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent-tint); }
+  70% { box-shadow: 0 0 0 8px rgba(16,163,127,0); }
+  100% { box-shadow: 0 0 0 0 rgba(16,163,127,0); }
+}
+.activity-card-title { font-weight: 600; letter-spacing: 0.01em; }
+.activity-card.is-live .activity-card-title { color: var(--accent); }
+.activity-card-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.activity-card-caret {
+  display: inline-block;
+  width: 12px;
+  color: var(--muted);
+  font-size: 10px;
+  transition: transform .2s ease;
+}
+.activity-card.is-open .activity-card-caret { transform: rotate(90deg); }
+.activity-card-body {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 10px 12px;
+  /* Fixed height with internal scroll — the card never grows as tools fire. */
+  max-height: 240px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+.activity-card.is-open .activity-card-body { display: flex; }
+.activity-card-body::-webkit-scrollbar { width: 8px; }
+.activity-card-body::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+/* Thinking widget + tool chips sit flush inside the card body. */
+.activity-card-body .msg-thinking-collapsible,
+.activity-card-body .tool-chip {
+  max-width: none;
+  width: 100%;
+  align-self: stretch;
+  margin: 0;
+}
+.activity-card.is-finished .activity-card-head { padding: 7px 14px; }
+
 /* ---------- Tool-call activity chips ---------- */
 .tool-chip {
   align-self: flex-start;
