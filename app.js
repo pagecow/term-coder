@@ -294,14 +294,27 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "send_to_session",
-      description: "Send a line of text to a running CLI session's stdin.",
+      description: "Send a line of text to a running CLI session's stdin (e.g. a task prompt, or arrow keys + Enter to navigate an interactive menu). Supports escape sequences: \\x1b[A=Up \\x1b[B=Down \\r=Enter \\x03=Ctrl+C.",
       parameters: {
         type: "object",
         properties: {
-          sessionId: { type: "string" },
-          text: { type: "string" },
+          sessionId: { type: "string", description: "Optional. Defaults to the most recently started session." },
+          text: { type: "string", description: "The text or control sequence to send." },
         },
-        required: ["sessionId", "text"],
+        required: ["text"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_session",
+      description: "Read the current output of a running CLI session — everything the terminal shows right now (up to ~64KB). Use this to see what the agent has done, check for errors, or detect when a task is finished. Returns the terminal screen text.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "Optional. Defaults to the most recently started session." },
+        },
       },
     },
   },
@@ -433,14 +446,31 @@ async function toolHandler(name, args) {
         return "Error: session did not start";
       }
       case "send_to_session": {
-        const s = sessions.get(args.sessionId);
-        if (!s) return "Error: session not found. Live session ids: " + [...sessions.keys()].join(", ");
+        // Default to the most recently started session if no sessionId given.
+        let s = args.sessionId ? sessions.get(args.sessionId) : null;
+        if (!s && sessions.size) { s = [...sessions.values()].pop(); }
+        if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
         try {
           await s.session.write(args.text + "\n");
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
         return "ok";
+      }
+      case "read_session": {
+        // Read what the terminal currently shows — the orchestrator's eyes.
+        let s = args.sessionId ? sessions.get(args.sessionId) : null;
+        if (!s && sessions.size) { s = [...sessions.values()].pop(); }
+        if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
+        try {
+          if (s.session && typeof s.session.getOutput === "function") {
+            const text = await s.session.getOutput();
+            return text || "(terminal is empty — no output yet)";
+          }
+          return "Error: getOutput() not available on this session";
+        } catch (e) {
+          return "Error: " + (e && e.message ? e.message : String(e));
+        }
       }
       case "list_project_files": {
         const p = resolveProject(args);
@@ -1176,10 +1206,10 @@ async function buildSystemPrompt() {
     "1. Quickly inspect with list_project_files({}) and get_current_git_branch({}) — do this ONCE, don't loop.",
     "2. Create an isolated git worktree with create_worktree({}) for the work (returns a path).",
     "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }) to SPIN UP A CODING AGENT in a terminal. The user approves and picks the CLI/model. This is the main way work gets done — the sub-agent writes the code, not you.",
-    "4. Drive the running session with send_to_session({ sessionId, text }).",
-    "5. Read the attached Kanban board with get_board({}), and when a task is finished call update_card({ cardId, done:true }).",
+    "4. MONITOR the running session: call read_session({}) to see what the agent is doing — its output, errors, or progress. Use send_to_session({ text }) to send it a task prompt or navigate interactive menus (arrow keys: \\x1b[B=Down, \\r=Enter).",
+    "5. When read_session shows the work is done (or the user confirms), read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete.",
     "",
-    "ACT, don't just explore. When the user asks you to build or change something, your job is to SPIN UP one or more coding agents (start_cli_session) to do the work in their own terminals — then coordinate them. Don't try to write all the code yourself in chat; delegate it to sub-agents.",
+    "ACT, don't just explore. When the user asks you to build or change something, your job is to SPIN UP one or more coding agents (start_cli_session) to do the work in their own terminals — then coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session). Don't try to write all the code yourself in chat; delegate it to sub-agents.",
     "",
   ];
   if (p) {
