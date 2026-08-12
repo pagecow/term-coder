@@ -5,6 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Term Code</title>
   <link rel="stylesheet" href="style.css" />
+  <!-- xterm.js + FitAddon: the ChatOSS terminal.mount bridge expects
+       window.Terminal and window.FitAddon to be available as constructors.
+       The UMD builds expose them as nested objects (window.FitAddon = {FitAddon}),
+       so we flatten FitAddon after load so the bridge can do `new window.FitAddon()`. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script>
+    // Flatten the UMD global: addon-fit sets window.FitAddon = {FitAddon: class}.
+    // The bridge does `new window.FitAddon()`, so it needs the class itself.
+    if (window.FitAddon && window.FitAddon.FitAddon) window.FitAddon = window.FitAddon.FitAddon;
+  </script>
 </head>
 <body>
   <main class="app-shell">
