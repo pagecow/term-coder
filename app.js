@@ -510,14 +510,44 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   let trustHandled = false;
   let trustBusy = false; // true while we're waiting for the user's chat answer
   let modelPickerSeen = false;
+  // Codex (v0.147+) shows "model: loading" in its welcome box, then transitions
+  // to "model: <name>" once the model is ready. We must NOT send the prompt
+  // until the model has finished loading — otherwise the text lands in the
+  // input box but Enter (\r) is ignored because the box isn't accepting
+  // submissions yet. These flags track that transition.
+  let modelLoading = false;
+  let modelLoaded = false;
+  let submitFallbackScheduled = false;
 
   const finish = async () => {
     if (settled) return;
+    // NEVER auto-send the prompt while a trust dialog was seen but not yet
+    // resolved. This is the core fix for Bug 1: previously the safety timeout
+    // (or an early ready-state match) could call finish() which writes
+    // prompt + "\r" — and the "\r" confirms the trust dialog's highlighted
+    // "Yes" option WITHOUT ever showing the chat pill picker.
+    if (sawTrust && !trustHandled) return;
     settled = true;
     try { unsub && unsub(); } catch (_) {}
     if (killed) return; // session was killed — don't send the prompt
-    // Type the prompt and press Enter so the CLI's input box submits it.
-    await safe(() => session.write(prompt + "\r"));
+    // Type the prompt, then press Enter. We send the text and the Enter key as
+    // SEPARATE writes so a CLI that echoes input character-by-character has a
+    // chance to render the full prompt before the submit keystroke arrives.
+    //
+    // BUG 2 FIX — robust submit: \r (carriage return) is the standard Enter in
+    // a PTY, but some Codex versions submit on \n (line feed) instead. We send
+    // \r first; if the task hasn't started ~400ms later we send \n as a
+    // fallback. Both writes are guarded so that if \r already submitted the
+    // task, the \n is just a harmless empty keystroke to the now-busy agent.
+    await safe(() => session.write(prompt));
+    await safe(() => session.write("\r"));
+    if (!submitFallbackScheduled) {
+      submitFallbackScheduled = true;
+      setTimeout(() => {
+        if (killed) return;
+        try { session.write("\n"); } catch (_) {}
+      }, 400);
+    }
   };
 
   // Confirm the trust dialog by pressing Enter on the highlighted "Yes" option.
@@ -538,21 +568,42 @@ async function autoDriveStartup(session, prompt, label, cwd) {
 
   // Handle the trust dialog according to trustMode. "ask" pauses here until the
   // user answers the chat pill picker; "always" confirms immediately.
+  //
+  // BUG 1 FIX: We re-read the persisted trust policy FRESH from scopedData via
+  // loadTrustMode() before checking trustMode. This eliminates any race where
+  // the module-level variable is stale (e.g. the user changed it in Settings
+  // after this session started, or loadTrustMode hadn't completed yet).
+  // trustBusy MUST be set BEFORE the first await so the onData watcher pauses
+  // while we load — no \r can leak to the PTY during the load.
+  //
+  // CRITICAL: trustBusy stays TRUE through confirmTrust()/denyTrust() and is
+  // only cleared AFTER the trust \r (or the kill) has finished writing. If we
+  // cleared it before the await in confirmTrust(), the onData watcher would
+  // resume the instant the user answered, see trustHandled=true, and could call
+  // finish() — writing prompt+"\r" CONCURRENTLY with the trust "\r" in a second
+  // session.write() call. Two concurrent writes can interleave bytes in the PTY
+  // (the prompt's \r landing before the trust \r, or the prompt text spliced
+  // into the trust confirmation). Keeping trustBusy=true until the trust write
+  // fully completes guarantees the watcher stays paused, so finish() can only
+  // run on a LATER chunk (the post-trust welcome/input-prompt output) — exactly
+  // the ordering we want.
   const handleTrust = async () => {
+    trustBusy = true;
+    try { await loadTrustMode(); } catch (_) {}
     if (trustMode === "always") {
       await confirmTrust();
+      trustBusy = false;
       return;
     }
     // trustMode === "ask" — ask in chat, wait for the answer.
-    trustBusy = true;
     const ok = await askTrustInChat(folderLabel);
-    trustBusy = false;
-    if (settled) return; // safety timeout fired while we were waiting
+    if (settled) { trustBusy = false; return; } // safety timeout fired while waiting
     if (ok) {
       await confirmTrust();
     } else {
       await denyTrust();
     }
+    trustBusy = false; // only now — after the trust \r / kill is fully written
   };
 
   let unsub = null;
@@ -562,6 +613,10 @@ async function autoDriveStartup(session, prompt, label, cwd) {
         if (settled || trustBusy) return; // don't act while waiting on the user
         buffer += chunk;
         const flat = stripAnsi(buffer).toLowerCase();
+        // Per-chunk text for state tracking that depends on the LATEST output
+        // (the accumulated buffer would keep stale "model: loading" text and
+        // mask the transition to "model: <name>").
+        const chunkFlat = stripAnsi(chunk).toLowerCase();
 
         // 1) Trust dialog. Match BOTH CLIs robustly:
         //    Claude Code: "Do you trust the files in this folder?"
@@ -574,19 +629,65 @@ async function autoDriveStartup(session, prompt, label, cwd) {
           return;
         }
 
-        // 2) Model picker menu. We do NOT pick here — the model was already
-        //    passed via --model, OR the user picked it via Model Selection Mode
-        //    pills. If a picker still shows, leave it to the orchestrator/user.
-        if (/select model|\/model|navigate.*enter select|choose a model/.test(flat)) {
+        // 2) Codex model-loading state (MUST run before the model-picker check
+        //    below). Codex v0.147+ shows "model: loading" in its welcome box,
+        //    then transitions to "model: <name>" once the model is ready. We
+        //    detect this PER-CHUNK (using chunkFlat, not the accumulated `flat`)
+        //    so the stale "loading" text in the buffer doesn't mask the
+        //    transition to "model: <name>".
+        //
+        //    We must NOT send the prompt until the model has finished loading —
+        //    otherwise the text lands in the input box but Enter (\r) is
+        //    ignored because the box isn't accepting submissions yet (Bug 2).
+        if (/model\s*:\s*loading/.test(chunkFlat)) {
+          modelLoading = true;
+          return; // wait — the input box isn't accepting submissions yet
+        }
+        if (modelLoading) {
+          // Transition to a loaded model: a "model: <name>" line that is NOT
+          // "model: loading", OR Codex's "/model to change" hint which only
+          // appears once the model is ready.
+          if ((/model\s*:\s*[a-z0-9_-]/.test(chunkFlat) && !/model\s*:\s*loading/.test(chunkFlat)) ||
+              /\/model to change/.test(chunkFlat)) {
+            modelLoaded = true;
+            modelLoading = false;
+            // Fall through to the ready-state check below so the prompt is
+            // sent as soon as the input box is visible.
+          } else {
+            return; // still loading — keep waiting
+          }
+        }
+
+        // 3) Model picker MENU (a real interactive list the user must navigate).
+        //    We do NOT pick here — the model was already passed via --model, OR
+        //    the user picked it via Model Selection Mode pills. If a picker still
+        //    shows, leave it to the orchestrator/user.
+        //
+        //    BUG 2 FIX: The old regex had a bare `\/model` alternative that
+        //    matched Codex's harmless "/model to change" HINT (shown in the
+        //    welcome box once the model loads — NOT a picker menu). That set
+        //    modelPickerSeen=true, which then blocked the ready-state check
+        //    (`!modelPickerSeen`) for the rest of startup, so the prompt was
+        //    never sent until the 12s safety timeout — by which point the model
+        //    might have only just loaded and the submit keystroke landed too
+        //    early or was ignored. Removed the bare `\/model`; kept only the
+        //    specific menu signatures that mean an actual interactive list.
+        if (/select model|navigate.*enter select|choose a model|use .*arrow.*enter.*select/.test(flat)) {
           modelPickerSeen = true;
           return;
         }
 
-        // 3) Ready state: the CLI's input prompt is showing (welcome box done,
-        //    `❯` input line visible). Send the task now — but only if we're
-        //    past the trust dialog (or never saw one) and not blocked on a menu.
+        // 4) Ready state: the CLI's input prompt is showing. Send the task now
+        //    — but only if we're past the trust dialog (or never saw one), not
+        //    blocked on a menu, and (for Codex) the model has finished loading.
+        //    Match the input-prompt glyph for BOTH CLIs: Claude Code uses ❯
+        //    (U+276F), Codex uses › (U+203A) — these are DIFFERENT characters.
+        //    The old regex only had ❯ and anchored it with ^ (which, without
+        //    the /m flag, only matches the start of the accumulated buffer, so
+        //    it never fired once the buffer grew past the welcome box).
         if (!modelPickerSeen && (sawTrust ? trustHandled : true)) {
-          if (/welcome back|try "how do i|what would you like|how can i help|enter a task|^\s*❯/.test(flat)) {
+          if (modelLoading && !modelLoaded) return; // Codex still loading — wait
+          if (/welcome back|try "how do i|what would you like|how can i help|enter a task|❯|›/.test(flat)) {
             finish();
           }
         }
@@ -595,9 +696,14 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   } catch (_) {}
 
   // Safety net: never hang. After 12s, send the prompt regardless of state —
-  // the orchestrator can recover via read/send later. (Longer than before so
-  // the "ask" chat prompt has time to be answered.)
-  setTimeout(() => { if (!settled && !trustBusy) finish(); }, 12000);
+  // the orchestrator can recover via read/send later. BUT never fire while
+  // trustBusy is true (the user is answering the trust pill picker) OR while a
+  // trust dialog was seen but not yet resolved (sawTrust && !trustHandled) —
+  // firing in either case would write \r to the PTY and silently confirm trust
+  // without asking, which is exactly Bug 1.
+  setTimeout(() => {
+    if (!settled && !trustBusy && !(sawTrust && !trustHandled)) finish();
+  }, 12000);
 }
 
 // ---------- Tool handlers (async, always return a string) ----------
