@@ -61,7 +61,12 @@
         </div>
       </header>
 
-      <div id="chat-log" class="chat-log" aria-live="polite"></div>
+      <div id="chat-scroll" class="chat-scroll">
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
+      </div>
+      <button id="chat-jump-btn" class="chat-jump-btn hidden" type="button" title="Jump to latest" aria-label="Jump to latest">
+        <span class="chat-jump-icon">↓</span> Jump to latest
+      </button>
 
       <div id="chat-status" class="chat-status" aria-live="polite"></div>
 
