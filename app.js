@@ -632,40 +632,25 @@ async function autoDriveStartup(session, prompt, label, cwd) {
 
   // ---------- Universal orchestrator protocol ----------
   // Prepended to EVERY task prompt sent to ANY coding agent. It teaches the
-  // agent a single, CLI-agnostic way to ask the orchestrator (the supervisor
-  // running this app) a question: print a sentinel line, then the question.
-  // The app's universal terminal monitor watches every session's output for
-  // this sentinel, so it works with Codex, Claude Code, or any future CLI —
-  // the agent doesn't need special integration, just a print statement.
+  // agent a single, CLI-agnostic way to ask the orchestrator a question: print
+  // a sentinel line, then the question. The app's universal terminal monitor
+  // watches every session's output for this sentinel, so it works with any CLI.
   //
-  // We also keep the app's GENERIC idle detection (below) as a fallback so
-  // even an agent that never prints the sentinel is still noticed when it
-  // sits idle on a prompt for a while.
+  // IMPORTANT: This is a SINGLE LINE (no \n newlines). When we session.write()
+  // a string to the PTY, every \n acts as an Enter/submit — so a multi-line
+  // protocol block would get split into dozens of broken separate messages and
+  // the actual task would never arrive as one coherent submission. The agent
+  // (an LLM) doesn't need newlines for formatting — it reads the protocol fine
+  // as one sentence.
   const ORCH_PROTOCOL =
-    "\n\n──────── ORCHESTRATOR PROTOCOL (important) ────────\n" +
-    "You are being directed by a supervisor orchestrator app called Term Coder.\n" +
-    "It is watching this terminal and can read your output and type responses.\n" +
-    "\n" +
-    "When you need to ask the orchestrator a question, make a decision, or need\n" +
-    "clarification before proceeding, print this EXACT line on its own, then your\n" +
-    "question on the next lines, then wait:\n" +
-    "\n" +
-    "  [ORCHESTRATOR_INPUT_NEEDED] <one-line summary of what you need>\n" +
-    "  <optional additional context lines>\n" +
-    "\n" +
-    "Examples:\n" +
-    "  [ORCHESTRATOR_INPUT_NEEDED] Should I use TypeScript or JavaScript for this project?\n" +
-    "  [ORCHESTRATOR_INPUT_NEEDED] I found two package.json files — which one should I update?\n" +
-    "  [ORCHESTRATOR_INPUT_NEEDED] The test suite is failing in 3 places. Should I fix them or skip for now?\n" +
-    "\n" +
-    "After printing the sentinel, STOP and WAIT — do not proceed until the\n" +
-    "orchestrator types a response into this terminal. It will see your question\n" +
-    "and answer you here.\n" +
-    "\n" +
-    "Do NOT print the sentinel for routine file edits or command execution — only\n" +
-    "use it when you genuinely need a decision or clarification from the orchestrator.\n" +
-    "────────────────────────────────────────────────\n\n";
-  const fullPrompt = ORCH_PROTOCOL + prompt;
+    "[ORCHESTRATOR PROTOCOL] You are directed by Term Coder, a supervisor app watching this terminal. " +
+    "When you need to ask a question or need clarification before proceeding, print this exact sentinel on its own line: " +
+    "[ORCHESTRATOR_INPUT_NEEDED] <one-line question> — then STOP and WAIT for the orchestrator to type a response. " +
+    "Do NOT use the sentinel for routine edits or command execution — only when you genuinely need a decision. " +
+    "TASK: ";
+  // Flatten any newlines in the task prompt itself — same PTY-submit reason.
+  const flatPrompt = (prompt || "").replace(/\r?\n/g, "  ");
+  const fullPrompt = ORCH_PROTOCOL + flatPrompt;
 
   let settled = false;
   let killed = false;
