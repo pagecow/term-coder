@@ -539,9 +539,11 @@ button { font-family: inherit; }
   overflow: hidden;
   min-height: 0;
   display: flex;
+  flex-direction: column;
 }
 .chat-log {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 24px 22px 96px;
@@ -673,20 +675,25 @@ button { font-family: inherit; }
 .msg.system .msg-body { width: auto; }
 
 /* ---------- Chat empty state ---------- */
+/* Absolutely fills the chat-scroll area (which is position:relative) so it
+   always spans the full width/height regardless of the empty .chat-log sibling. */
 .chat-empty {
-  flex: 1;
-  align-self: center;
-  margin: auto 0;
-  max-width: none;
-  width: 100%;
-  text-align: left;
-  padding: 32px 48px;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: var(--chat-bg);
+  overflow-y: auto;
+  text-align: center;
+  padding: 40px 32px;
   color: var(--chat-empty-fg);
   display: flex;
   flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: 18px;
+}
+.chat-empty.hidden {
+  display: none;
 }
 .chat-empty-glyph {
   width: 60px;
@@ -703,26 +710,23 @@ button { font-family: inherit; }
   box-shadow: 0 4px 14px rgba(16,163,127,0.18);
 }
 .chat-empty-title {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.01em;
-  text-align: left;
 }
 .chat-empty-body {
   font-size: 14px;
   line-height: 1.6;
   color: var(--text-2);
-  max-width: none;
-  width: 100%;
-  text-align: left;
+  max-width: 640px;
 }
 .chat-empty-prompts {
   display: flex;
   flex-direction: column;
   gap: 10px;
   width: 100%;
-  max-width: none;
+  max-width: 560px;
   margin-top: 8px;
 }
 .chat-empty-prompt {
