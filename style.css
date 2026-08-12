@@ -952,7 +952,7 @@ button { font-family: inherit; }
 .tool-chip.is-error .tool-chip-result { color: var(--chat-tool-err); }
 .tool-chip.is-error .tool-chip-result-label { color: var(--chat-tool-err); }
 
-.msg-tools { width: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.msg-tools { width: 100%; display: flex; flex-wrap: wrap; flex-direction: row; gap: 8px; margin-top: 10px; }
 
 /* ---------- Typing indicator ---------- */
 .typing-row { align-self: center; max-width: 720px; padding: 4px 0; }
