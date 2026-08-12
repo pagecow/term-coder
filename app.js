@@ -4,6 +4,7 @@
 
 const STORE_KEY = "term-coder.state";
 const SETTINGS_KEY = "term-coder.settings";
+const WORKTREES_KEY = "term-coder.worktrees";
 const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
 const DETECT_TTL_MS = 60 * 1000;
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
@@ -67,6 +68,27 @@ let detection = { codex: false, claude: false, ollama: false, models: [], scanne
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
 
+// The marker a coding agent prints when it needs a decision from the
+// orchestrator (see ORCH_PROTOCOL in autoDriveStartup). Anchored to the start of
+// a line — tolerating a TUI gutter glyph or indentation — so an agent merely
+// MENTIONING the marker mid-sentence doesn't trip it.
+//
+// CRITICAL: this assembled literal must NEVER appear in any string we write into
+// a PTY. Agent TUIs echo the submitted prompt back through onData, so a marker
+// quoted in the task prompt would match our own instructions on every spawn.
+const ORCH_SENTINEL_RE = /^[\s>│┃▌▎|*•-]*\[ORCHESTRATOR_INPUT_NEEDED\]\s*(.*)$/im;
+
+// How long a session may sit with autoApproveBusy set before we force-clear it.
+// autoApproveBusy gates the whole universal monitor, so a path that sets it and
+// never clears it (e.g. an approval picker the user never answers) would leave
+// the session permanently unwatched. This watchdog guarantees recovery.
+const APPROVE_BUSY_TIMEOUT_MS = 45000;
+// After auto-answering an approval prompt, ignore further approval matches for
+// this long. TUIs redraw their scrollback constantly, so the same prompt text
+// reappears in the output stream and would otherwise be "approved" again and
+// again, spraying stray Enter keystrokes into a working agent.
+const APPROVE_COOLDOWN_MS = 1800;
+
 // Build the structured status + output block shared by read_session and
 // wait_for_session. Returns a header line (status / exit code / working dir)
 // followed by the clean terminal screen text. Preserves the trust-dialog
@@ -124,7 +146,31 @@ async function formatSessionStatusOutput(s, statusOverride) {
 // Worktree metadata: branchName -> { wtPath, parentBranch, projectPath }.
 // Tracks every worktree created by create_worktree so merge_worktree can find
 // the parent branch to merge back into without the model having to remember it.
+//
+// PERSISTED to scopedData: the orchestrator's tool-call history is NOT replayed
+// into the next turn's messages, and the runtime caps tool rounds per turn — so a
+// create-worktrees turn and the merge turn are almost always DIFFERENT turns (and
+// may straddle an app restart). Keeping this in memory only made every worktree
+// unmergeable the moment the turn ended. buildSystemPrompt surfaces the live
+// contents to the model, and list_worktrees lets it enumerate them explicitly.
 const worktreeMeta = new Map();
+function saveWorktrees() {
+  try {
+    const arr = [...worktreeMeta.entries()].map(([branch, m]) => Object.assign({ branch }, m));
+    window.chatoss.scopedData.set(WORKTREES_KEY, arr).catch((e) => console.warn("saveWorktrees", e));
+  } catch (e) { console.warn("saveWorktrees", e); }
+}
+async function loadWorktrees() {
+  try {
+    const arr = await window.chatoss.scopedData.get(WORKTREES_KEY);
+    if (!Array.isArray(arr)) return;
+    for (const m of arr) {
+      if (m && m.branch) {
+        worktreeMeta.set(m.branch, { wtPath: m.wtPath, parentBranch: m.parentBranch, projectPath: m.projectPath });
+      }
+    }
+  } catch (e) { console.warn("loadWorktrees", e); }
+}
 
 // Promise + resolver for the spawn modal wait (set while the modal is open).
 // The orchestrator's start_cli_session tool awaits this; manual start too.
@@ -478,6 +524,10 @@ const ORCHESTRATOR_TOOLS = [
     },
   },
   {
+    // NOTE: `type: "function"` is REQUIRED on every entry. It was missing here,
+    // which risks the whole tools array being rejected by a strict engine (i.e.
+    // no tool calling at all, not just this one tool going missing).
+    type: "function",
     function: {
       name: "list_project_files",
       description: "List the files in the project's working directory (ls -la). Uses the active project unless projectId is given. Returns the directory listing.",
@@ -485,6 +535,14 @@ const ORCHESTRATOR_TOOLS = [
         type: "object",
         properties: { projectId: { type: "string", description: "Optional. Defaults to the active project." } },
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_worktrees",
+      description: "List every git worktree Term Coder has created and not yet merged, with its branch, path and parent branch. Worktrees SURVIVE across turns and app restarts, but your own tool-call history does NOT — so call this at the start of a turn to recover which worktrees are still open and mergeable instead of relying on remembering branch names from an earlier turn.",
+      parameters: { type: "object", properties: {} },
     },
   },
   {
@@ -604,8 +662,11 @@ function stripAnsi(s) {
   // Remaining stray ESCs and other C0 control chars (except \n, \r, \t) -> drop
   s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
   // Collapse runs of spaces that were separated by (now-removed) ANSI codes
-  // down to a single space, so "Do  you  trust" -> "Do you trust". But preserve
-  // leading spaces / indentation by only collapsing 2+ spaces to one.
+  // down to a single space, so "Do  you  trust" -> "Do you trust", which is what
+  // the prompt/marker regexes need to match reliably.
+  // TRADE-OFF: this also flattens indentation and TUI box alignment, so code the
+  // agent prints loses its leading whitespace in read_session output. That is
+  // acceptable — the orchestrator reads this for status, not to apply patches.
   s = s.replace(/ {2,}/g, " ");
   return s;
 }
@@ -633,20 +694,33 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   // ---------- Universal orchestrator protocol ----------
   // Prepended to EVERY task prompt sent to ANY coding agent. It teaches the
   // agent a single, CLI-agnostic way to ask the orchestrator a question: print
-  // a sentinel line, then the question. The app's universal terminal monitor
-  // watches every session's output for this sentinel, so it works with any CLI.
+  // a marker line, then the question. The app's universal terminal monitor
+  // watches every session's output for that marker, so it works with any CLI.
   //
-  // IMPORTANT: This is a SINGLE LINE (no \n newlines). When we session.write()
+  // IMPORTANT #1: This is a SINGLE LINE (no \n newlines). When we session.write()
   // a string to the PTY, every \n acts as an Enter/submit — so a multi-line
   // protocol block would get split into dozens of broken separate messages and
   // the actual task would never arrive as one coherent submission. The agent
   // (an LLM) doesn't need newlines for formatting — it reads the protocol fine
   // as one sentence.
+  //
+  // IMPORTANT #2 — DO NOT put the assembled marker literal in this text. The
+  // agent's TUI renders the submitted prompt into its own transcript, so every
+  // byte we type here comes straight back out through session.onData. If the
+  // literal marker appeared here, the universal monitor would match its OWN
+  // instructions the moment the prompt was submitted — flagging a bogus
+  // "agent asked a question" on every single spawn and (previously) latching
+  // autoApproveBusy so no permission prompt was ever auto-approved again.
+  // So we describe the marker as two fragments the agent must JOIN. The echoed
+  // instruction contains "[ORCHESTRATOR" and "_INPUT_NEEDED]" separately but
+  // never the concatenation, so ORCH_SENTINEL_RE cannot match the echo.
   const ORCH_PROTOCOL =
     "[ORCHESTRATOR PROTOCOL] You are directed by Term Coder, a supervisor app watching this terminal. " +
-    "When you need to ask a question or need clarification before proceeding, print this exact sentinel on its own line: " +
-    "[ORCHESTRATOR_INPUT_NEEDED] <one-line question> — then STOP and WAIT for the orchestrator to type a response. " +
-    "Do NOT use the sentinel for routine edits or command execution — only when you genuinely need a decision. " +
+    "When you genuinely need a decision or clarification before you can proceed, print ONE line that begins with the " +
+    "all-caps marker formed by joining these two fragments together with nothing between them — first `[ORCHESTRATOR` " +
+    "and then `_INPUT_NEEDED]` — followed by a space and your one-line question, then STOP and WAIT for the " +
+    "orchestrator to type a response. The joined marker must be the FIRST thing on that line. " +
+    "Do NOT use the marker for routine edits or command execution — only when you genuinely need a decision. " +
     "TASK: ";
   // Flatten any newlines in the task prompt itself — same PTY-submit reason.
   const flatPrompt = (prompt || "").replace(/\r?\n/g, "  ");
@@ -679,21 +753,41 @@ async function autoDriveStartup(session, prompt, label, cwd) {
     settled = true;
     try { unsub && unsub(); } catch (_) {}
     if (killed) return; // session was killed — don't send the prompt
+    // Startup is over: no trust dialog is blocking this session any more (either
+    // we never saw one, or handleTrust resolved it). The universal terminal
+    // monitor consults rec.trustState before touching the PTY, so leaving it at
+    // "pending" here would suppress approval auto-answering for the whole
+    // session on an already-trusted folder.
+    if (rec && rec.trustState === "pending") rec.trustState = "confirmed";
+
     // Type the prompt, then press Enter. We send the text and the Enter key as
     // SEPARATE writes so a CLI that echoes input character-by-character has a
     // chance to render the full prompt before the submit keystroke arrives.
     //
-    // BUG 2 FIX — robust submit: \r (carriage return) is the standard Enter in
-    // a PTY, but some Codex versions submit on \n (line feed) instead. We send
-    // \r first; if the task hasn't started ~400ms later we send \n as a
-    // fallback. Both writes are guarded so that if \r already submitted the
-    // task, the \n is just a harmless empty keystroke to the now-busy agent.
+    // Robust submit: \r (carriage return) is the standard Enter in a PTY, but
+    // some Codex versions submit on \n (line feed) instead. We send \r first and
+    // watch for output; only if the terminal stays SILENT for 400ms (i.e. the \r
+    // did nothing) do we send \n. Sending it unconditionally typed a stray
+    // newline into the input box of an agent that had already accepted the task.
     await safe(() => session.write(fullPrompt));
     await safe(() => session.write("\r"));
+    // Drop the echoed prompt out of the monitor's buffer — it contains the whole
+    // protocol text and would otherwise sit there being re-scanned as if it were
+    // terminal output from the agent.
+    try { if (rec && rec._resetMonitorBuffer) rec._resetMonitorBuffer(); } catch (_) {}
+
     if (!submitFallbackScheduled) {
       submitFallbackScheduled = true;
+      let sawPostSubmitOutput = false;
+      let probe = null;
+      try {
+        if (typeof session.onData === "function") {
+          probe = session.onData(() => { sawPostSubmitOutput = true; });
+        }
+      } catch (_) {}
       setTimeout(() => {
-        if (killed) return;
+        try { probe && probe(); } catch (_) {}
+        if (killed || sawPostSubmitOutput) return;
         try { session.write("\n"); } catch (_) {}
       }, 400);
     }
@@ -937,7 +1031,9 @@ async function toolHandler(name, args) {
         if (r.exitCode !== 0) return "git worktree failed (exit " + r.exitCode + "):\n" + r.output;
 
         // Track worktree metadata so merge_worktree can find the parent branch.
+        // Persisted — the merge almost always happens in a LATER turn.
         worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
+        saveWorktrees();
         return JSON.stringify({ worktreePath: wtPath, branch: branch, parentBranch: mainBranch });
       }
       case "merge_worktree": {
@@ -952,6 +1048,13 @@ async function toolHandler(name, args) {
         const wtPath = (meta && meta.wtPath) || (args.worktreePath || "").trim();
         const parentBranch = (meta && meta.parentBranch) || args.parentBranch || "main";
         if (!wtPath && !branch) return "Error: pass branchName or worktreePath so I know which worktree to merge.";
+        // A branch name is REQUIRED for the merge itself — `git merge ""` fails
+        // with an obscure error. If only worktreePath was given and we have no
+        // metadata for it, say so plainly instead of running a broken command.
+        if (!branch) {
+          return "Error: I don't have a branch recorded for worktreePath " + wtPath +
+            ". Call list_worktrees to see the open worktrees and pass the branchName.";
+        }
 
         // First commit any uncommitted work inside the worktree.
         if (wtPath) {
@@ -964,10 +1067,28 @@ async function toolHandler(name, args) {
           // exitCode 0 = committed; non-zero with "nothing to commit" is fine.
         }
 
+        // The main project folder may have uncommitted edits (the user's own
+        // work, or files an agent wrote before we moved to worktrees). Both
+        // `git checkout` and `git merge` refuse to run against a dirty tree, so
+        // commit it first — otherwise every merge fails with "local changes
+        // would be overwritten" and the worktree is stranded.
+        const dirtyR = await window.chatoss.terminal.exec(
+          loginShell("git status --porcelain"),
+          { cwd: base }
+        );
+        if (dirtyR === null) return "Error: terminal permission denied (approve git to continue)";
+        if ((dirtyR.output || "").trim()) {
+          const wipR = await window.chatoss.terminal.exec(
+            loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before merging " + branch)),
+            { cwd: base }
+          );
+          if (wipR === null) return "Error: terminal permission denied (approve git to continue)";
+        }
+
         // Switch to the parent branch in the MAIN project folder and merge.
-        const mergeMsg = "Merge worktree branch " + (branch || "?") + " into " + parentBranch;
+        const mergeMsg = "Merge worktree branch " + branch + " into " + parentBranch;
         const mergeR = await window.chatoss.terminal.exec(
-          loginShell("git checkout " + JSON.stringify(parentBranch) + " && git merge --no-ff " + JSON.stringify(branch || "") + " -m " + JSON.stringify(mergeMsg)),
+          loginShell("git checkout " + JSON.stringify(parentBranch) + " && git merge --no-ff " + JSON.stringify(branch) + " -m " + JSON.stringify(mergeMsg)),
           { cwd: base }
         );
         if (mergeR === null) return "Error: terminal permission denied (approve git to continue)";
@@ -987,8 +1108,16 @@ async function toolHandler(name, args) {
           await window.chatoss.terminal.exec(loginShell("git worktree remove \"" + wtPath + "\" --force"), { cwd: base });
         }
         await window.chatoss.terminal.exec(loginShell("git branch -D \"" + branch + "\""), { cwd: base });
-        if (meta) worktreeMeta.delete(branch);
+        worktreeMeta.delete(branch);
+        saveWorktrees();
         return "Merged branch " + branch + " into " + parentBranch + " successfully. Worktree cleaned up.\n" + mergeOut;
+      }
+      case "list_worktrees": {
+        if (!worktreeMeta.size) return "No open worktrees. Create one with create_worktree before spawning a coding agent.";
+        const lines = [...worktreeMeta.entries()].map(([branch, m]) =>
+          "  branch " + branch + " | parent " + (m.parentBranch || "main") + " | path " + (m.wtPath || "(unknown)"));
+        return "OPEN WORKTREES (" + worktreeMeta.size + "):\n" + lines.join("\n") +
+          "\n\nMerge each one with merge_worktree({ branchName: <branch> }) once its agent has finished.";
       }
       case "start_cli_session": {
         // The USER decides the CLI + model in the spawn modal. The tool WAITS
@@ -1037,10 +1166,16 @@ async function toolHandler(name, args) {
           // The orchestrator just answered an agent's question (or sent a follow-
           // up). Clear the NEEDS INPUT / pending question state so the status
           // tools stop reporting it as blocked, and the idle timer can re-arm.
+          // NOTE: we deliberately do NOT clear s._sentinelKey. The agent's TUI
+          // keeps the asked question in its scrollback and re-emits it on every
+          // redraw, so re-arming the same key would re-flag the question we just
+          // answered — an answer/flag loop. A genuinely NEW question has
+          // different text and will still be detected.
           if (s.waitingForInput || s.pendingQuestion) {
             s.waitingForInput = false;
             s.pendingQuestion = "";
             s.autoApproveBusy = false;
+            if (s._busyTimer) { clearTimeout(s._busyTimer); s._busyTimer = null; }
             renderTabs();
             renderSessionInfo();
           }
@@ -2463,11 +2598,13 @@ function createActivityCard() {
     refreshCount();
     // Keep the newest chip in view inside the scrolling list.
     body.scrollTop = body.scrollHeight;
-    // Wrap _setResult/_setError so the done counter advances.
+    // Wrap the terminal-state setters so the done counter advances.
     const origRes = chip._setResult.bind(chip);
     const origErr = chip._setError.bind(chip);
+    const origUnk = chip._setUnknown.bind(chip);
     chip._setResult = (r) => { doneCount++; origRes(r); refreshCount(); };
     chip._setError = (e) => { doneCount++; origErr(e); refreshCount(); };
+    chip._setUnknown = () => { doneCount++; origUnk(); refreshCount(); };
   };
   // Collapse to a compact summary pill when the run finishes.
   card._finish = () => {
@@ -2483,11 +2620,34 @@ function createActivityCard() {
   return card;
 }
 
+// Rebuild the activity card for a SAVED message (history replay / reload).
+//
+// The activity card is the ONE canonical home for thinking + tool chips, live
+// and historical alike. Previously the live card was left in the log on finish
+// AND renderMessage appended a second thinking widget plus a second full set of
+// chips into .msg-tools — so every completed turn showed its tools twice, and a
+// reload showed them in a completely different shape than the run had. Same
+// component both ways now.
+function buildActivityRecord(m) {
+  const card = createActivityCard();
+  if (m.thinking) card._addThinking(createThinkingWidget(m.thinking, { streaming: false }));
+  for (const t of (m.toolCalls || [])) {
+    const chip = createToolChip(t.name, t.args || {}, { historical: true });
+    card._addChip(chip);
+    if (t.error) chip._setError(t.error);
+    else if (t.result != null) chip._setResult(t.result);
+    else chip._setUnknown();
+  }
+  card._finish();
+  return card;
+}
+
 // ---------- Tool-call activity chip ----------
 // Creates a compact inline chip with a status icon (spinner while running,
 // green check when done, red x on error) plus a live elapsed-time readout so
 // long-running tools never look "stuck". Clicking expands args/result detail.
-function createToolChip(name, args) {
+function createToolChip(name, args, opts) {
+  const o = opts || {};
   const chip = document.createElement("div");
   chip.className = "tool-chip is-running";
   chip.setAttribute("data-state", "collapsed");
@@ -2562,7 +2722,12 @@ function createToolChip(name, args) {
   const stopTimer = () => {
     if (timerId) { clearInterval(timerId); timerId = null; }
   };
-  startTimer();
+  // A HISTORICAL chip (replayed from a saved message) is already finished, so it
+  // must never start a ticker. Previously every replayed chip started a 250ms
+  // setInterval that nothing ever stopped: a chip whose result wasn't recorded
+  // sat spinning "running 14m 32s" forever, and a long conversation accumulated
+  // one live interval per chip. This is the "chips stuck loading" bug.
+  if (!o.historical) startTimer();
 
   const markDone = (markHtml) => {
     stopTimer();
@@ -2576,6 +2741,14 @@ function createToolChip(name, args) {
     const txt = String(res == null ? "" : res);
     // Truncate very long results in the detail view but keep full text via title.
     resultLine.textContent = txt.length > 1200 ? txt.slice(0, 1200) + "\n…(truncated)" : txt;
+  };
+  // A replayed chip whose result was never recorded: show it as finished with an
+  // unknown outcome rather than as perpetually running.
+  chip._setUnknown = () => {
+    markDone('<span class="tool-chip-done">✓</span>');
+    chip.classList.add("is-done");
+    badge.textContent = "done";
+    resultLine.textContent = "(result not recorded)";
   };
   chip._setError = (err) => {
     markDone('<span class="tool-chip-error">✕</span>');
@@ -2660,10 +2833,10 @@ function renderChat() {
 }
 function renderMessage(m) {
   const role = m.role || "system";
-  // Collapsible thinking widget (rendered ABOVE the message body).
-  if (m.thinking) {
-    const th = createThinkingWidget(m.thinking, { streaming: false });
-    el.chatLog.appendChild(th);
+  // Thinking + tool chips live together in ONE collapsed activity card above the
+  // message body — the same component the live run uses.
+  if (m.thinking || (m.toolCalls && m.toolCalls.length)) {
+    el.chatLog.appendChild(buildActivityRecord(m));
   }
   const row = document.createElement("div");
   row.className = "msg " + role;
@@ -2697,18 +2870,6 @@ function renderMessage(m) {
     body.innerHTML = m.content ? m.content.split(/\n\n+/).map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("") : "";
   }
   col.appendChild(body);
-  // Tool-call activity chips (collapsed by default).
-  if (m.toolCalls && m.toolCalls.length) {
-    const wrap = document.createElement("div");
-    wrap.className = "msg-tools";
-    for (const t of m.toolCalls) {
-      const chip = createToolChip(t.name, t.args || {});
-      if (t.result != null) chip._setResult(t.result);
-      if (t.error) chip._setError(t.error);
-      wrap.appendChild(chip);
-    }
-    col.appendChild(wrap);
-  }
   if (role !== "system") { row.appendChild(avatar); }
   row.appendChild(col);
   el.chatLog.appendChild(row);
@@ -2771,6 +2932,23 @@ async function buildSystemPrompt() {
     "IMPORTANT — tool arguments: most tools work with NO arguments because they default to the active project and the attached board. Do NOT invent ids. If you are unsure, call the tool with {} and it will use the current context.",
     "",
     "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
+    "",
+    "═══════════════════════════════════════════════════════════════",
+    "TURN BUDGET — READ THIS BEFORE PLANNING ANYTHING",
+    "═══════════════════════════════════════════════════════════════",
+    "",
+    "Two hard constraints shape how you must work. Ignoring them is the single most common way this goes wrong:",
+    "",
+    "1. EACH TURN ALLOWS ONLY ABOUT 8 TOOL CALLS. A four-agent build needs 16+ (4 worktrees + 4 spawns + 4 waits + 4 merges), so it CANNOT complete in one turn. You will be cut off mid-workflow if you try.",
+    "2. YOUR TOOL CALLS AND THEIR RESULTS ARE NOT CARRIED INTO YOUR NEXT TURN. Next turn you see the conversation text only — not the JSON you got back from create_worktree, not the session ids. Anything you need later must either be WRITTEN INTO YOUR REPLY TEXT or be recoverable from list_sessions / list_worktrees, which read live app state and always work.",
+    "",
+    "So work in PHASES — one phase per turn — and end every turn with a short report to the user:",
+    "  • TURN 1 (plan): state your decomposition in chat. Use no tools, or at most list_project_files to look around. Ask the user to confirm or adjust.",
+    "  • TURN 2 (launch): for each subtask, create_worktree then start_cli_session — 2 calls per subtask, so cover at most 3 subtasks per turn. Then STOP and report a line per agent: subtask, branch name, worktree path, session id. If there are more subtasks, launch them next turn.",
+    "  • TURN 3+ (monitor): OPEN THE TURN with list_sessions({}) and list_worktrees({}) to recover state. Then wait_for_session on a running agent, and merge_worktree each branch whose agent has EXITED. A few agents per turn.",
+    "  • FINAL TURN (close out): confirm via list_sessions that nothing is RUNNING and via list_worktrees that nothing is unmerged, then summarize what was built.",
+    "",
+    "If you are running low on calls mid-phase, STOP and hand off cleanly in your reply. Never end a turn without reporting the session ids and branch names you created — and never assume a branch you made earlier is still open, ALWAYS check list_worktrees first.",
     "",
     "═══════════════════════════════════════════════════════════════",
     "CORE STRATEGY: PARALLEL MULTI-AGENT DELEGATION",
@@ -2865,6 +3043,37 @@ async function buildSystemPrompt() {
     sys.push("Active project folder: " + p.folderPath);
   } else {
     sys.push("(No project selected yet — ask the user to add a project folder with the + button.)");
+  }
+
+  // ---- LIVE APP STATE ----
+  // Regenerated on every turn. This is what makes multi-turn orchestration
+  // possible at all: the model's own tool-call history is not replayed, so
+  // without this it starts each turn with no idea which agents it launched or
+  // which worktrees are waiting to be merged.
+  sys.push("", "═══════════════════════════════════════════════════════════════",
+    "LIVE APP STATE (regenerated every turn — trust this over your memory)",
+    "═══════════════════════════════════════════════════════════════", "");
+  if (sessions.size) {
+    sys.push("CURRENT SESSIONS (" + sessions.size + "):");
+    for (const s of sessions.values()) {
+      const status = s.active === false
+        ? "EXITED (code " + ((s.exitCode !== undefined && s.exitCode !== null) ? s.exitCode : "killed") + ")"
+        : "RUNNING";
+      const needs = (s.active !== false && s.waitingForInput) ? " | NEEDS INPUT" : "";
+      sys.push("- [" + s.id + "] " + (s.label || s.id) + " | " + status + needs + " | cwd " + (s.cwd || "(unknown)"));
+    }
+  } else {
+    sys.push("CURRENT SESSIONS: (none running — nothing has been spawned yet, or all were closed)");
+  }
+  sys.push("");
+  if (worktreeMeta.size) {
+    sys.push("OPEN WORKTREES (" + worktreeMeta.size + " — created and NOT yet merged):");
+    for (const [branch, m] of worktreeMeta.entries()) {
+      sys.push("- branch " + branch + " | parent " + (m.parentBranch || "main") + " | path " + (m.wtPath || "(unknown)"));
+    }
+    sys.push("Merge each of these with merge_worktree({ branchName: <branch> }) once its agent has finished.");
+  } else {
+    sys.push("OPEN WORKTREES: (none — every worktree has been merged and cleaned up)");
   }
   if (c && c.boardId) {
     sys.push("", "Attached Kanban board id: " + c.boardId);
@@ -3072,13 +3281,25 @@ async function sendMessage() {
 
     typingRow.remove();
     liveRow.remove();
-    // Collapse the activity card to a compact "N tools used" pill instead of
-    // removing it — keeps the layout stable (no jump) and preserves a tappable
-    // record of what ran. The final renderMessage below adds the saved record.
-    if (activityCard) activityCard._finish();
+    // Remove the LIVE activity card — renderMessage below rebuilds an identical
+    // collapsed card from the saved message. Keeping both produced two copies of
+    // every thinking widget and tool chip on screen.
+    if (activityCard) activityCard.remove();
+
     let storedToolCalls = liveToolCalls.length ? liveToolCalls : undefined;
     if (result && result.toolCalls && result.toolCalls.length) {
-      storedToolCalls = result.toolCalls.map(normalizeToolCall);
+      // The engine's toolCalls list is authoritative for WHAT ran, but it carries
+      // no results — those only exist in the liveToolCalls entries we filled in
+      // from onToolCall. Overwriting wholesale (the old behaviour) discarded every
+      // result, so replayed chips had nothing to show and rendered as unfinished.
+      // Merge instead: consume live entries in order, matched by tool name.
+      const pending = liveToolCalls.slice();
+      storedToolCalls = result.toolCalls.map(normalizeToolCall).map((tc) => {
+        const i = pending.findIndex((p) => p.name === tc.name);
+        if (i === -1) return tc;
+        const live = pending.splice(i, 1)[0];
+        return { name: tc.name, args: tc.args, result: live.result, error: live.error };
+      });
     }
     c.messages.push({
       role: "assistant",
@@ -3092,6 +3313,8 @@ async function sendMessage() {
   } catch (e) {
     typingRow.remove();
     liveRow.remove();
+    // On error there is no saved assistant message to rebuild the card from, so
+    // KEEP the live card (collapsed) — it's the only record of what ran.
     if (activityCard) activityCard._finish();
     setStatus("");
     const msg = "Error: " + (e && e.message ? e.message : String(e));
@@ -3177,8 +3400,31 @@ async function registerSession(session, cmd, args, cwd, label) {
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
 
-  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false, pendingQuestion: "", _idleTimer: null };
+  // trustState starts at "none", NOT "pending": only autoDriveStartup (i.e. a
+  // session started with a task prompt) manages a trust dialog, and it sets
+  // "pending" itself. A manually-spawned session with no prompt is driven by the
+  // user in the terminal widget, and must not be treated as blocked on trust —
+  // that would suppress its approval handling forever.
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "none", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false, pendingQuestion: "", _idleTimer: null, _busyTimer: null, _lastApprovalKey: "", _lastApprovalAt: 0, _approveCooldownUntil: 0, _sentinelKey: "" };
   sessions.set(session.id, rec);
+
+  // Set autoApproveBusy WITH a watchdog. This flag gates the entire monitor, so
+  // any path that sets it and fails to clear it (an approval picker the user
+  // never answers, a rejected promise) silently blinds the orchestrator to this
+  // terminal for the rest of the session. The timer guarantees recovery.
+  const setApproveBusy = (on) => {
+    rec.autoApproveBusy = !!on;
+    if (rec._busyTimer) { clearTimeout(rec._busyTimer); rec._busyTimer = null; }
+    if (on) {
+      rec._busyTimer = setTimeout(() => {
+        rec._busyTimer = null;
+        if (rec.autoApproveBusy) {
+          console.warn("[Term Coder] autoApproveBusy watchdog fired for", rec.label);
+          rec.autoApproveBusy = false;
+        }
+      }, APPROVE_BUSY_TIMEOUT_MS);
+    }
+  };
 
   // ---------- Universal terminal monitor ----------
   // Watches every session's output and detects THREE kinds of events so the
@@ -3201,12 +3447,12 @@ async function registerSession(session, cmd, args, cwd, label) {
   //      protocol and just sit waiting. We mark the session NEEDS INPUT so the
   //      orchestrator knows to check on it.
 
-  // Extract the question text that follows an ORCHESTRATOR_INPUT_NEEDED sentinel.
+  // Extract the question text that follows the orchestrator-input marker.
   function extractSentinelQuestion(text) {
-    const m = text.match(/\[ORCHESTRATOR_INPUT_NEEDED\]\s*(.+)/i);
+    const m = text.match(ORCH_SENTINEL_RE);
     if (!m) return "";
-    // Grab the sentinel line + any following context lines (up to ~500 chars).
-    let q = m[1].trim();
+    // Grab the marker line + any following context lines (up to ~500 chars).
+    let q = (m[1] || "").trim();
     const after = text.slice(m.index + m[0].length);
     const ctxLines = after.split("\n").filter((l) => l.trim() && !/^(─|❯|›|\$|>)/.test(l.trim())).slice(0, 4);
     if (ctxLines.length) q += "\n" + ctxLines.join("\n").trim();
@@ -3216,6 +3462,12 @@ async function registerSession(session, cmd, args, cwd, label) {
   // Classify a permission prompt. Returns null when there's no prompt, else
   // { kind: "safe-edit" } | { kind: "safe-command", command } | { kind: "dangerous", command }.
   function classifyApprovalPrompt(cleanText, flat) {
+    // NEVER treat a folder-trust dialog as a command approval. Claude Code's
+    // trust dialog offers "1. Yes, proceed", which matches the Codex signature
+    // below — so this monitor used to press Enter on it and silently confirm
+    // trust, defeating the trustMode="ask" pill picker entirely. Trust is
+    // handled exclusively by autoDriveStartup/handleTrust.
+    if (/do\s*you\s*trust|trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder/.test(flat)) return null;
     // Codex command-approval signature.
     const codexSig = /yes,\s*proceed|press\s*enter\s*to\s*confirm|yes,\s*and\s*don'?t\s*ask\s*again/.test(flat);
     // Claude permission prompt signatures (edit / create / run / proceed / overwrite).
@@ -3253,10 +3505,13 @@ async function registerSession(session, cmd, args, cwd, label) {
   // Detect a generic idle prompt: a prompt cursor at the end of recent output
   // with no new activity. Returns true if the terminal looks idle/waiting.
   function isIdlePrompt(flat) {
-    // Prompt cursors used by various CLIs: ❯ › » $ > (and the box-drawing ❑).
+    // Prompt cursors used by various CLIs: ❯ › » $ >.
     // We look for a cursor near the END of the output (last ~200 chars).
+    // The cursor must be at a word boundary — a bare /[>]$/ also matched any
+    // output that merely ENDED in '>' (e.g. an agent printing "</div>"), which
+    // flagged a busy agent as idle.
     const tail = flat.slice(-200);
-    if (/[❯›»$>]\s*$/.test(tail)) return true;
+    if (/(^|[\s│┃▌▎])[❯›»$>]\s*$/.test(tail)) return true;
     // Claude/Codex "waiting for input" box or a bare cursor with options above.
     if (/esc to cancel|tab to amend/.test(tail)) return true;
     return false;
@@ -3266,108 +3521,141 @@ async function registerSession(session, cmd, args, cwd, label) {
     if (typeof session.onData === "function") {
       let monitorBuffer = "";
       let lastOutputTime = Date.now();
+      // Let autoDriveStartup drop the echo of the task prompt out of the buffer
+      // the moment it is submitted, so a long prompt can't linger and be
+      // re-matched as terminal content.
+      rec._resetMonitorBuffer = () => { monitorBuffer = ""; };
+
       rec.autoApproveUnsub = session.onData((chunk) => {
         if (!rec.active) return;
         monitorBuffer += chunk;
         lastOutputTime = Date.now();
         // Cap the buffer so a long session can't grow it unbounded — prompts
-        // and sentinels are always near the tail, so keeping the last ~8KB is plenty.
+        // and markers are always near the tail, so keeping the last ~8KB is plenty.
         if (monitorBuffer.length > 8192) monitorBuffer = monitorBuffer.slice(-4096);
         const cleanText = stripAnsi(monitorBuffer);
-        const flat = cleanText.toLowerCase();
+        // Match prompts against the TAIL only. Matching the whole accumulated
+        // buffer meant a prompt that had already been answered stayed matchable
+        // for thousands of characters — and since TUIs redraw their scrollback
+        // continuously, the same prompt kept re-triggering an auto-approve,
+        // spraying stray Enter keystrokes into a working agent.
+        const tailText = cleanText.slice(-1200);
+        const tailFlat = tailText.toLowerCase();
+        const now = Date.now();
 
-        // 1) ORCHESTRATOR_INPUT_NEEDED sentinel — the agent is asking us a question.
-        if (!rec.autoApproveBusy && /\[ORCHESTRATOR_INPUT_NEEDED\]/i.test(cleanText)) {
-          rec.autoApproveBusy = true;
-          rec.waitingForInput = true;
-          rec.pendingQuestion = extractSentinelQuestion(cleanText);
-          renderTabs();
-          renderSessionInfo();
-          // Notify the user about the pending question.
-          try {
-            window.chatoss.notifications.send({
-              title: "Agent asking a question",
-              body: (rec.label || "Agent") + ": " + (rec.pendingQuestion.split("\n")[0].slice(0, 120)),
-            });
-          } catch (e) { /* non-fatal */ }
-          // Do NOT auto-respond — the orchestrator decides the answer and types
-          // it via send_to_session. We clear the sentinel from the buffer so we
-          // don't re-fire, but keep rec.pendingQuestion + waitingForInput set
-          // until the orchestrator acts (send_to_session clears them).
-          monitorBuffer = "";
-          return;
+        // Is this session still waiting on the folder-trust dialog? While it is,
+        // the monitor must not touch the PTY at all — autoDriveStartup owns the
+        // keyboard until the user answers the trust picker.
+        const trustPending = rec.trustMode !== "always" &&
+          (rec.trustState === "pending" || rec.trustState === "asking");
+
+        // 1) Orchestrator-input marker — the agent is asking us a question.
+        //    Deduped by question text rather than by latching autoApproveBusy, so
+        //    a pending question never blinds the monitor to approval prompts.
+        const sentinelMatch = cleanText.match(ORCH_SENTINEL_RE);
+        if (sentinelMatch) {
+          const question = extractSentinelQuestion(cleanText);
+          const key = question.slice(0, 160);
+          if (key && key !== rec._sentinelKey) {
+            rec._sentinelKey = key;
+            rec.waitingForInput = true;
+            rec.pendingQuestion = question;
+            renderTabs();
+            renderSessionInfo();
+            // Notify the user about the pending question.
+            try {
+              window.chatoss.notifications.send({
+                title: "Agent asking a question",
+                body: (rec.label || "Agent") + ": " + question.split("\n")[0].slice(0, 120),
+              });
+            } catch (e) { /* non-fatal */ }
+            // Do NOT auto-respond — the orchestrator decides the answer and types
+            // it via send_to_session. Drop the marker from the buffer so the same
+            // text doesn't keep re-matching, but keep rec.pendingQuestion +
+            // waitingForInput set until the orchestrator acts.
+            monitorBuffer = "";
+            return;
+          }
         }
 
         // 2) Permission / approval prompts.
-        if (!rec.autoApproveBusy) {
-          const verdict = classifyApprovalPrompt(cleanText, flat);
-          if (verdict) {
-            rec.autoApproveBusy = true;
+        if (!rec.autoApproveBusy && !trustPending && now >= rec._approveCooldownUntil) {
+          const verdict = classifyApprovalPrompt(tailText, tailFlat);
+          // Ignore a prompt we just answered — the TUI keeps it on screen.
+          const sameAsLast = verdict && verdict.command === rec._lastApprovalKey &&
+            now - rec._lastApprovalAt < 4000;
+          if (verdict && !sameAsLast) {
+            setApproveBusy(true);
             rec.waitingForInput = true;
+            rec._lastApprovalKey = verdict.command || "";
+            rec._lastApprovalAt = now;
             renderTabs();
             renderSessionInfo();
 
+            const settle = () => {
+              monitorBuffer = "";
+              rec._approveCooldownUntil = Date.now() + APPROVE_COOLDOWN_MS;
+              setApproveBusy(false);
+              rec.waitingForInput = false;
+              rec.pendingQuestion = "";
+              renderTabs();
+              renderSessionInfo();
+            };
+
             if (verdict.kind === "dangerous") {
               // Ask the user in chat before approving a destructive command.
+              // .catch is essential: an askChoice that rejects would otherwise
+              // leave autoApproveBusy set (the watchdog would clear it, but only
+              // after 45s of the orchestrator being blind to this terminal).
               askCommandApproval(rec, verdict.command).then((approved) => {
-                if (approved) {
-                  session.write("\r"); // press Enter = "1. Yes"
-                } else {
-                  session.write("\x1b"); // Esc = "3. No"
-                }
-                monitorBuffer = "";
-                rec.autoApproveBusy = false;
-                rec.waitingForInput = false;
-                rec.pendingQuestion = "";
-                renderTabs();
-                renderSessionInfo();
+                try { session.write(approved ? "\r" : "\x1b"); } catch (e) { /* non-fatal */ }
+                settle();
+              }).catch((e) => {
+                console.warn("askCommandApproval failed", e);
+                try { session.write("\x1b"); } catch (_) { /* non-fatal */ }
+                settle();
               });
             } else {
               // Safe edit / safe command — auto-approve. For Claude the default
               // highlighted option is "1. Yes", so Enter accepts it (we never
               // pick option 2 "allow all edits during this session" — that stays
               // the user's per-edit choice).
-              session.write("\r");
-              monitorBuffer = "";
-              rec.autoApproveBusy = false;
-              rec.waitingForInput = false;
-              renderTabs();
-              renderSessionInfo();
+              try { session.write("\r"); } catch (e) { /* non-fatal */ }
+              settle();
             }
             return;
           }
         }
 
-        // 3) Generic idle fallback — if no sentinel and no approval prompt, but
-        //    the terminal is showing a prompt cursor, mark it as potentially
-        //    waiting so the orchestrator knows to check. We use a debounce so
-        //    we only flag it once per idle period (cleared when new output arrives).
-        if (!rec.autoApproveBusy && !rec.waitingForInput && isIdlePrompt(flat)) {
-          // Only flag if idle for >3 seconds (avoid false positives mid-stream).
-          // We'll set a one-shot timer; if new output arrives it resets
-          // lastOutputTime, and the timer check will fail.
-          if (!rec._idleTimer) {
-            rec._idleTimer = setTimeout(() => {
-              rec._idleTimer = null;
-              if (!rec.active || rec.autoApproveBusy || rec.waitingForInput) return;
-              if (Date.now() - lastOutputTime >= 3000) {
-                rec.waitingForInput = true;
-                rec.pendingQuestion = "(agent appears idle — terminal is showing a prompt cursor with no recent activity. Check on it with read_session to see what it needs.)";
-                renderTabs();
-                renderSessionInfo();
-              }
-            }, 3000);
-          }
-        } else if (rec._idleTimer && !isIdlePrompt(flat)) {
-          // New non-idle output arrived — clear any pending idle flag.
-          clearTimeout(rec._idleTimer);
-          rec._idleTimer = null;
-          if (rec.waitingForInput && rec.pendingQuestion && rec.pendingQuestion.startsWith("(agent appears idle")) {
+        // 3) Generic idle fallback — if there's no marker and no approval prompt
+        //    but the terminal is showing a prompt cursor, flag it so the
+        //    orchestrator knows to check on it.
+        const idle = isIdlePrompt(tailFlat);
+        if (!idle) {
+          // Any non-idle output means the agent is working again. Clear a pending
+          // timer AND an already-raised idle flag — the old code only did the
+          // former, so once the idle flag was set nothing ever cleared it and the
+          // session reported NEEDS INPUT forever.
+          if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
+          if (rec.waitingForInput && /^\(agent appears idle/.test(rec.pendingQuestion || "")) {
             rec.waitingForInput = false;
             rec.pendingQuestion = "";
             renderTabs();
             renderSessionInfo();
           }
+        } else if (!rec.autoApproveBusy && !rec.waitingForInput && !rec._idleTimer) {
+          // Only flag after a quiet period — an agent that is actually thinking
+          // keeps emitting spinner frames, which refresh lastOutputTime.
+          rec._idleTimer = setTimeout(() => {
+            rec._idleTimer = null;
+            if (!rec.active || rec.autoApproveBusy || rec.waitingForInput) return;
+            if (Date.now() - lastOutputTime >= 5000) {
+              rec.waitingForInput = true;
+              rec.pendingQuestion = "(agent appears idle — terminal is showing a prompt cursor with no recent activity. Check on it with read_session to see what it needs.)";
+              renderTabs();
+              renderSessionInfo();
+            }
+          }, 5000);
         }
       });
     }
@@ -3393,6 +3681,13 @@ async function registerSession(session, cmd, args, cwd, label) {
       session.onExit((exitCode) => {
         rec.active = false;
         rec.exitCode = exitCode;
+        // Tear down monitor timers so an exited session can't keep firing
+        // renderTabs()/renderSessionInfo() or flag a dead terminal as idle.
+        if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
+        if (rec._busyTimer) { clearTimeout(rec._busyTimer); rec._busyTimer = null; }
+        rec.autoApproveBusy = false;
+        rec.waitingForInput = false;
+        rec.pendingQuestion = "";
         dot.classList.add("exited");
         dot.title = "Exited (" + (exitCode == null ? "killed" : exitCode) + ")";
         lab.textContent = label + " ✓ (" + (exitCode == null ? "exited" : exitCode) + ")";
@@ -3534,6 +3829,11 @@ window.termCoder.askChoice = function askChoice(config) {
     function finish(clickedBtn, value) {
       if (settled) return;
       settled = true;
+      // Always detach the capturing keydown listener. It used to be removed only
+      // on the Escape path, so every picker answered by CLICK leaked a
+      // document-level capturing listener for the lifetime of the app.
+      // (onKey is a hoisted function declaration, so this reference is safe.)
+      document.removeEventListener("keydown", onKey, true);
       waitHint.classList.add("hidden");
       // disable every button; dim the un-chosen ones, highlight the chosen
       for (const b of btns) {
@@ -3576,12 +3876,12 @@ window.termCoder.askChoice = function askChoice(config) {
       finish(null, null);
     }
 
-    // Escape dismisses -> resolve null (cancel). Listens only while pending.
+    // Escape dismisses -> resolve null (cancel). Listens only while pending;
+    // finish() detaches this listener on every path.
     function onKey(e) {
       if (e.key !== "Escape" || settled) return;
       e.stopPropagation();
       finish(null, null);
-      document.removeEventListener("keydown", onKey, true);
       if (typeof scrollChatBottom === "function") scrollChatBottom();
     }
     document.addEventListener("keydown", onKey, true);
@@ -3634,6 +3934,9 @@ async function init() {
   await loadModelSelection();
   // Restore the folder-trust policy ("ask" | "always").
   await loadTrustMode();
+  // Restore worktrees created in earlier sessions so they stay mergeable after a
+  // reload (buildSystemPrompt surfaces them; list_worktrees enumerates them).
+  await loadWorktrees();
   detection = {
     codex: !!(settings.detected && settings.detected.codex),
     claude: !!(settings.detected && settings.detected.claude),
