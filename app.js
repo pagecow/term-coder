@@ -2835,6 +2835,15 @@ window.termCoder.askChoice = function askChoice(config) {
         if (b !== clickedBtn) b.classList.add("choice-dimmed");
       }
       resolve(value);
+      // Auto-dismiss the popup after a brief moment so the user sees their
+      // selection confirmed, then it fades away instead of blocking the input.
+      setTimeout(() => {
+        if (row && row.parentNode) {
+          row.style.transition = "opacity .3s ease";
+          row.style.opacity = "0";
+          setTimeout(() => { if (row.parentNode) row.parentNode.removeChild(row); }, 300);
+        }
+      }, 1200);
     }
 
     for (const opt of opts) {
