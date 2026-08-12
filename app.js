@@ -67,6 +67,47 @@ let detection = { codex: false, claude: false, ollama: false, models: [], scanne
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
 
+// Build the structured status + output block shared by read_session and
+// wait_for_session. Returns a header line (status / exit code / working dir)
+// followed by the clean terminal screen text. Preserves the trust-dialog
+// masking so the orchestrator never sees raw "Do you trust..." text it would
+// try to keystroke past.
+async function formatSessionStatusOutput(s, statusOverride) {
+  try {
+    let clean = "(terminal is empty — no output yet)";
+    if (s.session && typeof s.session.getOutput === "function") {
+      const text = await s.session.getOutput();
+      clean = text ? stripAnsi(text) : "(terminal is empty — no output yet)";
+      // MASK the trust dialog from the orchestrator when user must approve it
+      // in chat. If the orchestrator sees the raw "Do you trust..." text, it
+      // will try to send keystrokes to bypass the pill picker. Hide it and
+      // tell the orchestrator to wait for the user's answer.
+      if ((s.trustState === "pending" || s.trustState === "asking") && s.trustMode !== "always" &&
+          /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust|press\s*enter\s*to\s*continue/i.test(clean)) {
+        return "Waiting for user approval: a 'trust this folder?' prompt is shown in chat. Do NOT send keystrokes to confirm it. The session will proceed once the user clicks Yes, or be killed if they click No.";
+      }
+    }
+    let statusLine;
+    if (statusOverride) {
+      // Caller-supplied status line (e.g. wait_for_session's "STILL RUNNING
+      // (timed out …)" message). Reuses the same output-fetch + trust-dialog
+      // masking below so every session read masks the trust dialog uniformly.
+      statusLine = statusOverride;
+    } else if (s.active === false && s.exitCode !== undefined && s.exitCode !== null) {
+      statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: EXITED | EXIT CODE: " + s.exitCode + "]";
+    } else if (s.active === false) {
+      // Exited but no exit code recorded (e.g. killed) — report "killed".
+      statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: EXITED | EXIT CODE: killed]";
+    } else {
+      statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: RUNNING | EXIT CODE: n/a]";
+    }
+    const dirLine = "[WORKING DIR: " + (s.cwd || "(unknown)") + "]";
+    return statusLine + "\n" + dirLine + "\n" + "------------------------------------------------------------\n" + clean;
+  } catch (e) {
+    return "Error: " + (e && e.message ? e.message : String(e));
+  }
+}
+
 // Worktree metadata: branchName -> { wtPath, parentBranch, projectPath }.
 // Tracks every worktree created by create_worktree so merge_worktree can find
 // the parent branch to merge back into without the model having to remember it.
@@ -371,7 +412,7 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "read_session",
-      description: "Read the current output of a running CLI session — everything the terminal shows right now (up to ~64KB). Use this to see what the agent has done, check for errors, or detect when a task is finished. Returns the terminal screen text.",
+      description: "Read the current output of a running CLI session — everything the terminal shows right now (up to ~64KB). The result now includes a STATUS HEADER showing whether the session is RUNNING or EXITED (with its exit code) and the working directory, followed by the clean terminal screen text. Use this to see what the agent has done, check for errors, or detect when a task is finished. For just waiting until an agent is done, prefer wait_for_session; to see all agents at once, use list_sessions.",
       parameters: {
         type: "object",
         properties: {
@@ -382,6 +423,30 @@ const ORCHESTRATOR_TOOLS = [
   },
   {
     type: "function",
+    function: {
+      name: "list_sessions",
+      description: "List all terminal sessions with their status. Returns a summary of every coding agent session: id, label, working directory, whether it's still RUNNING or EXITED, and exit code. Use this to coordinate parallel agents — see which are still working and which are done.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "wait_for_session",
+      description: "Wait for a terminal session to exit (finish), then return its final status and last screen output. Use this instead of repeatedly calling read_session to poll — it blocks until the agent is done (up to the timeout), eliminating wasteful polling loops. Returns the session status (EXITED + exit code, or still RUNNING if timed out) and the terminal output.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "The session id to wait for. Defaults to the most recently started session." },
+          timeoutMs: { type: "number", description: "Maximum time to wait in milliseconds. Default 120000 (2 min). The call returns early if the session exits before the timeout." },
+        },
+      },
+    },
+  },
+  {
     function: {
       name: "list_project_files",
       description: "List the files in the project's working directory (ls -la). Uses the active project unless projectId is given. Returns the directory listing.",
@@ -923,27 +988,59 @@ async function toolHandler(name, args) {
       }
       case "read_session": {
         // Read what the terminal currently shows — the orchestrator's eyes.
+        // Now returns a structured header (status + exit code + working dir)
+        // above the clean terminal text, so the orchestrator can tell at a
+        // glance whether the session is still RUNNING or has EXITED.
         let s = args.sessionId ? sessions.get(args.sessionId) : null;
         if (!s && sessions.size) { s = [...sessions.values()].pop(); }
         if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
-        try {
-          if (s.session && typeof s.session.getOutput === "function") {
-            const text = await s.session.getOutput();
-            const clean = text ? stripAnsi(text) : "(terminal is empty — no output yet)";
-            // MASK the trust dialog from the orchestrator when user must approve it
-            // in chat. If the orchestrator sees the raw "Do you trust..." text, it
-            // will try to send keystrokes to bypass the pill picker. Hide it and
-            // tell the orchestrator to wait for the user's answer.
-            if ((s.trustState === "pending" || s.trustState === "asking") && s.trustMode !== "always" &&
-                /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust|press\s*enter\s*to\s*continue/i.test(clean)) {
-              return "Waiting for user approval: a 'trust this folder?' prompt is shown in chat. Do NOT send keystrokes to confirm it. The session will proceed once the user clicks Yes, or be killed if they click No.";
-            }
-            return clean;
+        return await formatSessionStatusOutput(s);
+      }
+      case "list_sessions": {
+        // Summarize every coding-agent session at a glance so the orchestrator
+        // can coordinate parallel work without guessing from raw screen text.
+        if (!sessions.size) return "No active sessions. Start one with start_cli_session first.";
+        const recs = [...sessions.values()];
+        let running = 0, exited = 0;
+        const lines = recs.map((s) => {
+          let statusPart;
+          if (s.active === false) {
+            exited++;
+            const code = (s.exitCode !== undefined && s.exitCode !== null) ? s.exitCode : "killed";
+            statusPart = "EXITED (code " + code + ")";
+          } else {
+            running++;
+            statusPart = "RUNNING";
           }
-          return "Error: getOutput() not available on this session";
-        } catch (e) {
-          return "Error: " + (e && e.message ? e.message : String(e));
+          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + " | " + (s.cwd || "(unknown)");
+        });
+        return "SESSIONS (" + recs.length + " total, " + running + " running, " + exited + " exited):\n" + lines.join("\n");
+      }
+      case "wait_for_session": {
+        // Block until the given session exits (or the timeout expires), then
+        // return its final status + last screen output. Replaces the wasteful
+        // read_session polling loop that left tool chips stuck "loading".
+        let s = args.sessionId ? sessions.get(args.sessionId) : null;
+        if (!s && sessions.size) { s = [...sessions.values()].pop(); }
+        if (!s) return "Error: no such session.";
+        const timeout = args.timeoutMs || 120000;
+        // Already exited — return immediately.
+        if (s.active === false) return await formatSessionStatusOutput(s);
+        // Still running — poll every 2s up to the timeout.
+        const deadline = Date.now() + timeout;
+        while (s.active !== false && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000));
         }
+        if (s.active === false) return await formatSessionStatusOutput(s);
+        // Timed out while still running — reuse the shared formatter so the
+        // output fetch + ANSI stripping + trust-dialog masking stay uniform
+        // across read_session / wait_for_session (a session that times out
+        // while showing a "Do you trust this folder?" dialog would otherwise
+        // leak the raw trust text to the orchestrator).
+        return await formatSessionStatusOutput(
+          s,
+          "[SESSION: " + (s.label || s.id) + " | STATUS: STILL RUNNING (timed out after " + timeout + "ms)]"
+        );
       }
       case "list_project_files": {
         const p = resolveProject(args);
@@ -2514,22 +2611,24 @@ async function buildSystemPrompt() {
     "  • Spawn subtasks that share files SEQUENTIALLY — wait for the first agent to finish and merge before spawning the next one that touches the same files.",
     "  • Each start_cli_session returns a session id. SAVE every session id so you can monitor each agent independently.",
     "",
-    "STEP 4 — MONITOR each agent independently with read_session.",
-    "  • Use read_session({ sessionId: <id> }) to check on each agent. Each session has its own id — check them one at a time, round-robin style.",
-    "  • The read returns CLEAN text (ANSI escapes stripped) so you can read it directly.",
+    "STEP 4 — MONITOR each agent independently with read_session, list_sessions, and wait_for_session.",
+    "  • Use list_sessions({}) to see ALL agents at once — a summary of every session with its id, label, working directory, and whether it is RUNNING or EXITED (with exit code). This is the quickest way to check on parallel agents.",
+    "  • Use read_session({ sessionId: <id> }) to check on a specific agent. The result now starts with a STATUS HEADER like '[SESSION: <label> | STATUS: RUNNING | EXIT CODE: n/a]' or '[SESSION: <label> | STATUS: EXITED | EXIT CODE: 0]', followed by the working dir and the CLEAN terminal screen text (ANSI escapes stripped). Read the header first to know instantly whether the agent is still working or finished.",
+    "  • PREFER wait_for_session({ sessionId: <id>, timeoutMs: 120000 }) when you just want an agent to finish — it blocks until the session exits (or the timeout) and returns the same status header + output. This eliminates wasteful read_session polling loops that leave tool chips stuck 'loading' and hang the orchestrator. Call it once per agent instead of polling read_session in a loop.",
     "  • Report progress on ALL agents to the user — which are still working, which are done, which hit errors.",
     "  • Use send_to_session({ sessionId: <id>, text }) ONLY for follow-up instructions AFTER an agent's input box is accepting text — not for startup dialogs.",
-    "  • Do NOT loop read_session rapidly. Check each agent, summarize, then check again after a reasonable interval. The coding agents take time to work.",
+    "  • Do NOT loop read_session rapidly. Prefer wait_for_session to block for completion, or list_sessions to check status without dumping output. Only call read_session when you need to read the actual terminal text.",
     "  • send_to_session parses escape codes: use \\r for Enter, \\x1b[A / \\x1b[B for arrows, etc. But you almost never need it for startup.",
     "  • NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
     "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
-    "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session to watch. Do not re-send the initial task.",
-    "  • The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session.",
+    "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session / wait_for_session to watch. Do not re-send the initial task.",
+    "  • The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
     "  • If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
     "",
     "STEP 5 — MERGE each worktree back to the parent branch when its agent is done.",
-    "  • When read_session shows an agent has finished its subtask, call merge_worktree({ branchName: <branch from create_worktree> }) to merge that worktree's branch back into the parent branch (usually main) and clean up the worktree directory.",
+    "  • When an agent is done (read_session status header shows EXITED, or wait_for_session returns), call merge_worktree({ branchName: <branch from create_worktree> }) to merge that worktree's branch back into the parent branch (usually main) and clean up the worktree directory.",
     "  • Merge agents ONE AT A TIME as they finish. Do not wait for ALL agents before merging — merge each as soon as it's done.",
+    "  • Before merging the LAST worktree, call list_sessions({}) to confirm that ALL agents have EXITED (none still RUNNING). If any agent is still running, wait for it with wait_for_session before doing the final merge.",
     "  • If merge_worktree reports CONFLICTS, the worktree is preserved. Tell the user which subtask conflicted and that manual resolution is needed, or spawn a follow-up agent in the worktree to resolve the conflicts.",
     "  • After all worktrees are merged, do a final read_session on the main project to verify the combined result, or inspect with list_project_files.",
     "",
