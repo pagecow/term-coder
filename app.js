@@ -1,9 +1,9 @@
-// Term Code — AI agent orchestrator with live terminal squares.
+// Term Coder — AI agent orchestrator with live terminal squares.
 // Spawns ollama/codex/claude sub-agents — ALWAYS asks the user first (spawn modal).
 // Loaded by index.html as <script type="module" src="app.js"></script>.
 
-const STORE_KEY = "term-code.state";
-const SETTINGS_KEY = "term-code.settings";
+const STORE_KEY = "term-coder.state";
+const SETTINGS_KEY = "term-coder.settings";
 const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
 const DETECT_TTL_MS = 60 * 1000;
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
@@ -251,10 +251,10 @@ async function detectTools(force = false) {
   // ── live bridge probe: log exactly which terminal methods exist at runtime ──
   const t = window.chatoss.terminal;
   const bridgeMethods = t ? Object.keys(t) : [];
-  console.log("[Term Code] window.chatoss.terminal keys:", bridgeMethods);
+  console.log("[Term Coder] window.chatoss.terminal keys:", bridgeMethods);
   const checks = ["exec", "spawn", "mount", "onData", "onExit", "write", "resize", "kill"];
   for (const m of checks) {
-    console.log(`[Term Code] terminal.${m}:`, typeof t && t[m]);
+    console.log(`[Term Coder] terminal.${m}:`, typeof t && t[m]);
   }
   detection.bridge = bridgeMethods; // stash for the Settings panel too
   return detection;
@@ -1195,7 +1195,7 @@ async function buildSystemPrompt() {
   const c = activeConversation();
   const p = getProject(state.activeProjectId);
   let sys = [
-    "You are Term Code, an autonomous software-building orchestrator (like a coding agent).",
+    "You are Term Coder, an autonomous software-building orchestrator (like a coding agent).",
     "You build software by spawning sub-agent CLI coding sessions (claude, codex, etc.) in the terminals panel, reading Kanban board tasks, and marking cards done when work is complete.",
     "",
     "IMPORTANT — tool arguments: most tools work with NO arguments because they default to the active project and the attached board. Do NOT invent ids. If you are unsure, call the tool with {} and it will use the current context.",

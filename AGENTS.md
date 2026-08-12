@@ -1,6 +1,6 @@
-# Term Code — ChatOSS .aip project
+# Term Coder — ChatOSS .aip project
 
-You are building a ChatOSS `.aip` app in the project folder `com.example.term-code`.
+You are building a ChatOSS `.aip` app in the project folder `com.example.term-coder`.
 The complete, current guide for building ChatOSS apps follows. It is the
 authoritative API contract — follow it exactly and do not invent APIs that
 are not documented here.
