@@ -103,11 +103,17 @@ async function formatSessionStatusOutput(s, statusOverride) {
     }
     const dirLine = "[WORKING DIR: " + (s.cwd || "(unknown)") + "]";
     // Surface a blocked-on-prompt signal so the orchestrator knows the coding
-    // agent is waiting for a permission answer (the app auto-approves safe work;
-    // only destructive commands pause for the user).
+    // agent is waiting. If the agent asked a question via the ORCHESTRATOR_INPUT_NEEDED
+    // sentinel, include the question text so the orchestrator can answer it.
     let needsInputLine = "";
     if (s.active !== false && s.waitingForInput) {
-      needsInputLine = "\n[NEEDS INPUT: yes — the coding agent is asking the user a permission question. The app auto-approves safe edits/commands; a destructive one shows the user an approve/deny picker in chat. Do NOT send keystrokes to it — just keep monitoring.]";
+      if (s.pendingQuestion && !/^\(agent appears idle/.test(s.pendingQuestion)) {
+        needsInputLine = "\n[NEEDS INPUT: the agent asked a question. The app auto-handles permission prompts; this is a genuine question for YOU.]\n[QUESTION: " + s.pendingQuestion + "]\n[To answer: call send_to_session({ sessionId: \"" + (s.id || "") + "\", text: \"<your answer>\\r\" }). After you respond, the agent will continue.]";
+      } else if (s.pendingQuestion && /^\(agent appears idle/.test(s.pendingQuestion)) {
+        needsInputLine = "\n[NEEDS INPUT: " + s.pendingQuestion + "]";
+      } else {
+        needsInputLine = "\n[NEEDS INPUT: yes — the coding agent is asking the user a permission question. The app auto-approves safe edits/commands; a destructive one shows the user an approve/deny picker in chat. Do NOT send keystrokes to it — just keep monitoring.]";
+      }
     }
     return statusLine + "\n" + dirLine + needsInputLine + "\n" + "------------------------------------------------------------\n" + clean;
   } catch (e) {
@@ -624,6 +630,43 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   const safe = (fn) => { try { return fn(); } catch (_) { return null; } };
   const folderLabel = cwd || label || "(this folder)";
 
+  // ---------- Universal orchestrator protocol ----------
+  // Prepended to EVERY task prompt sent to ANY coding agent. It teaches the
+  // agent a single, CLI-agnostic way to ask the orchestrator (the supervisor
+  // running this app) a question: print a sentinel line, then the question.
+  // The app's universal terminal monitor watches every session's output for
+  // this sentinel, so it works with Codex, Claude Code, or any future CLI —
+  // the agent doesn't need special integration, just a print statement.
+  //
+  // We also keep the app's GENERIC idle detection (below) as a fallback so
+  // even an agent that never prints the sentinel is still noticed when it
+  // sits idle on a prompt for a while.
+  const ORCH_PROTOCOL =
+    "\n\n──────── ORCHESTRATOR PROTOCOL (important) ────────\n" +
+    "You are being directed by a supervisor orchestrator app called Term Coder.\n" +
+    "It is watching this terminal and can read your output and type responses.\n" +
+    "\n" +
+    "When you need to ask the orchestrator a question, make a decision, or need\n" +
+    "clarification before proceeding, print this EXACT line on its own, then your\n" +
+    "question on the next lines, then wait:\n" +
+    "\n" +
+    "  [ORCHESTRATOR_INPUT_NEEDED] <one-line summary of what you need>\n" +
+    "  <optional additional context lines>\n" +
+    "\n" +
+    "Examples:\n" +
+    "  [ORCHESTRATOR_INPUT_NEEDED] Should I use TypeScript or JavaScript for this project?\n" +
+    "  [ORCHESTRATOR_INPUT_NEEDED] I found two package.json files — which one should I update?\n" +
+    "  [ORCHESTRATOR_INPUT_NEEDED] The test suite is failing in 3 places. Should I fix them or skip for now?\n" +
+    "\n" +
+    "After printing the sentinel, STOP and WAIT — do not proceed until the\n" +
+    "orchestrator types a response into this terminal. It will see your question\n" +
+    "and answer you here.\n" +
+    "\n" +
+    "Do NOT print the sentinel for routine file edits or command execution — only\n" +
+    "use it when you genuinely need a decision or clarification from the orchestrator.\n" +
+    "────────────────────────────────────────────────\n\n";
+  const fullPrompt = ORCH_PROTOCOL + prompt;
+
   let settled = false;
   let killed = false;
   let buffer = "";
@@ -660,7 +703,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
     // \r first; if the task hasn't started ~400ms later we send \n as a
     // fallback. Both writes are guarded so that if \r already submitted the
     // task, the \n is just a harmless empty keystroke to the now-busy agent.
-    await safe(() => session.write(prompt));
+    await safe(() => session.write(fullPrompt));
     await safe(() => session.write("\r"));
     if (!submitFallbackScheduled) {
       submitFallbackScheduled = true;
@@ -1006,6 +1049,16 @@ async function toolHandler(name, args) {
           // text sitting in the CLI's input box with Enter never firing.
           const raw = parseTerminalEscapes(args.text);
           await s.session.write(raw);
+          // The orchestrator just answered an agent's question (or sent a follow-
+          // up). Clear the NEEDS INPUT / pending question state so the status
+          // tools stop reporting it as blocked, and the idle timer can re-arm.
+          if (s.waitingForInput || s.pendingQuestion) {
+            s.waitingForInput = false;
+            s.pendingQuestion = "";
+            s.autoApproveBusy = false;
+            renderTabs();
+            renderSessionInfo();
+          }
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
@@ -1038,7 +1091,11 @@ async function toolHandler(name, args) {
             statusPart = "RUNNING";
           }
           const needsInput = (s.active !== false && s.waitingForInput) ? " | NEEDS INPUT" : "";
-          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + needsInput + " | " + (s.cwd || "(unknown)");
+          let q = "";
+          if (s.active !== false && s.waitingForInput && s.pendingQuestion && !/^\(agent appears idle/.test(s.pendingQuestion)) {
+            q = " | Q: " + s.pendingQuestion.split("\n")[0].slice(0, 100);
+          }
+          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + needsInput + q + " | " + (s.cwd || "(unknown)");
         });
         return "SESSIONS (" + recs.length + " total, " + running + " running, " + exited + " exited):\n" + lines.join("\n");
       }
@@ -2773,8 +2830,12 @@ async function buildSystemPrompt() {
     "  • NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
     "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
     "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session / wait_for_session to watch. Do not re-send the initial task.",
-    "  • The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
-    "  • A session showing NEEDS INPUT (in the read_session status header or list_sessions) means the coding agent is BLOCKED asking the user a permission question. The app auto-approves safe edits/commands itself; only a destructive command pauses for the user to click approve/deny in chat. Do NOT send keystrokes to these prompts — note that the session is awaiting user input and keep monitoring the other agents.",
+    "  • The session ALSO auto-handles command approvals: when ANY coding agent (Codex, Claude Code, or any CLI) asks for permission to run a command or make an edit, the app auto-approves safe edits/commands and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
+    "  • A session showing NEEDS INPUT means the coding agent is blocked. There are two cases:",
+    "    (a) PERMISSION PROMPT — the agent is asking to run a command/make an edit. The app auto-handles these (safe = auto-approve, destructive = asks user in chat). Do NOT send keystrokes — just keep monitoring the other agents.",
+    "    (b) GENUINE QUESTION FOR YOU — the agent printed the [ORCHESTRATOR_INPUT_NEEDED] sentinel and is asking YOU a question (shown in the QUESTION field of the NEEDS INPUT header). You CAN and SHOULD answer it: call send_to_session({ sessionId: <id>, text: \"<your answer>\\r\" }). After you respond, the agent will continue.",
+    "  • The app injects an ORCHESTRATOR PROTOCOL into every agent's task prompt telling it to print [ORCHESTRATOR_INPUT_NEEDED] <question> when it needs a decision from you. So if an agent gets stuck or needs clarification, it will ask you this way — and you'll see the question in read_session / list_sessions. Answer it promptly with send_to_session so the agent isn't blocked.",
+    "  • If a session shows NEEDS INPUT with '(agent appears idle)' it means the terminal is showing a prompt cursor with no recent activity. Use read_session to check what it actually shows — it may be done, or waiting on something the app didn't recognize. Use your judgment.",
     "  • If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
     "",
     "STEP 5 — MERGE each worktree back to the parent branch when its agent is done.",
@@ -3131,18 +3192,41 @@ async function registerSession(session, cmd, args, cwd, label) {
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
 
-  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false };
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false, pendingQuestion: "", _idleTimer: null };
   sessions.set(session.id, rec);
 
-  // ---------- Persistent command-approval watcher ----------
-  // After startup, the coding agent pauses on a permission prompt before making
-  // edits or running commands. Codex and Claude Code use DIFFERENT prompts, and
-  // we must handle both or the session sits blocked with the orchestrator blind:
-  //   Codex:  "1. Yes, proceed (y)  2. Yes, and don't ask again...  3. No..."
-  //   Claude: "Do you want to make this edit to index.html?
-  //            > 1. Yes  2. Yes, allow all edits during this session (shift+tab)  3. No"
-  // We auto-approve SAFE work (file edits, safe commands) by pressing Enter, and
-  // ask the user in chat before approving DANGEROUS commands (rm, delete, drop…).
+  // ---------- Universal terminal monitor ----------
+  // Watches every session's output and detects THREE kinds of events so the
+  // orchestrator always knows what's going on inside ANY terminal, regardless
+  // of which coding-agent CLI produced the output:
+  //
+  //   1. ORCHESTRATOR_INPUT_NEEDED sentinel — the agent followed the protocol
+  //      we prepended to its task prompt and is asking us a question. We surface
+  //      the question text to the orchestrator (via rec.pendingQuestion) and do
+  //      NOT auto-respond — the orchestrator decides the answer and types it via
+  //      send_to_session. Works with ANY CLI that can print text.
+  //
+  //   2. Permission/approval prompts — the agent is asking to run a command or
+  //      make an edit (Codex's "Yes, proceed", Claude's "Do you want to make this
+  //      edit?", or a generic y/n prompt). Safe ones auto-approve; destructive
+  //      ones ask the user in chat.
+  //
+  //   3. Generic idle — the terminal has shown a prompt cursor (❯ › $ >) with no
+  //      new output for a while. This catches agents that don't follow the
+  //      protocol and just sit waiting. We mark the session NEEDS INPUT so the
+  //      orchestrator knows to check on it.
+
+  // Extract the question text that follows an ORCHESTRATOR_INPUT_NEEDED sentinel.
+  function extractSentinelQuestion(text) {
+    const m = text.match(/\[ORCHESTRATOR_INPUT_NEEDED\]\s*(.+)/i);
+    if (!m) return "";
+    // Grab the sentinel line + any following context lines (up to ~500 chars).
+    let q = m[1].trim();
+    const after = text.slice(m.index + m[0].length);
+    const ctxLines = after.split("\n").filter((l) => l.trim() && !/^(─|❯|›|\$|>)/.test(l.trim())).slice(0, 4);
+    if (ctxLines.length) q += "\n" + ctxLines.join("\n").trim();
+    return q.slice(0, 500);
+  }
 
   // Classify a permission prompt. Returns null when there's no prompt, else
   // { kind: "safe-edit" } | { kind: "safe-command", command } | { kind: "dangerous", command }.
@@ -3151,7 +3235,10 @@ async function registerSession(session, cmd, args, cwd, label) {
     const codexSig = /yes,\s*proceed|press\s*enter\s*to\s*confirm|yes,\s*and\s*don'?t\s*ask\s*again/.test(flat);
     // Claude permission prompt signatures (edit / create / run / proceed / overwrite).
     const claudeSig = /do you want to make this edit|do you want to (proceed|create|run|delete|overwrite|make)|allow all edits during this session|esc to cancel/.test(flat);
-    if (!codexSig && !claudeSig) return null;
+    // Generic y/n confirmation (catches other CLIs: "Continue? (y/n)", "Proceed? [Y/n]").
+    const genericYn = /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]|proceed\?\s*$/m.test(flat) ||
+      /continue\?\s*$/m.test(flat);
+    if (!codexSig && !claudeSig && !genericYn) return null;
 
     // Extract the command/edit target text (the line(s) just above the options).
     let commandText = "";
@@ -3160,6 +3247,11 @@ async function registerSession(session, cmd, args, cwd, label) {
     if (!commandText) {
       const beforeYes = cleanText.split(/1\.\s*Yes/i)[0];
       commandText = (beforeYes.trim().split("\n").pop() || "").trim();
+    }
+    if (!commandText) {
+      // Generic y/n fallback: grab the line before the (y/n).
+      const beforeYn = cleanText.split(/\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]/i)[0];
+      commandText = (beforeYn.trim().split("\n").pop() || "").trim();
     }
 
     // Dangerous command patterns — always ask the user before approving.
@@ -3173,55 +3265,128 @@ async function registerSession(session, cmd, args, cwd, label) {
     return { kind: "safe-command", command: commandText };
   }
 
+  // Detect a generic idle prompt: a prompt cursor at the end of recent output
+  // with no new activity. Returns true if the terminal looks idle/waiting.
+  function isIdlePrompt(flat) {
+    // Prompt cursors used by various CLIs: ❯ › » $ > (and the box-drawing ❑).
+    // We look for a cursor near the END of the output (last ~200 chars).
+    const tail = flat.slice(-200);
+    if (/[❯›»$>]\s*$/.test(tail)) return true;
+    // Claude/Codex "waiting for input" box or a bare cursor with options above.
+    if (/esc to cancel|tab to amend/.test(tail)) return true;
+    return false;
+  }
+
   try {
     if (typeof session.onData === "function") {
-      let approvalBuffer = "";
+      let monitorBuffer = "";
+      let lastOutputTime = Date.now();
       rec.autoApproveUnsub = session.onData((chunk) => {
-        if (!rec.active || rec.autoApproveBusy) return;
-        approvalBuffer += chunk;
-        // Cap the buffer so a long session can't grow it unbounded — the prompt
-        // is always near the tail, so keeping the last ~4KB is plenty.
-        if (approvalBuffer.length > 8192) approvalBuffer = approvalBuffer.slice(-4096);
-        const flat = stripAnsi(approvalBuffer).toLowerCase();
-        const verdict = classifyApprovalPrompt(stripAnsi(approvalBuffer), flat);
-        if (!verdict) return;
+        if (!rec.active) return;
+        monitorBuffer += chunk;
+        lastOutputTime = Date.now();
+        // Cap the buffer so a long session can't grow it unbounded — prompts
+        // and sentinels are always near the tail, so keeping the last ~8KB is plenty.
+        if (monitorBuffer.length > 8192) monitorBuffer = monitorBuffer.slice(-4096);
+        const cleanText = stripAnsi(monitorBuffer);
+        const flat = cleanText.toLowerCase();
 
-        // Mark busy + waiting so we never double-fire on the same prompt, and so
-        // the orchestrator's status tools can report that this session is blocked.
-        rec.autoApproveBusy = true;
-        rec.waitingForInput = true;
-        renderTabs();
-        renderSessionInfo();
-
-        if (verdict.kind === "dangerous") {
-          // Ask the user in chat before approving a destructive command.
-          askCommandApproval(rec, verdict.command).then((approved) => {
-            if (approved) {
-              session.write("\r"); // press Enter = "1. Yes"
-            } else {
-              session.write("\x1b"); // Esc = "3. No"
-            }
-            approvalBuffer = "";
-            rec.autoApproveBusy = false;
-            rec.waitingForInput = false;
-            renderTabs();
-            renderSessionInfo();
-          });
-        } else {
-          // Safe edit / safe command — auto-approve. For Claude the default
-          // highlighted option is "1. Yes", so Enter accepts it (we never pick
-          // option 2 "allow all edits during this session" — that stays the
-          // user's per-edit choice).
-          session.write("\r");
-          approvalBuffer = "";
-          rec.autoApproveBusy = false;
-          rec.waitingForInput = false;
+        // 1) ORCHESTRATOR_INPUT_NEEDED sentinel — the agent is asking us a question.
+        if (!rec.autoApproveBusy && /\[ORCHESTRATOR_INPUT_NEEDED\]/i.test(cleanText)) {
+          rec.autoApproveBusy = true;
+          rec.waitingForInput = true;
+          rec.pendingQuestion = extractSentinelQuestion(cleanText);
           renderTabs();
           renderSessionInfo();
+          // Notify the user about the pending question.
+          try {
+            window.chatoss.notifications.send({
+              title: "Agent asking a question",
+              body: (rec.label || "Agent") + ": " + (rec.pendingQuestion.split("\n")[0].slice(0, 120)),
+            });
+          } catch (e) { /* non-fatal */ }
+          // Do NOT auto-respond — the orchestrator decides the answer and types
+          // it via send_to_session. We clear the sentinel from the buffer so we
+          // don't re-fire, but keep rec.pendingQuestion + waitingForInput set
+          // until the orchestrator acts (send_to_session clears them).
+          monitorBuffer = "";
+          return;
+        }
+
+        // 2) Permission / approval prompts.
+        if (!rec.autoApproveBusy) {
+          const verdict = classifyApprovalPrompt(cleanText, flat);
+          if (verdict) {
+            rec.autoApproveBusy = true;
+            rec.waitingForInput = true;
+            renderTabs();
+            renderSessionInfo();
+
+            if (verdict.kind === "dangerous") {
+              // Ask the user in chat before approving a destructive command.
+              askCommandApproval(rec, verdict.command).then((approved) => {
+                if (approved) {
+                  session.write("\r"); // press Enter = "1. Yes"
+                } else {
+                  session.write("\x1b"); // Esc = "3. No"
+                }
+                monitorBuffer = "";
+                rec.autoApproveBusy = false;
+                rec.waitingForInput = false;
+                rec.pendingQuestion = "";
+                renderTabs();
+                renderSessionInfo();
+              });
+            } else {
+              // Safe edit / safe command — auto-approve. For Claude the default
+              // highlighted option is "1. Yes", so Enter accepts it (we never
+              // pick option 2 "allow all edits during this session" — that stays
+              // the user's per-edit choice).
+              session.write("\r");
+              monitorBuffer = "";
+              rec.autoApproveBusy = false;
+              rec.waitingForInput = false;
+              renderTabs();
+              renderSessionInfo();
+            }
+            return;
+          }
+        }
+
+        // 3) Generic idle fallback — if no sentinel and no approval prompt, but
+        //    the terminal is showing a prompt cursor, mark it as potentially
+        //    waiting so the orchestrator knows to check. We use a debounce so
+        //    we only flag it once per idle period (cleared when new output arrives).
+        if (!rec.autoApproveBusy && !rec.waitingForInput && isIdlePrompt(flat)) {
+          // Only flag if idle for >3 seconds (avoid false positives mid-stream).
+          // We'll set a one-shot timer; if new output arrives it resets
+          // lastOutputTime, and the timer check will fail.
+          if (!rec._idleTimer) {
+            rec._idleTimer = setTimeout(() => {
+              rec._idleTimer = null;
+              if (!rec.active || rec.autoApproveBusy || rec.waitingForInput) return;
+              if (Date.now() - lastOutputTime >= 3000) {
+                rec.waitingForInput = true;
+                rec.pendingQuestion = "(agent appears idle — terminal is showing a prompt cursor with no recent activity. Check on it with read_session to see what it needs.)";
+                renderTabs();
+                renderSessionInfo();
+              }
+            }, 3000);
+          }
+        } else if (rec._idleTimer && !isIdlePrompt(flat)) {
+          // New non-idle output arrived — clear any pending idle flag.
+          clearTimeout(rec._idleTimer);
+          rec._idleTimer = null;
+          if (rec.waitingForInput && rec.pendingQuestion && rec.pendingQuestion.startsWith("(agent appears idle")) {
+            rec.waitingForInput = false;
+            rec.pendingQuestion = "";
+            renderTabs();
+            renderSessionInfo();
+          }
         }
       });
     }
-  } catch (e) { console.warn("auto-approve watcher setup failed:", e); }
+  } catch (e) { console.warn("universal terminal monitor setup failed:", e); }
 
   // mount the xterm widget. Per the docs, mount() wires session output → terminal
   // AND terminal input → stdin automatically — we do NOT need a separate onData
@@ -3295,6 +3460,7 @@ async function closeSession(id) {
   const rec = sessions.get(id);
   if (!rec) return;
   if (rec.autoApproveUnsub) { try { rec.autoApproveUnsub(); } catch (e) { /* non-fatal */ } }
+  if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
   try { if (rec.session && rec.session.kill) await rec.session.kill(); } catch (e) { /* non-fatal */ }
   if (rec.dispose) { try { rec.dispose(); } catch (e) { /* non-fatal */ } }
   if (rec.ro) { try { rec.ro.disconnect(); } catch (e) { /* non-fatal */ } }
