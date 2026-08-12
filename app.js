@@ -1554,6 +1554,119 @@ function renderSessionInfo() {
   el.sessionInfo.textContent = bits.join("  ·  ");
 }
 
+// ---------- Reusable multiple-choice chat component ----------
+// window.termCoder.askChoice(config) -> Promise
+//   config = { prompt: string,
+//             options: [{label: string, value: string}, ...],
+//             style: "rect" | "pill" }
+//   Resolves to the chosen option's `value` (string), or null if the user
+//   dismisses/cancels (Escape). The Promise blocks ONLY this choice — the rest
+//   of the UI stays fully interactive.
+//
+// Renders the prompt text + option buttons INSIDE the chat stream (as a chat
+// message bubble) so the question appears naturally in the conversation.
+// Shows a subtle "waiting for your selection…" state until clicked; after one
+// option is clicked, all buttons are disabled and the chosen one is visually
+// marked.
+//
+// style "rect" -> stacked text rectangles, one full-width row per option.
+// style "pill" -> pill buttons in a wrapping row (flex-wrap), horizontal, wrap.
+window.termCoder = window.termCoder || {};
+
+window.termCoder.askChoice = function askChoice(config) {
+  return new Promise((resolve) => {
+    const cfg = config || {};
+    const promptText = typeof cfg.prompt === "string" ? cfg.prompt : "";
+    const opts = Array.isArray(cfg.options) ? cfg.options : [];
+    const styleMode = cfg.style === "pill" ? "pill" : "rect"; // default rect
+
+    // Defensive: if the chat log isn't available, fall back to body so the
+    // promise still settles rather than hanging forever.
+    let host = (typeof el !== "undefined" && el && el.chatLog) ? el.chatLog : document.body;
+    if (!host) host = document.body;
+
+    // --- message bubble -------------------------------------------------
+    const row = document.createElement("div");
+    row.className = "msg assistant choice-msg";
+
+    const body = document.createElement("div");
+    body.className = "choice-body";
+    row.appendChild(body);
+
+    if (promptText) {
+      const promptEl = document.createElement("div");
+      promptEl.className = "choice-prompt";
+      // reuse the same paragraph-splitting convention as renderMessage()
+      promptEl.innerHTML = promptText.split(/\n\n+/)
+        .map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("");
+      body.appendChild(promptEl);
+    }
+
+    // options container
+    const optsWrap = document.createElement("div");
+    optsWrap.className = "choice-options choice-" + styleMode;
+    body.appendChild(optsWrap);
+
+    // waiting hint
+    const waitHint = document.createElement("div");
+    waitHint.className = "choice-waiting";
+    waitHint.textContent = "waiting for your selection…";
+    body.appendChild(waitHint);
+
+    let settled = false;
+    const btns = [];
+
+    function finish(clickedBtn, value) {
+      if (settled) return;
+      settled = true;
+      waitHint.classList.add("hidden");
+      // disable every button; dim the un-chosen ones, highlight the chosen
+      for (const b of btns) {
+        b.disabled = true;
+        if (b !== clickedBtn) b.classList.add("choice-dimmed");
+      }
+      resolve(value);
+    }
+
+    for (const opt of opts) {
+      if (!opt || typeof opt !== "object") continue;
+      const label = opt.label != null ? String(opt.label) : String(opt.value);
+      const value = opt.value != null ? String(opt.value) : label;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "choice-btn";
+      btn.textContent = label;
+      btn.addEventListener("click", () => {
+        if (settled) return;
+        btn.classList.add("choice-selected");
+        finish(btn, value);
+        if (typeof scrollChatBottom === "function") scrollChatBottom();
+      });
+      optsWrap.appendChild(btn);
+      btns.push(btn);
+    }
+
+    // No options -> nothing to pick; resolve null.
+    if (!btns.length) {
+      waitHint.textContent = "no options provided";
+      finish(null, null);
+    }
+
+    // Escape dismisses -> resolve null (cancel). Listens only while pending.
+    function onKey(e) {
+      if (e.key !== "Escape" || settled) return;
+      e.stopPropagation();
+      finish(null, null);
+      document.removeEventListener("keydown", onKey, true);
+      if (typeof scrollChatBottom === "function") scrollChatBottom();
+    }
+    document.addEventListener("keydown", onKey, true);
+
+    host.appendChild(row);
+    if (typeof scrollChatBottom === "function") scrollChatBottom();
+  });
+};
+
 // ---------- Init ----------
 async function init() {
   // restore state + settings
