@@ -712,14 +712,14 @@ button { font-family: inherit; }
   font-size: 13.5px;
   line-height: 1.6;
   color: var(--text-2);
-  max-width: 440px;
+  max-width: 640px;
 }
 .chat-empty-prompts {
   display: flex;
   flex-direction: column;
   gap: 10px;
   width: 100%;
-  max-width: 440px;
+  max-width: 640px;
   margin-top: 8px;
 }
 .chat-empty-prompt {
