@@ -6,7 +6,7 @@
   "icon": "icon.svg",
   "entry": "index.html",
   "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications"],
-  "scopedDataKeys": ["term-coder.state"],
+  "scopedDataKeys": ["term-coder.state", "term-coder.settings", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh"],
   "dataStoreRequests": [],
   "toolsStoreRequests": []
 }

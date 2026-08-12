@@ -187,6 +187,40 @@
           <button id="settings-cancel" class="btn btn-ghost" type="button">Cancel</button>
         </div>
 
+        <h3 class="settings-section-title">Model Selection Mode</h3>
+        <p class="modal-hint">Choose how sub-agent sessions pick their model. Models are auto-detected from <code>ollama list</code>.</p>
+        <div class="model-mode-radios" id="model-mode-radios">
+          <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the model each time a session starts</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific model</span><span class="radio-sub">Use one fixed model for every session</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="complexity" /><span class="radio-label">Select by complexity</span><span class="radio-sub">Assign a model to each level (low / medium / high)</span></label>
+        </div>
+
+        <div class="model-mode-panel" id="model-mode-manual">
+          <p class="modal-hint">You'll be asked to pick a model each time a session starts.</p>
+        </div>
+
+        <div class="model-mode-panel hidden" id="model-mode-always">
+          <label class="form-row">
+            <span class="form-label">Model</span>
+            <select id="always-model" class="form-input"></select>
+          </label>
+        </div>
+
+        <div class="model-mode-panel hidden" id="model-mode-complexity">
+          <label class="form-row">
+            <span class="form-label">Low complexity</span>
+            <select id="complexity-model-low" class="form-input"></select>
+          </label>
+          <label class="form-row">
+            <span class="form-label">Medium complexity</span>
+            <select id="complexity-model-medium" class="form-input"></select>
+          </label>
+          <label class="form-row">
+            <span class="form-label">High complexity</span>
+            <select id="complexity-model-high" class="form-input"></select>
+          </label>
+        </div>
+
         <h3 class="settings-section-title">Detected tools</h3>
         <div id="detected-list" class="detected-list">
           <div class="detected-scanning">Scanning…</div>

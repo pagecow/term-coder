@@ -34,6 +34,20 @@ let settings = {
   cwdDefault: "",
   detected: { codex: false, claude: false, ollama: false, models: [], denied: false },
 };
+// Model Selection Mode — single source of truth for how sub-agent sessions
+// choose a model. Persisted as individual scopedData keys (one per field, see
+// MS_KEYS) and restored on load (loadModelSelection). Kept SEPARATE from the
+// bundled `settings` blob so the session-startup integration can read it in
+// isolation via window.termCoder.getModelSelectionConfig().
+let modelSelection = {
+  modelSelectionMode: "manual", // "manual" | "always" | "complexity"
+  alwaysModel: "",
+  complexityModelLow: "",
+  complexityModelMedium: "",
+  complexityModelHigh: "",
+};
+// The scopedData keys that back each model-selection field (top-level keys).
+const MS_KEYS = ["modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh"];
 let models = [];
 let defaultModelId = null;
 let running = false;
@@ -104,6 +118,15 @@ const el = {
   settingsCloseX: $("settings-close-x"),
   detectedList: $("detected-list"),
   rescanBtn: $("rescan-btn"),
+  // model selection mode
+  modelModeRadios: $("model-mode-radios"),
+  modelModeManual: $("model-mode-manual"),
+  modelModeAlways: $("model-mode-always"),
+  modelModeComplexity: $("model-mode-complexity"),
+  alwaysModel: $("always-model"),
+  complexityModelLow: $("complexity-model-low"),
+  complexityModelMedium: $("complexity-model-medium"),
+  complexityModelHigh: $("complexity-model-high"),
   // board picker
   boardPicker: $("board-picker"),
   boardPickerList: $("board-picker-list"),
@@ -247,6 +270,11 @@ async function detectTools(force = false) {
   };
   saveSettings();
   renderDetectedList();
+  // If the settings panel is open, refresh the model pickers with the newly
+  // detected models (preserving saved selections where still available).
+  if (el.settingsPanel && !el.settingsPanel.classList.contains("hidden")) {
+    applyModelSelectionModeToUi();
+  }
 
   // ── live bridge probe: log exactly which terminal methods exist at runtime ──
   const t = window.chatoss.terminal;
@@ -763,6 +791,7 @@ function openSettings() {
   el.setCli.value = settings.cliDefault || "ask";
   el.setCwd.value = settings.cwdDefault || "";
   renderDetectedList();
+  applyModelSelectionModeToUi();
   el.settingsPanel.classList.remove("hidden");
 }
 
@@ -774,9 +803,114 @@ function syncSettingsModelRow() {
 function saveSettingsFromPanel() {
   settings.cliDefault = el.setCli.value;
   settings.cwdDefault = el.setCwd.value.trim();
+  // Model Selection Mode persists to its own scopedData keys (handled by
+  // saveModelSelectionMode), not the bundled settings blob. Sync it now so
+  // any uncommitted picker value is captured on Save.
+  saveModelSelectionMode();
   saveSettings();
   el.settingsPanel.classList.add("hidden");
 }
+
+// ---------- Model Selection Mode ----------
+// Returns the auto-detected ollama model ids (a copy of detection.models),
+// falling back to FALLBACK_MODELS when detection is empty.
+function availableOllamaModels() {
+  const m = (detection && detection.models && detection.models.length) ? detection.models : FALLBACK_MODELS.slice();
+  return m.slice();
+}
+
+// Populate a <select> with the detected ollama models and select `selected`
+// (if present in the list). Renders an empty placeholder option when no
+// models are available so the picker is never silently blank.
+function populateModelSelect(selectEl, selected) {
+  if (!selectEl) return;
+  const models = availableOllamaModels();
+  selectEl.innerHTML = "";
+  if (!models.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(no models detected — run Re-scan)";
+    selectEl.appendChild(opt);
+    selectEl.value = "";
+    return;
+  }
+  for (const id of models) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = id;
+    selectEl.appendChild(opt);
+  }
+  // restore the saved selection if it's still available, else first model.
+  if (selected && models.includes(selected)) selectEl.value = selected;
+  else selectEl.value = models[0];
+}
+
+// Show only the picker panel matching the active radio mode.
+function showModelModePanel(mode) {
+  el.modelModeManual.classList.toggle("hidden", mode !== "manual");
+  el.modelModeAlways.classList.toggle("hidden", mode !== "always");
+  el.modelModeComplexity.classList.toggle("hidden", mode !== "complexity");
+}
+
+// Reflect the persisted model-selection config into the settings UI.
+// Called on openSettings() (UI open) and after a Re-scan refreshes models.
+function applyModelSelectionModeToUi() {
+  const mode = modelSelection.modelSelectionMode || "manual";
+  const radio = el.modelModeRadios.querySelector(`input[name="model-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+  populateModelSelect(el.alwaysModel, modelSelection.alwaysModel);
+  populateModelSelect(el.complexityModelLow, modelSelection.complexityModelLow);
+  populateModelSelect(el.complexityModelMedium, modelSelection.complexityModelMedium);
+  populateModelSelect(el.complexityModelHigh, modelSelection.complexityModelHigh);
+  showModelModePanel(mode);
+}
+
+// Read the current settings-UI values back into `modelSelection` and persist
+// each field to its own scopedData key immediately (live persistence).
+function saveModelSelectionMode() {
+  const checked = el.modelModeRadios.querySelector('input[name="model-mode"]:checked');
+  modelSelection.modelSelectionMode = checked ? checked.value : "manual";
+  modelSelection.alwaysModel = el.alwaysModel.value || "";
+  modelSelection.complexityModelLow = el.complexityModelLow.value || "";
+  modelSelection.complexityModelMedium = el.complexityModelMedium.value || "";
+  modelSelection.complexityModelHigh = el.complexityModelHigh.value || "";
+  persistModelSelection();
+}
+
+// Persist every model-selection field to its own scopedData key.
+function persistModelSelection() {
+  for (const key of MS_KEYS) {
+    try {
+      window.chatoss.scopedData.set(key, modelSelection[key]).catch((e) => console.warn("persistModelSelection", key, e));
+    } catch (e) { console.warn("persistModelSelection", key, e); }
+  }
+}
+
+// On app load: read each model-selection field from its own scopedData key and
+// restore the in-memory config + UI. Missing keys keep their defaults.
+async function loadModelSelection() {
+  for (const key of MS_KEYS) {
+    try {
+      const v = await window.chatoss.scopedData.get(key);
+      if (v !== undefined && v !== null) modelSelection[key] = v;
+    } catch (e) { console.warn("loadModelSelection", key, e); }
+  }
+  applyModelSelectionModeToUi();
+}
+
+// Shared read helper for other code (e.g. the session-startup integration).
+// Always returns a plain object with the current config + detected models.
+window.termCoder = window.termCoder || {};
+window.termCoder.getModelSelectionConfig = function () {
+  return {
+    mode: modelSelection.modelSelectionMode || "manual",
+    alwaysModel: modelSelection.alwaysModel || "",
+    complexityModelLow: modelSelection.complexityModelLow || "",
+    complexityModelMedium: modelSelection.complexityModelMedium || "",
+    complexityModelHigh: modelSelection.complexityModelHigh || "",
+    availableModels: availableOllamaModels(),
+  };
+};
 
 // ---------- Board picker ----------
 async function openBoardPicker() {
@@ -1565,6 +1699,36 @@ async function init() {
     const savedSettings = await window.chatoss.scopedData.get(SETTINGS_KEY);
     if (savedSettings) settings = Object.assign(settings, savedSettings);
   } catch (e) { console.warn("restore settings", e); }
+  // Migration: older builds stored the Model Selection Mode fields inside the
+  // bundled `settings` blob. They now live in their own scopedData keys. If any
+  // legacy field is present on settings AND the new key is unset, seed the new
+  // key from it, then delete the legacy field from `settings` so it is not
+  // re-saved into the blob.
+  {
+    const legacyMap = {
+      modelSelectionMode: "modelSelectionMode",
+      alwaysModel: "alwaysModel",
+      complexityModelLow: "complexityModelLow",
+      complexityModelMedium: "complexityModelMedium",
+      complexityModelHigh: "complexityModelHigh",
+    };
+    let migratedAny = false;
+    for (const [legacyField, msKey] of Object.entries(legacyMap)) {
+      if (settings[legacyField] != null) {
+        try {
+          const existing = await window.chatoss.scopedData.get(msKey);
+          if (existing === undefined || existing === null) {
+            await window.chatoss.scopedData.set(msKey, settings[legacyField]);
+          }
+        } catch (e) { /* non-fatal */ }
+        delete settings[legacyField];
+        migratedAny = true;
+      }
+    }
+    if (migratedAny) saveSettings();
+  }
+  // Restore Model Selection Mode from its own scopedData keys, then render the UI.
+  await loadModelSelection();
   detection = {
     codex: !!(settings.detected && settings.detected.codex),
     claude: !!(settings.detected && settings.detected.claude),
@@ -1634,10 +1798,26 @@ async function init() {
   el.settingsSave.addEventListener("click", saveSettingsFromPanel);
   el.settingsCancel.addEventListener("click", () => el.settingsPanel.classList.add("hidden"));
   el.settingsCloseX.addEventListener("click", () => el.settingsPanel.classList.add("hidden"));
+
+  // Model Selection Mode — radios toggle pickers live + persist immediately.
+  el.modelModeRadios.addEventListener("change", (e) => {
+    if (e.target && e.target.name === "model-mode") {
+      showModelModePanel(e.target.value);
+      saveModelSelectionMode();
+    }
+  });
+  el.alwaysModel.addEventListener("change", saveModelSelectionMode);
+  el.complexityModelLow.addEventListener("change", saveModelSelectionMode);
+  el.complexityModelMedium.addEventListener("change", saveModelSelectionMode);
+  el.complexityModelHigh.addEventListener("change", saveModelSelectionMode);
+
   el.rescanBtn.addEventListener("click", async () => {
     el.detectedList.innerHTML = "<div class='detected-scanning'>Scanning…</div>";
     await detectTools(true);
     renderDetectedList();
+    // refresh the model pickers with the newly detected models, preserving
+    // the saved selections where the model is still available.
+    applyModelSelectionModeToUi();
   });
 
   // board picker
