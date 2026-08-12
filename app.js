@@ -475,14 +475,21 @@ function parseTerminalEscapes(s) {
 // output so the orchestrator reads readable text instead of escape noise.
 function stripAnsi(s) {
   if (typeof s !== "string") return s;
-  // CSI sequences: ESC [ ... <0x40-0x7E>
-  s = s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
+  // CSI sequences: ESC [ ... <0x40-0x7E>. NOTE: do NOT consume spaces (0x20)
+  // after the sequence — the previous regex had [ -\/]* which ate the space
+  // between words in TUI output (e.g. "Do you trust the contents" became
+  // "Doyoutrustthecontents"), breaking all regex-based startup detection.
+  s = s.replace(/\x1b\[[0-9;?]*[@-~]/g, "");
   // OSC sequences: ESC ] ... BEL  or  ESC ] ... ESC \
   s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
   // Other 2-char ESC sequences (ESC + one char): ESC ( B, ESC = , etc.
   s = s.replace(/\x1b[@-_]/g, "");
   // Remaining stray ESCs and other C0 control chars (except \n, \r, \t) -> drop
   s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  // Collapse runs of spaces that were separated by (now-removed) ANSI codes
+  // down to a single space, so "Do  you  trust" -> "Do you trust". But preserve
+  // leading spaces / indentation by only collapsing 2+ spaces to one.
+  s = s.replace(/ {2,}/g, " ");
   return s;
 }
 
@@ -640,7 +647,9 @@ async function autoDriveStartup(session, prompt, label, cwd) {
         //    Codex:       "Do you trust the contents of this directory?"
         //                 + "Press enter to continue"
         //    Also catch "Yes, I trust this folder" / "Yes, continue".
-        if (!sawTrust && /trust the (files|contents|folder|directory)|trust this folder|do you trust/.test(flat)) {
+        //    Use a flexible regex that tolerates missing spaces (stripAnsi may
+        //    collapse some spaces in TUI output) and matches either CLI.
+        if (!sawTrust && /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust/i.test(flat)) {
           sawTrust = true;
           handleTrust(); // fire-and-forget; it sets trustBusy while awaiting
           return;
@@ -665,7 +674,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
           // "model: loading", OR Codex's "/model to change" hint which only
           // appears once the model is ready.
           if ((/model\s*:\s*[a-z0-9_-]/.test(chunkFlat) && !/model\s*:\s*loading/.test(chunkFlat)) ||
-              /\/model to change/.test(chunkFlat)) {
+              /\/\s*model\s*to\s*change/.test(chunkFlat)) {
             modelLoaded = true;
             modelLoading = false;
             // Fall through to the ready-state check below so the prompt is
@@ -689,7 +698,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
         //    might have only just loaded and the submit keystroke landed too
         //    early or was ignored. Removed the bare `\/model`; kept only the
         //    specific menu signatures that mean an actual interactive list.
-        if (/select model|navigate.*enter select|choose a model|use .*arrow.*enter.*select/.test(flat)) {
+        if (/select\s*model|navigate.*enter\s*select|choose\s*a\s*model|use\s*.*arrow.*enter.*select/.test(flat)) {
           modelPickerSeen = true;
           return;
         }
@@ -704,7 +713,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
         //    it never fired once the buffer grew past the welcome box).
         if (!modelPickerSeen && (sawTrust ? trustHandled : true)) {
           if (modelLoading && !modelLoaded) return; // Codex still loading — wait
-          if (/welcome back|try "how do i|what would you like|how can i help|enter a task|❯|›/.test(flat)) {
+          if (/welcome\s*back|try\s*"how\s*do\s*i|what\s*would\s*you\s*like|how\s*can\s*i\s*help|enter\s*a\s*task|❯|›/.test(flat)) {
             finish();
           }
         }
@@ -786,7 +795,7 @@ async function toolHandler(name, args) {
         if (s.session && typeof s.session.getOutput === "function" && s.trustMode !== "always") {
           try { outputCheck = stripAnsi(await s.session.getOutput() || ""); } catch (_) {}
         }
-        if ((s.trustState === "asking" || /trust the (files|contents|folder|directory)|trust this folder|do you trust|press enter to continue/i.test(outputCheck)) && s.trustMode !== "always") {
+        if ((s.trustState === "asking" || /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust|press\s*enter\s*to\s*continue/i.test(outputCheck)) && s.trustMode !== "always") {
           return "Blocked: this session is waiting for the user to approve 'trust this folder' in chat. Keystrokes cannot bypass the approval. Wait for the user to respond.";
         }
         try {
@@ -815,7 +824,7 @@ async function toolHandler(name, args) {
             // will try to send keystrokes to bypass the pill picker. Hide it and
             // tell the orchestrator to wait for the user's answer.
             if ((s.trustState === "pending" || s.trustState === "asking") && s.trustMode !== "always" &&
-                /trust the (files|contents|folder|directory)|trust this folder|do you trust|press enter to continue/i.test(clean)) {
+                /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust|press\s*enter\s*to\s*continue/i.test(clean)) {
               return "Waiting for user approval: a 'trust this folder?' prompt is shown in chat. Do NOT send keystrokes to confirm it. The session will proceed once the user clicks Yes, or be killed if they click No.";
             }
             return clean;
