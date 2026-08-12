@@ -90,6 +90,7 @@ const el = {
   detachBoardBtn: $("detach-board-btn"),
   chatLog: $("chat-log"),
   chatScroll: $("chat-scroll"),
+  chatOverlay: $("chat-overlay"),
   chatJumpBtn: $("chat-jump-btn"),
   chatStatus: $("chat-status"),
   chatForm: $("chat-form"),
@@ -589,20 +590,34 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   // fully completes guarantees the watcher stays paused, so finish() can only
   // run on a LATER chunk (the post-trust welcome/input-prompt output) — exactly
   // the ordering we want.
+  // Update the session registry so read_session can mask the trust dialog from
+  // the orchestrator and avoid tempting it to send bypass keystrokes.
+  const rec = sessions.get(session.id);
+  if (rec) {
+    rec.trustState = "pending";
+    rec.trustMode = trustMode;
+  }
+
   const handleTrust = async () => {
     trustBusy = true;
+    if (rec) rec.trustState = "asking";
     try { await loadTrustMode(); } catch (_) {}
     if (trustMode === "always") {
+      if (rec) rec.trustMode = "always";
       await confirmTrust();
+      if (rec) rec.trustState = "confirmed";
       trustBusy = false;
       return;
     }
+    if (rec) rec.trustMode = "ask";
     // trustMode === "ask" — ask in chat, wait for the answer.
     const ok = await askTrustInChat(folderLabel);
     if (settled) { trustBusy = false; return; } // safety timeout fired while waiting
     if (ok) {
+      if (rec) rec.trustState = "confirmed";
       await confirmTrust();
     } else {
+      if (rec) rec.trustState = "denied";
       await denyTrust();
     }
     trustBusy = false; // only now — after the trust \r / kill is fully written
@@ -763,6 +778,17 @@ async function toolHandler(name, args) {
         let s = args.sessionId ? sessions.get(args.sessionId) : null;
         if (!s && sessions.size) { s = [...sessions.values()].pop(); }
         if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
+        // HARD GUARD: if the session is waiting on a "trust this folder?" prompt
+        // and the user chose "Ask each time", ignore any keystrokes from the
+        // orchestrator that could bypass the chat pill picker (Enter, arrows, Esc).
+        // The only legitimate way through is for the user to click yes/no.
+        let outputCheck = "";
+        if (s.session && typeof s.session.getOutput === "function" && s.trustMode !== "always") {
+          try { outputCheck = stripAnsi(await s.session.getOutput() || ""); } catch (_) {}
+        }
+        if ((s.trustState === "asking" || /trust the (files|contents|folder|directory)|trust this folder|do you trust|press enter to continue/i.test(outputCheck)) && s.trustMode !== "always") {
+          return "Blocked: this session is waiting for the user to approve 'trust this folder' in chat. Keystrokes cannot bypass the approval. Wait for the user to respond.";
+        }
         try {
           // Parse escape sequences (\\r, \\x1b[A, \\n, …) into real control
           // bytes BEFORE writing to the PTY. The model sends these as literal
@@ -783,9 +809,16 @@ async function toolHandler(name, args) {
         try {
           if (s.session && typeof s.session.getOutput === "function") {
             const text = await s.session.getOutput();
-            // Strip ANSI color/cursor escapes so the orchestrator reads clean
-            // text and can pattern-match on it instead of wading through noise.
-            return text ? stripAnsi(text) : "(terminal is empty — no output yet)";
+            const clean = text ? stripAnsi(text) : "(terminal is empty — no output yet)";
+            // MASK the trust dialog from the orchestrator when user must approve it
+            // in chat. If the orchestrator sees the raw "Do you trust..." text, it
+            // will try to send keystrokes to bypass the pill picker. Hide it and
+            // tell the orchestrator to wait for the user's answer.
+            if ((s.trustState === "pending" || s.trustState === "asking") && s.trustMode !== "always" &&
+                /trust the (files|contents|folder|directory)|trust this folder|do you trust|press enter to continue/i.test(clean)) {
+              return "Waiting for user approval: a 'trust this folder?' prompt is shown in chat. Do NOT send keystrokes to confirm it. The session will proceed once the user clicks Yes, or be killed if they click No.";
+            }
+            return clean;
           }
           return "Error: getOutput() not available on this session";
         } catch (e) {
@@ -2312,11 +2345,12 @@ async function buildSystemPrompt() {
     "1. Quickly inspect with list_project_files({}) and get_current_git_branch({}) — do this ONCE, don't loop.",
     "2. Create an isolated git worktree with create_worktree({}) for the work (returns a path).",
     "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }) to SPIN UP A CODING AGENT in a terminal. The user approves and picks the CLI/model. This is the main way work gets done — the sub-agent writes the code, not you.",
-    "4. MONITOR the running session: call read_session({}) to see what the agent is doing — its output, errors, or progress. The read returns CLEAN text (ANSI escapes stripped) so you can read it directly. Use send_to_session({ text }) to send follow-up instructions or navigate menus.",
-    "   - send_to_session parses escape codes: use \\r for Enter (to submit a typed line), \\x1b[A / \\x1b[B for Up/Down arrows, \\x1b for Esc, \\x03 for Ctrl+C. Do NOT add a trailing \\n after \\r — Enter already submits.",
-    "   - The session AUTO-HANDLES its own startup: the 'trust this folder?' dialog is handled per your Settings (Term Coder asks you IN CHAT with a yes/no pill picker before confirming, or trusts automatically if set to 'Always'), and the taskPrompt you passed to start_cli_session is typed + submitted once the agent's input box is ready. So you do NOT need to re-send the task or press Enter on the trust dialog yourself — just call read_session({}) a few seconds later to watch it work. If you see a yes/no 'trust this folder' question appear in the chat, answer it to let the session proceed.",
-    "   - If read_session shows a model-picker menu ('Select model…' / '↑/↓ navigate • enter select'), the model selection did NOT happen automatically — use send_to_session with arrow keys + \\r to pick one, or tell the user to pick a model in the app's Model Selection Mode pills (Settings). Do not type your task text into the model menu.",
-    "   - If read_session returns 'Error: no such terminal session' shortly after start, the session was killed — most likely the user declined to trust the folder. Do NOT immediately re-call start_cli_session with the same args. Instead tell the user the folder wasn't trusted and ask how they'd like to proceed.",
+    "4. MONITOR the running session: call read_session({}) to see what the agent is doing — its output, errors, or progress. The read returns CLEAN text (ANSI escapes stripped) so you can read it directly. Use send_to_session({ text }) ONLY for follow-up instructions AFTER the agent's input box is accepting text — not for startup dialogs.",
+    "   - send_to_session parses escape codes: use \\r for Enter, \\x1b[A / \\x1b[B for arrows, etc. But you almost never need it for startup.",
+    "   - NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
+    "   - NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
+    "   - The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session to watch. Do not re-send the initial task.",
+    "   - If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
     "5. When read_session shows the work is done (or the user confirms), read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete.",
     "",
     "ACT, don't just explore. When the user asks you to build or change something, your job is to SPIN UP one or more coding agents (start_cli_session) to do the work in their own terminals — then coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session). Don't try to write all the code yourself in chat; delegate it to sub-agents.",
@@ -2623,7 +2657,7 @@ async function registerSession(session, cmd, args, cwd, label) {
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
 
-  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false };
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null };
   sessions.set(session.id, rec);
 
   // mount the xterm widget. Per the docs, mount() wires session output → terminal
@@ -2746,9 +2780,10 @@ window.termCoder.askChoice = function askChoice(config) {
     const opts = Array.isArray(cfg.options) ? cfg.options : [];
     const styleMode = cfg.style === "pill" ? "pill" : "rect"; // default rect
 
-    // Defensive: if the chat log isn't available, fall back to body so the
-    // promise still settles rather than hanging forever.
-    let host = (typeof el !== "undefined" && el && el.chatLog) ? el.chatLog : document.body;
+    // Render into a persistent overlay container, NOT inside chatLog, so the
+    // pill picker survives renderChat() full-history re-renders (which clear
+    // chatLog.innerHTML). The overlay sits above the chat log.
+    let host = (typeof el !== "undefined" && el && el.chatOverlay) ? el.chatOverlay : null;
     if (!host) host = document.body;
 
     // --- message bubble -------------------------------------------------
