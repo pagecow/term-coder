@@ -1291,6 +1291,27 @@ function saveTrustMode() {
   persistTrustMode();
 }
 
+// Ask the user (IN CHAT, via the askChoice pill picker) whether to approve a
+// potentially dangerous command the coding agent wants to run. Resolves true
+// for "approve", false for "deny". Used by the persistent auto-approve watcher.
+async function askCommandApproval(rec, commandText) {
+  try {
+    const short = commandText.length > 200 ? commandText.slice(0, 200) + "…" : commandText;
+    const v = await window.termCoder.askChoice({
+      prompt: "A coding agent wants to run a command that looks potentially destructive:\n\n" + short,
+      options: [
+        { label: "Yes, approve it", value: "yes" },
+        { label: "No, deny it", value: "no" },
+      ],
+      style: "rect",
+    });
+    return v === "yes";
+  } catch (e) {
+    console.warn("askCommandApproval", e);
+    return false;
+  }
+}
+
 // Ask the user (IN CHAT, via the askChoice pill picker) whether to trust the
 // folder a CLI agent is prompting about. Resolves true for "trust", false for
 // "don't trust" or if dismissed. Used by autoDriveStartup when trustMode=ask.
@@ -2359,6 +2380,7 @@ async function buildSystemPrompt() {
     "   - NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
     "   - NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
     "   - The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session to watch. Do not re-send the initial task.",
+    "   - The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session.",
     "   - If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
     "5. When read_session shows the work is done (or the user confirms), read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete.",
     "",
@@ -2666,8 +2688,66 @@ async function registerSession(session, cmd, args, cwd, label) {
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
 
-  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null };
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "pending", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null };
   sessions.set(session.id, rec);
+
+  // ---------- Persistent command-approval watcher ----------
+  // After startup, Codex shows a command-approval prompt before running each
+  // command: "1. Yes, proceed (y)  2. Yes, and don't ask again...  3. No..."
+  // We auto-approve SAFE commands (press Enter) and ask the user in chat before
+  // approving DANGEROUS ones (rm, delete, drop, format, etc.).
+  try {
+    if (typeof session.onData === "function") {
+      let approvalBuffer = "";
+      rec.autoApproveUnsub = session.onData((chunk) => {
+        if (!rec.active || rec.autoApproveBusy) return;
+        approvalBuffer += chunk;
+        const flat = stripAnsi(approvalBuffer).toLowerCase();
+        // Codex's command-approval prompt signatures
+        if (!/yes,\s*proceed|press\s*enter\s*to\s*confirm|yes,\s*and\s*don'?t\s*ask\s*again/.test(flat)) return;
+
+        // Already handled? Check if the approval prompt is still on screen.
+        // (The buffer accumulates, so we check if we've already seen AND acted
+        // on this prompt by tracking autoApproveBusy.)
+        rec.autoApproveBusy = true;
+
+        // Extract the command text from the approval prompt to check for danger.
+        // The command appears before the "1. Yes, proceed" options. Look for
+        // "ran" prefix (Codex shows "Ran <command>") or the command after "›".
+        const cleanText = stripAnsi(approvalBuffer);
+        let commandText = "";
+        const ranMatch = cleanText.match(/Ran\s+(.+?)(?=\s*›|\s*1\.\s*Yes)/is);
+        if (ranMatch) commandText = ranMatch[1].trim();
+        if (!commandText) {
+          // Fallback: grab everything before the "Yes, proceed" line
+          const beforeYes = cleanText.split(/1\.\s*Yes/i)[0];
+          commandText = beforeYes.trim().split("\n").pop() || "";
+        }
+
+        // Dangerous command patterns — ask the user before approving.
+        const dangerous = /\brm\s+-rf?\b|\bdelete\b|\bdrop\s+(table|database)\b|\bformat\b|\btruncate\b|\bsudo\s+rm\b|\bgit\s+push\s+.*--force\b|\bchmod\s+777\b|\bkill\s+-9\b/i.test(commandText);
+
+        if (dangerous) {
+          // Ask the user in chat before approving.
+          askCommandApproval(rec, commandText).then((approved) => {
+            if (approved) {
+              session.write("\r"); // press Enter = "1. Yes, proceed"
+            } else {
+              session.write("\x1b"); // Esc = "3. No, and tell Codex what to do differently"
+            }
+            // Clear the buffer so we don't re-trigger on the same prompt.
+            approvalBuffer = "";
+            rec.autoApproveBusy = false;
+          });
+        } else {
+          // Safe command — auto-approve immediately.
+          session.write("\r");
+          approvalBuffer = "";
+          rec.autoApproveBusy = false;
+        }
+      });
+    }
+  } catch (e) { console.warn("auto-approve watcher setup failed:", e); }
 
   // mount the xterm widget. Per the docs, mount() wires session output → terminal
   // AND terminal input → stdin automatically — we do NOT need a separate onData
@@ -2740,6 +2820,7 @@ function toggleExpand(id) {
 async function closeSession(id) {
   const rec = sessions.get(id);
   if (!rec) return;
+  if (rec.autoApproveUnsub) { try { rec.autoApproveUnsub(); } catch (e) { /* non-fatal */ } }
   try { if (rec.session && rec.session.kill) await rec.session.kill(); } catch (e) { /* non-fatal */ }
   if (rec.dispose) { try { rec.dispose(); } catch (e) { /* non-fatal */ } }
   if (rec.ro) { try { rec.ro.disconnect(); } catch (e) { /* non-fatal */ } }
