@@ -547,6 +547,100 @@ button { font-family: inherit; }
   margin-bottom: 4px;
 }
 
+/* ---------- Reusable multiple-choice chat component ---------- */
+/* Rendered inside the chat stream as a message bubble by
+   window.termCoder.askChoice({ prompt, options, style }). */
+.choice-msg {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 0;
+}
+.choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.choice-prompt { color: var(--text); font-size: 14px; line-height: 1.6; }
+.choice-prompt p { margin: 0 0 8px; }
+.choice-prompt p:last-child { margin-bottom: 0; }
+
+/* Options containers */
+.choice-options { display: flex; }
+/* rect: stacked full-width rectangles, top-to-bottom (one row per option) */
+.choice-rect  { flex-direction: column; gap: 6px; width: 100%; }
+/* pill: pill buttons in a wrapping row (flex-wrap), horizontal, wrap to next line */
+.choice-pill  { flex-direction: row; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Option buttons — shared base */
+.choice-btn {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  transition: background .12s ease, border-color .12s ease, color .12s ease, transform .08s ease, opacity .12s ease;
+}
+.choice-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.choice-btn:active { transform: translateY(1px); }
+
+/* rect style: full-width stacked rows */
+.choice-rect .choice-btn {
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  width: 100%;
+}
+.choice-rect .choice-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+/* pill style: wrapping pill buttons */
+.choice-pill .choice-btn {
+  padding: 6px 14px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.choice-pill .choice-btn:hover {
+  background: var(--accent-tint);
+  border-color: var(--accent);
+}
+
+/* after one is clicked: disable all, dim the un-chosen, highlight the chosen */
+.choice-btn:disabled { cursor: default; }
+.choice-btn.choice-selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.choice-pill .choice-btn.choice-selected { box-shadow: var(--shadow-sm); }
+.choice-btn.choice-dimmed { opacity: .5; }
+.choice-pill .choice-btn.choice-dimmed { opacity: .42; }
+
+/* "waiting for your selection…" hint */
+.choice-waiting {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-style: italic;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.choice-waiting::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: .6;
+  animation: choice-blink 1.1s ease-in-out infinite;
+}
+.choice-waiting.hidden { display: none; }
+@keyframes choice-blink { 0%, 100% { opacity: .25; } 50% { opacity: .7; } }
+
 .chat-status {
   padding: 0 18px;
   font-size: 12px;
