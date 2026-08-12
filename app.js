@@ -436,7 +436,7 @@ async function toolHandler(name, args) {
         const s = sessions.get(args.sessionId);
         if (!s) return "Error: session not found. Live session ids: " + [...sessions.keys()].join(", ");
         try {
-          await window.chatoss.terminal.write(args.sessionId, args.text + "\n");
+          await s.session.write(args.text + "\n");
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
@@ -682,13 +682,16 @@ async function spawnChosen(choice) {
   } catch (e) {
     return { error: "Failed to start session: " + (e && e.message ? e.message : String(e)) };
   }
-  if (!session || !session.id) {
+  if (!session) {
     // spawn returns null when denied by the user.
     return null; // denied
   }
-  await registerSession(session.id, "zsh", ["-lic", inner], choice.cwd, label);
+  // The session handle is object-oriented: session.id, session.write, session.onData,
+  // session.onExit, session.resize, session.kill. Pass the WHOLE handle to
+  // registerSession so mount() can wire output→terminal and input→stdin.
+  await registerSession(session, "zsh", ["-lic", inner], choice.cwd, label);
   if (choice.prompt) {
-    try { await window.chatoss.terminal.write(session.id, choice.prompt + "\n"); } catch (e) { /* non-fatal */ }
+    try { await session.write(choice.prompt + "\n"); } catch (e) { /* non-fatal */ }
   }
   return { id: session.id, label, cwd: choice.cwd };
 }
@@ -1377,7 +1380,8 @@ function selectSession(id) {
   renderSessionInfo();
 }
 
-async function registerSession(id, cmd, args, cwd, label) {
+async function registerSession(session, cmd, args, cwd, label) {
+  const id = session.id;
   // square
   const square = document.createElement("div");
   square.className = "term-square";
@@ -1423,13 +1427,14 @@ async function registerSession(id, cmd, args, cwd, label) {
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
 
-  const rec = { id, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false };
-  sessions.set(id, rec);
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false };
+  sessions.set(session.id, rec);
 
-  // mount the xterm widget into the square (session is the spawn() result { id }).
-  // mount() returns { dispose() } synchronously and wires the xterm view async.
+  // mount the xterm widget. Per the docs, mount() wires session output → terminal
+  // AND terminal input → stdin automatically — we do NOT need a separate onData
+  // handler for display. Pass the session.id (string) per the documented signature.
   try {
-    const handle = await window.chatoss.terminal.mount(mountEl, { id }, { fontSize: 12 });
+    const handle = await window.chatoss.terminal.mount(mountEl, session.id, { fontSize: 12 });
     rec.dispose = handle && handle.dispose ? handle.dispose.bind(handle) : null;
   } catch (e) {
     console.warn("terminal.mount failed:", e);
@@ -1439,11 +1444,10 @@ async function registerSession(id, cmd, args, cwd, label) {
     mountEl.appendChild(errEl);
   }
 
-  // stream + exit — guard each bridge method so a missing one can't crash the session.
-  try { if (typeof window.chatoss.terminal.onData === "function") await window.chatoss.terminal.onData(id, () => {}); } catch (e) { /* optional */ }
+  // exit callback — use the session handle's OO onExit method.
   try {
-    if (typeof window.chatoss.terminal.onExit === "function") {
-      await window.chatoss.terminal.onExit(id, (exitCode) => {
+    if (session.onExit) {
+      session.onExit((exitCode) => {
         rec.active = false;
         rec.exitCode = exitCode;
         dot.classList.add("exited");
@@ -1483,7 +1487,7 @@ function fitTerminal(rec) {
   if (!w || !h) return;
   const cols = Math.max(20, Math.floor(w / 7.6));
   const rows = Math.max(5, Math.floor(h / 15.5));
-  try { window.chatoss.terminal.resize(rec.id, cols, rows); } catch (e) { /* non-fatal */ }
+  try { if (rec.session && rec.session.resize) rec.session.resize(cols, rows); } catch (e) { /* non-fatal */ }
 }
 
 function toggleExpand(id) {
@@ -1497,7 +1501,7 @@ function toggleExpand(id) {
 async function closeSession(id) {
   const rec = sessions.get(id);
   if (!rec) return;
-  try { await window.chatoss.terminal.kill(id); } catch (e) { /* non-fatal */ }
+  try { if (rec.session && rec.session.kill) await rec.session.kill(); } catch (e) { /* non-fatal */ }
   if (rec.dispose) { try { rec.dispose(); } catch (e) { /* non-fatal */ } }
   if (rec.ro) { try { rec.ro.disconnect(); } catch (e) { /* non-fatal */ } }
   rec.squareEl.remove();
