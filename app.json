@@ -1,8 +1,8 @@
 {
   "id": "com.thetjmccarty.termcoder",
   "name": "Term Coder",
-  "version": "1.7.0",
-  "description": "AI agent orchestrator with live terminal squares — spawn ollama/codex/claude sub-agents and watch them work.",
+  "version": "1.8.0",
+  "description": "AI agent orchestrator with live terminal squares — decomposes tasks into parallel sub-agents, each in its own git worktree, and merges the results.",
   "icon": "icon.svg",
   "entry": "index.html",
   "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications", "clipboardWrite"],

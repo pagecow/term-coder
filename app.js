@@ -67,6 +67,11 @@ let detection = { codex: false, claude: false, ollama: false, models: [], scanne
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
 
+// Worktree metadata: branchName -> { wtPath, parentBranch, projectPath }.
+// Tracks every worktree created by create_worktree so merge_worktree can find
+// the parent branch to merge back into without the model having to remember it.
+const worktreeMeta = new Map();
+
 // Promise + resolver for the spawn modal wait (set while the modal is open).
 // The orchestrator's start_cli_session tool awaits this; manual start too.
 let spawnPromise = null;
@@ -307,12 +312,28 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "create_worktree",
-      description: "Create a git worktree (an isolated working directory on a new branch) inside the project's .chatoss/worktrees folder. Returns the worktree path. Uses the active project unless projectId is given.",
+      description: "Create a git worktree (an isolated working directory on a new branch) inside the project's .chatoss/worktrees folder. If the project folder is NOT yet a git repo, it auto-initializes one (git init + initial commit) first. Returns JSON: { worktreePath, branch, parentBranch }. ALWAYS create a worktree before spawning each coding agent, and pass the worktreePath as cwd to start_cli_session. Use the active project unless projectId is given.",
       parameters: {
         type: "object",
         properties: {
           projectId: { type: "string", description: "Optional. Defaults to the active project." },
-          branchName: { type: "string", description: "Optional branch name. Defaults to worktree-<timestamp>." },
+          branchName: { type: "string", description: "Optional branch name. Defaults to worktree-<timestamp>. Use a descriptive name per subtask, e.g. visual-design, calendar-grid, dark-mode." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "merge_worktree",
+      description: "Merge a worktree's branch back into its parent branch (e.g. main) in the project folder, then remove the worktree directory and delete the branch. Any uncommitted work in the worktree is committed first. Call this AFTER the coding agent in that worktree has finished its subtask. If there are merge conflicts, the worktree is preserved and you'll be told to resolve them. Pass branchName (from create_worktree's response) or worktreePath.",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional. Defaults to the active project." },
+          branchName: { type: "string", description: "The branch name returned by create_worktree. Preferred way to identify the worktree." },
+          worktreePath: { type: "string", description: "Alternative: the worktree path returned by create_worktree." },
+          parentBranch: { type: "string", description: "Optional. The branch to merge into. Defaults to the parent branch recorded at creation time (usually main)." },
         },
       },
     },
@@ -751,15 +772,105 @@ async function toolHandler(name, args) {
       case "create_worktree": {
         const p = resolveProject(args);
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const base = p.folderPath.replace(/\/+$/, "");
         const branch = args.branchName || "worktree-" + Date.now();
-        const wtPath = p.folderPath.replace(/\/+$/, "") + "/.chatoss/worktrees/" + branch;
+        const wtPath = base + "/.chatoss/worktrees/" + branch;
+
+        // Ensure the project is a git repo. `git worktree add` fails with
+        // "fatal: not a git repository" on folders that were never `git init`'d.
+        // Auto-initialize + make an initial commit so worktrees can branch off it.
+        // This is idempotent: if a repo already exists, the init/commit are no-ops.
+        const checkRepo = await window.chatoss.terminal.exec(
+          loginShell("git rev-parse --is-inside-work-tree 2>/dev/null"),
+          { cwd: base }
+        );
+        if (checkRepo === null) return "Error: terminal permission denied (approve git to continue)";
+        const isRepo = (checkRepo.output || "").trim() === "true";
+        if (!isRepo) {
+          // Initialize the repo, add everything, and make an initial commit so
+          // there's a HEAD for worktree branches to branch from.
+          const initCmd = "git init && git add -A && git commit -m \"initial commit (auto-created by Term Coder for worktree isolation)\"";
+          const initR = await window.chatoss.terminal.exec(loginShell(initCmd), { cwd: base });
+          if (initR === null) return "Error: terminal permission denied (approve git to continue)";
+          if (initR.exitCode !== 0) {
+            return "Failed to auto-initialize git repo (exit " + initR.exitCode + "):\n" + initR.output +
+              "\n\nThe project folder is not a git repository, so a worktree cannot be created. " +
+              "Ask the user to initialize git in the project folder first.";
+          }
+        }
+
+        // Make sure the parent directory for the worktree exists.
+        await window.chatoss.terminal.exec(loginShell("mkdir -p \"" + base + "/.chatoss/worktrees\""), { cwd: base });
+
+        // Determine the current (main) branch so we can branch the worktree off it
+        // and later merge it back. We stash this in the session record's project
+        // metadata so merge_worktree knows where to merge to.
+        const branchR = await window.chatoss.terminal.exec(
+          loginShell("git branch --show-current"),
+          { cwd: base }
+        );
+        const mainBranch = (branchR && branchR.output || "").trim() || "main";
+
         const r = await window.chatoss.terminal.exec(
-          loginShell(`git worktree add "${wtPath}" -b "${branch}"`),
-          { cwd: p.folderPath }
+          loginShell(`git worktree add "${wtPath}" -b "${branch}" "${mainBranch}"`),
+          { cwd: base }
         );
         if (r === null) return "Error: terminal permission denied (approve git to continue)";
         if (r.exitCode !== 0) return "git worktree failed (exit " + r.exitCode + "):\n" + r.output;
-        return wtPath;
+
+        // Track worktree metadata so merge_worktree can find the parent branch.
+        worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
+        return JSON.stringify({ worktreePath: wtPath, branch: branch, parentBranch: mainBranch });
+      }
+      case "merge_worktree": {
+        // Merge a worktree's branch back into its parent branch and remove the
+        // worktree directory. Pass branchName (from create_worktree's response)
+        // or the worktree path directly.
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const base = p.folderPath.replace(/\/+$/, "");
+        const branch = args.branchName || "";
+        const meta = branch ? worktreeMeta.get(branch) : null;
+        const wtPath = (meta && meta.wtPath) || (args.worktreePath || "").trim();
+        const parentBranch = (meta && meta.parentBranch) || args.parentBranch || "main";
+        if (!wtPath && !branch) return "Error: pass branchName or worktreePath so I know which worktree to merge.";
+
+        // First commit any uncommitted work inside the worktree.
+        if (wtPath) {
+          const commitMsg = "worktree work: " + (branch || "merge");
+          const commitR = await window.chatoss.terminal.exec(
+            loginShell("git add -A && git commit -m " + JSON.stringify(commitMsg) + " --allow-empty"),
+            { cwd: wtPath }
+          );
+          if (commitR === null) return "Error: terminal permission denied (approve git to continue)";
+          // exitCode 0 = committed; non-zero with "nothing to commit" is fine.
+        }
+
+        // Switch to the parent branch in the MAIN project folder and merge.
+        const mergeMsg = "Merge worktree branch " + (branch || "?") + " into " + parentBranch;
+        const mergeR = await window.chatoss.terminal.exec(
+          loginShell("git checkout " + JSON.stringify(parentBranch) + " && git merge --no-ff " + JSON.stringify(branch || "") + " -m " + JSON.stringify(mergeMsg)),
+          { cwd: base }
+        );
+        if (mergeR === null) return "Error: terminal permission denied (approve git to continue)";
+        let mergeOut = mergeR.output || "";
+        if (mergeR.exitCode !== 0) {
+          // Check for merge conflicts.
+          if (/CONFLICT|conflict/i.test(mergeOut)) {
+            return "Merge CONFLICT detected while merging branch " + branch + " into " + parentBranch + ":\n" + mergeOut +
+              "\n\nThere are merge conflicts. The worktree is preserved at " + (wtPath || "(unknown)") +
+              ". You should resolve the conflicts manually in the project folder, or ask the user to help.";
+          }
+          return "git merge failed (exit " + mergeR.exitCode + "):\n" + mergeOut;
+        }
+
+        // Clean up: remove the worktree directory and delete the branch.
+        if (wtPath) {
+          await window.chatoss.terminal.exec(loginShell("git worktree remove \"" + wtPath + "\" --force"), { cwd: base });
+        }
+        await window.chatoss.terminal.exec(loginShell("git branch -D \"" + branch + "\""), { cwd: base });
+        if (meta) worktreeMeta.delete(branch);
+        return "Merged branch " + branch + " into " + parentBranch + " successfully. Worktree cleaned up.\n" + mergeOut;
       }
       case "start_cli_session": {
         // The USER decides the CLI + model in the spawn modal. The tool WAITS
@@ -2365,26 +2476,90 @@ async function buildSystemPrompt() {
   const p = getProject(state.activeProjectId);
   let sys = [
     "You are Term Coder, an autonomous software-building orchestrator (like a coding agent).",
-    "You build software by spawning sub-agent CLI coding sessions (claude, codex, etc.) in the terminals panel, reading Kanban board tasks, and marking cards done when work is complete.",
+    "You build software by DECOMPOSING the user's request into independent parallel subtasks, spawning a sub-agent CLI coding session (claude, codex, etc.) for EACH subtask in its own isolated git worktree, monitoring all of them, and merging the results back together.",
     "",
     "IMPORTANT — tool arguments: most tools work with NO arguments because they default to the active project and the attached board. Do NOT invent ids. If you are unsure, call the tool with {} and it will use the current context.",
     "",
     "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
     "",
-    "Workflow:",
-    "1. Quickly inspect with list_project_files({}) and get_current_git_branch({}) — do this ONCE, don't loop.",
-    "2. Create an isolated git worktree with create_worktree({}) for the work (returns a path).",
-    "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }) to SPIN UP A CODING AGENT in a terminal. The user approves and picks the CLI/model. This is the main way work gets done — the sub-agent writes the code, not you.",
-    "4. MONITOR the running session: call read_session({}) to see what the agent is doing — its output, errors, or progress. The read returns CLEAN text (ANSI escapes stripped) so you can read it directly. Use send_to_session({ text }) ONLY for follow-up instructions AFTER the agent's input box is accepting text — not for startup dialogs.",
-    "   - send_to_session parses escape codes: use \\r for Enter, \\x1b[A / \\x1b[B for arrows, etc. But you almost never need it for startup.",
-    "   - NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
-    "   - NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
-    "   - The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session to watch. Do not re-send the initial task.",
-    "   - The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session.",
-    "   - If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
-    "5. When read_session shows the work is done (or the user confirms), read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete.",
+    "═══════════════════════════════════════════════════════════════",
+    "CORE STRATEGY: PARALLEL MULTI-AGENT DELEGATION",
+    "═══════════════════════════════════════════════════════════════",
     "",
-    "ACT, don't just explore. When the user asks you to build or change something, your job is to SPIN UP one or more coding agents (start_cli_session) to do the work in their own terminals — then coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session). Don't try to write all the code yourself in chat; delegate it to sub-agents.",
+    "Your primary job is to decompose a task into INDEPENDENT, PARALLELIZABLE subtasks and spawn a separate coding agent for each — NOT one monolithic agent. This is the #1 thing that makes you effective.",
+    "",
+    "STEP 1 — DECOMPOSE the task into independent subtasks.",
+    "  • Break the user's request into 2–5 subtasks that can be developed in parallel.",
+    "  • Each subtask should touch DIFFERENT files, or different sections of the same file, to minimize merge conflicts.",
+    "  • Scope each subtask narrowly and clearly. A subtask like \"improve the visual design system\" is good; \"improve everything\" is bad.",
+    "  • If two subtasks MUST touch the same file(s), run those subtasks SEQUENTIALLY (one after the other), not in parallel. Parallel subtasks must be file-disjoint.",
+    "  • Example: 'improve the UX/UI of a calendar app' should decompose into:",
+    "      Agent 1: Visual design system (colors, typography, spacing, CSS variables) — touches style.css only",
+    "      Agent 2: Calendar grid + view switching (month/week/day) — touches calendar.js + grid template",
+    "      Agent 3: Event management UI (forms, modals, color pickers) — touches events.js + form template",
+    "      Agent 4: Dark mode + accessibility + responsive breakpoints — touches responsive.css + a11y attrs",
+    "  • Tell the user your decomposition plan in chat BEFORE you start spawning, so they can adjust it.",
+    "",
+    "STEP 2 — CREATE A WORKTREE for each subtask (one per agent, ALWAYS).",
+    "  • For EACH subtask, call create_worktree({ branchName: <descriptive name> }) to get an isolated working directory.",
+    "  • create_worktree returns JSON: { worktreePath, branch, parentBranch }. Save these — you need worktreePath and branch later.",
+    "  • If the project folder isn't a git repo yet, create_worktree auto-initializes one (git init + initial commit) — you don't need to do anything extra.",
+    "  • NEVER spawn a coding agent directly in the project folder. ALWAYS create a worktree first and pass its worktreePath as cwd to start_cli_session. This prevents parallel agents from stomping on each other's changes.",
+    "  • Create ALL the worktrees you need up front (or in batches) before spawning agents.",
+    "",
+    "STEP 3 — SPAWN a coding agent for each subtask (in parallel where possible).",
+    "  • For each subtask, call start_cli_session({ cwd: <worktreePath>, taskPrompt: <the subtask instructions> }) to spin up a coding agent in that worktree.",
+    "  • Give each agent a FOCUSED, DETAILED task prompt — exactly what files to create/modify, what behavior to implement, and any constraints. The sub-agent writes the code, not you.",
+    "  • Spawn subtasks that are file-disjoint ALL AT ONCE (or in rapid succession). The app supports multiple simultaneous terminal sessions.",
+    "  • Spawn subtasks that share files SEQUENTIALLY — wait for the first agent to finish and merge before spawning the next one that touches the same files.",
+    "  • Each start_cli_session returns a session id. SAVE every session id so you can monitor each agent independently.",
+    "",
+    "STEP 4 — MONITOR each agent independently with read_session.",
+    "  • Use read_session({ sessionId: <id> }) to check on each agent. Each session has its own id — check them one at a time, round-robin style.",
+    "  • The read returns CLEAN text (ANSI escapes stripped) so you can read it directly.",
+    "  • Report progress on ALL agents to the user — which are still working, which are done, which hit errors.",
+    "  • Use send_to_session({ sessionId: <id>, text }) ONLY for follow-up instructions AFTER an agent's input box is accepting text — not for startup dialogs.",
+    "  • Do NOT loop read_session rapidly. Check each agent, summarize, then check again after a reasonable interval. The coding agents take time to work.",
+    "  • send_to_session parses escape codes: use \\r for Enter, \\x1b[A / \\x1b[B for arrows, etc. But you almost never need it for startup.",
+    "  • NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
+    "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
+    "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session to watch. Do not re-send the initial task.",
+    "  • The session ALSO auto-handles command approvals: when the coding agent (Codex) asks 'Yes, proceed?' before running a command, the app auto-approves safe commands (cd, ls, grep, cat, git add, etc.) and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session.",
+    "  • If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
+    "",
+    "STEP 5 — MERGE each worktree back to the parent branch when its agent is done.",
+    "  • When read_session shows an agent has finished its subtask, call merge_worktree({ branchName: <branch from create_worktree> }) to merge that worktree's branch back into the parent branch (usually main) and clean up the worktree directory.",
+    "  • Merge agents ONE AT A TIME as they finish. Do not wait for ALL agents before merging — merge each as soon as it's done.",
+    "  • If merge_worktree reports CONFLICTS, the worktree is preserved. Tell the user which subtask conflicted and that manual resolution is needed, or spawn a follow-up agent in the worktree to resolve the conflicts.",
+    "  • After all worktrees are merged, do a final read_session on the main project to verify the combined result, or inspect with list_project_files.",
+    "",
+    "STEP 6 — Complete the task.",
+    "  • When all agents are done and all worktrees merged, summarize what was accomplished.",
+    "  • Read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete (if a card exists for it).",
+    "",
+    "═══════════════════════════════════════════════════════════════",
+    "CONFLICT AWARENESS",
+    "═══════════════════════════════════════════════════════════════",
+    "",
+    "The reason for worktrees + file-disjoint decomposition is to avoid merge conflicts. Follow these rules:",
+    "  • PARALLEL subtasks must touch disjoint sets of files. If subtask A and subtask B both modify style.css, they WILL conflict on merge.",
+    "  • If two subtasks must touch the same file, run them SEQUENTIALLY: complete and merge subtask A first, THEN create a fresh worktree (which will include A's merged changes) for subtask B.",
+    "  • When in doubt about file overlap, run sequentially. Correctness > speed.",
+    "  • A subtask that touches MANY files across the project (e.g. 'add dark mode everywhere') is fine in parallel as long as no OTHER parallel subtask touches those same files.",
+    "",
+    "═══════════════════════════════════════════════════════════════",
+    "WHEN TO USE A SINGLE AGENT",
+    "═══════════════════════════════════════════════════════════════",
+    "",
+    "Not every task needs parallelism. Use a SINGLE agent (one worktree, one session) when:",
+    "  • The task is small and focused (one bug fix, one small feature, one file).",
+    "  • The task is inherently sequential and can't be split into file-disjoint pieces.",
+    "  • The user explicitly asks for a single approach.",
+    "Still ALWAYS create a worktree first, even for a single agent.",
+    "",
+    "═══════════════════════════════════════════════════════════════",
+    "",
+    "ACT, don't just explore. When the user asks you to build or change something, your job is to DECOMPOSE the task, create worktrees, SPIN UP coding agents (start_cli_session) to do the work in their own terminals, coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session), and MERGE the results back (merge_worktree). Don't try to write all the code yourself in chat; delegate it to sub-agents.",
     "",
   ];
   if (p) {
