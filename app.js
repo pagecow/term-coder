@@ -89,6 +89,8 @@ const el = {
   boardChip: $("board-chip"),
   detachBoardBtn: $("detach-board-btn"),
   chatLog: $("chat-log"),
+  chatScroll: $("chat-scroll"),
+  chatJumpBtn: $("chat-jump-btn"),
   chatStatus: $("chat-status"),
   chatForm: $("chat-form"),
   chatInput: $("chat-input"),
@@ -1598,6 +1600,467 @@ function detachBoard() {
   renderBoardChip();
 }
 
+// ---------- Markdown renderer (self-contained, no dependencies) ----------
+// Minimal, safe CommonMark-ish renderer: escapes HTML first, then applies
+// block + inline transforms. Supports headings, fenced code blocks, tables,
+// blockquotes, ordered/unordered lists, hr, bold/italic/strike/code, links,
+// and inline code. Returns an HTML string.
+function mdEscape(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+// Apply inline markdown (bold, italic, strike, code, links) to an already-
+// escaped string. Order matters: inline code first (protect its contents),
+// then links, then emphasis. Uses unique placeholder tokens to avoid
+// colliding with text content.
+function mdInline(escaped) {
+  let out = escaped;
+  const stash = [];
+  const stashPush = (html) => { stash.push(html); return "\u0000" + (stash.length - 1) + "\u0000"; };
+
+  // Inline code: `code`  (single or triple backticks allowed)
+  out = out.replace(/```([^`]+)```|`([^`]+)`/g, (_m, a, b) =>
+    stashPush('<code class="md-inline-code">' + mdEscape(a != null ? a : b) + "</code>"));
+
+  // Links: [text](url)  — url must be http(s)/mailto only (no javascript:)
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, text, url) => {
+    const safe = /^(https?:\/\/|mailto:)/i.test(url) ? url : "#";
+    return stashPush('<a href="' + mdEscape(safe) + '" target="_blank" rel="noopener noreferrer">' + text + "</a>");
+  });
+
+  // Bold: **text** or __text__
+  out = out.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_m, a, b) =>
+    stashPush("<strong>" + (a != null ? a : b) + "</strong>"));
+  // Italic: *text* or _text_
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*|(^|[^_])_([^_\n]+)_/g, (m, p1, a, p2, b) =>
+    (p1 || p2 || "") + stashPush("<em>" + (a != null ? a : b) + "</em>"));
+  // Strikethrough: ~~text~~
+  out = out.replace(/~~([^~]+)~~/g, (_m, a) => stashPush("<del>" + a + "</del>"));
+
+  // Restore stashed HTML fragments.
+  out = out.replace(/\u0000(\d+)\u0000/g, (_m, i) => stash[Number(i)] || "");
+  return out;
+}
+
+// Render a single block of lines (already split) into HTML. Used for table rows,
+// list items, paragraphs, etc.
+function mdRenderTable(lines) {
+  if (lines.length < 2) return null;
+  const splitRow = (l) => l.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const header = splitRow(lines[0]);
+  const sep = splitRow(lines[1]);
+  if (!header.length || !sep.every((c) => /^:?-+:?$/.test(c))) return null;
+  const rows = lines.slice(2).map(splitRow);
+  let html = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
+  for (const h of header) html += "<th>" + mdInline(h) + "</th>";
+  html += "</tr></thead><tbody>";
+  for (const r of rows) {
+    html += "<tr>";
+    for (let i = 0; i < header.length; i++) html += "<td>" + mdInline(r[i] || "") + "</td>";
+    html += "</tr>";
+  }
+  html += "</tbody></table></div>";
+  return html;
+}
+
+function mdRenderList(items, ordered) {
+  // Detect GitHub-style task lists: every item starts with [ ] or [x].
+  const allTasks = items.length > 0 && items.every((it) => /^\s*([-*+]|\d+\.)\s+\[[ xX]\]\s+/i.test(it));
+  const tag = ordered ? "ol" : "ul";
+  const cls = allTasks ? "md-list md-task-list" : "md-list";
+  let html = '<' + tag + ' class="' + cls + '">';
+  for (const it of items) {
+    let body = it;
+    if (allTasks) {
+      const tm = it.match(/^\s*([-*+]|\d+\.)\s+\[([ xX])\]\s+(.*)$/i);
+      const checked = tm && tm[2] && /[xX]/.test(tm[2]);
+      body = tm ? tm[3] : it;
+      const box = '<span class="md-task-box' + (checked ? " is-checked" : "") + '" aria-hidden="true">' +
+        (checked ? "✓" : "") + "</span>";
+      html += '<li class="md-task-item' + (checked ? " is-done" : "") + '">' + box + mdInline(mdEscape(body)) + "</li>";
+    } else {
+      const m = it.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/s);
+      body = m ? m[3] : it;
+      html += "<li>" + mdInline(mdEscape(body)) + "</li>";
+    }
+  }
+  html += "</" + tag + ">";
+  return html;
+}
+
+// Main markdown -> HTML. Code-fence contents are passed through RAW (then
+// escaped + syntax-highlighted inside renderCodeBlockHtml); all other text is
+// escaped first, then block + inline transforms are applied. Supports headings,
+// fenced code blocks, tables, blockquotes, task lists, ordered/unordered lists,
+// hr, bold/italic/strike/code, links, and inline code. Returns an HTML string.
+function renderMarkdown(src) {
+  if (!src) return "";
+  const text = String(src).replace(/\r\n?/g, "\n");
+  const lines = text.split("\n");
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    let line = lines[i];
+
+    // Fenced code block: ```lang ... ```  (raw content — handled specially)
+    const fence = line.match(/^```(.*)$/);
+    if (fence) {
+      const lang = fence[1].trim();
+      const code = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i++; }
+      i++; // skip closing fence
+      out.push(renderCodeBlockHtml(code.join("\n"), lang));
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { out.push('<hr class="md-hr" />'); i++; continue; }
+
+    // Heading: # .. ######
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const lvl = h[1].length;
+      out.push('<h' + lvl + ' class="md-h md-h' + lvl + '">' + mdInline(mdEscape(h[2])) + "</h" + lvl + ">");
+      i++;
+      continue;
+    }
+
+    // Blockquote: collect consecutive ">" lines
+    if (/^>\s?/.test(line)) {
+      const quote = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quote.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push('<blockquote class="md-blockquote">' + mdInline(mdEscape(quote.join(" "))) + "</blockquote>");
+      continue;
+    }
+
+    // Table: a line with | followed by a separator line
+    if (line.indexOf("|") !== -1 && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])) {
+      const tbl = [line];
+      let j = i + 1;
+      while (j < lines.length && lines[j].indexOf("|") !== -1 && lines[j].trim()) { tbl.push(lines[j]); j++; }
+      const rendered = mdRenderTable(tbl);
+      if (rendered) { out.push(rendered); i = j; continue; }
+    }
+
+    // List: collect consecutive list-item lines (mixed markers allowed, incl. task lists)
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+      const items = [];
+      let ordered = /^\s*\d+\.\s+/.test(line);
+      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+        items.push(lines[i]);
+        i++;
+      }
+      out.push(mdRenderList(items, ordered));
+      continue;
+    }
+
+    // Blank line -> paragraph break
+    if (line.trim() === "") { i++; continue; }
+
+    // Paragraph: collect consecutive non-blank, non-block lines
+    const para = [];
+    while (i < lines.length && lines[i].trim() !== "" &&
+      !/^```/.test(lines[i]) && !/^#{1,6}\s+/.test(lines[i]) &&
+      !/^>\s?/.test(lines[i]) && !/^\s*([-*+*]|\d+\.)\s+/.test(lines[i]) &&
+      !/^\s*([-*_])\1{2,}\s*$/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    if (para.length) out.push("<p>" + mdInline(mdEscape(para.join("\n"))).replace(/\n/g, "<br>") + "</p>");
+  }
+  return out.join("");
+}
+
+// ---------- Dependency-free syntax highlighting ----------
+// A tiny, safe tokenizer that wraps tokens in <span class="tok-…">. It operates
+// on RAW code (not yet HTML-escaped) and escapes each token as it emits it, so
+// it is XSS-safe. Languages share a generic pass; a few (js/ts/json/css) get a
+// richer keyword/operator set. No external library, no build step.
+
+const HL_KEYWORDS = {
+  js: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity",
+  ts: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity public private protected readonly enum interface type namespace implements abstract declare",
+  jsx: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity",
+  tsx: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity public private protected readonly enum interface type namespace implements abstract declare",
+  json: "true false null",
+  py: "def class return if elif else for while break continue pass import from as with try except finally raise lambda global nonlocal yield async await is in not and or None True False self print",
+  sh: "if then fi else elif case esac for while do done function return export local echo read source unset set in",
+  go: "func var const type struct interface return if else for range switch case default break continue go defer chan map package import fallthrough nil true false",
+  rust: "fn let mut const static struct enum impl trait return if else for while loop match break continue as use pub mod ref move self Self dyn unsafe extern crate type where async await",
+  sql: "SELECT FROM WHERE INSERT INTO UPDATE DELETE CREATE TABLE ALTER DROP JOIN LEFT RIGHT INNER OUTER ON GROUP BY ORDER HAVING LIMIT OFFSET VALUES SET NULL NOT AND OR AS DISTINCT PRIMARY KEY FOREIGN REFERENCES DEFAULT UNIQUE INDEX",
+};
+
+function hlLangFor(lang) {
+  const l = String(lang || "").toLowerCase().replace(/^x-/, "").replace(/\.(.*)$/, "$1");
+  if (HL_KEYWORDS[l]) return l;
+  if (l === "javascript" || l === "js") return "js";
+  if (l === "typescript" || l === "ts") return "ts";
+  if (l === "jsx") return "jsx";
+  if (l === "tsx") return "tsx";
+  if (l === "python" || l === "py" || l === "py3") return "py";
+  if (l === "bash" || l === "sh" || l === "shell" || l === "zsh") return "sh";
+  if (l === "golang" || l === "go") return "go";
+  if (l === "rs" || l === "rust") return "rust";
+  if (l === "sql" || l === "psql") return "sql";
+  return l || "code";
+}
+
+// Tokenize a single line into [{t: type, v: raw}] pieces. The tokenizer is a
+// single ordered regex pass per line, which is plenty for read-only previews.
+function hlLine(raw, langKey) {
+  const kw = HL_KEYWORDS[langKey] ? HL_KEYWORDS[langKey].split(" ") : null;
+  const kwSet = kw ? new Set(kw) : null;
+  // Order: comments, strings, numbers, then identifiers/words, then operators/punct.
+  const tokenRe = /(#.*$|\/\/.*$|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b0x[0-9a-fA-F]+\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|([A-Za-z_$][A-Za-z0-9_$]*)|(\s+)|([^\sA-Za-z0-9_$]+)/g;
+  const out = [];
+  let m;
+  while ((m = tokenRe.exec(raw)) !== null) {
+    if (m[1] !== undefined) out.push({ t: "comment", v: m[1] });
+    else if (m[2] !== undefined) out.push({ t: "string", v: m[2] });
+    else if (m[3] !== undefined) out.push({ t: "num", v: m[3] });
+    else if (m[4] !== undefined) {
+      const w = m[4];
+      if (kwSet && kwSet.has(w)) out.push({ t: "kw", v: w });
+      else if (/^[A-Z][A-Za-z0-9_]*$/.test(w)) out.push({ t: "type", v: w });
+      else if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(w) && raw[tokenRe.lastIndex] === "(") out.push({ t: "fn", v: w });
+      else out.push({ t: "word", v: w });
+    } else if (m[5] !== undefined) out.push({ t: "ws", v: m[5] });
+    else if (m[6] !== undefined) out.push({ t: "op", v: m[6] });
+  }
+  return out;
+}
+
+function hlEscape(s) {
+  return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+// Highlight raw code into an HTML string of <span> tokens, one line per row so
+// long lines scroll horizontally without reflowing tokens.
+function highlightCode(raw, lang) {
+  const langKey = hlLangFor(lang);
+  const lines = String(raw == null ? "" : raw).split("\n");
+  let html = "";
+  for (let li = 0; li < lines.length; li++) {
+    const toks = hlLine(lines[li], langKey);
+    let lineHtml = "";
+    for (const tk of toks) {
+      if (tk.t === "ws" || tk.t === "word") { lineHtml += hlEscape(tk.v); continue; }
+      lineHtml += '<span class="tok-' + tk.t + '">' + hlEscape(tk.v) + "</span>";
+    }
+    if (lineHtml === "" && li < lines.length - 1) lineHtml = " ";
+    html += lineHtml;
+    if (li < lines.length - 1) html += "\n";
+  }
+  return html;
+}
+
+// Build the HTML for a fenced code block: syntax-highlighted code + language
+// label + copy button. The copy button uses data-code-copy which a delegated
+// click listener copies to the clipboard.
+function renderCodeBlockHtml(rawCode, lang) {
+  const langLabel = lang ? mdEscape(lang) : "";
+  const langKey = hlLangFor(lang);
+  const id = "code-" + (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
+  const highlighted = highlightCode(rawCode, langKey);
+  return (
+    '<div class="md-code-block" data-lang="' + langKey + '">' +
+      '<div class="md-code-head">' +
+        '<span class="md-code-lang">' + (langLabel || "code") + "</span>" +
+        '<button class="md-code-copy" type="button" data-code-copy="' + id + '" title="Copy code" aria-label="Copy code"><span class="md-code-copy-ic">⧉</span>Copy</button>' +
+      "</div>" +
+      '<pre class="md-code-pre"><code id="' + id + '">' + highlighted + "</code></pre>" +
+    "</div>"
+  );
+}
+
+// Copy text to the clipboard, preferring the platform clipboardWrite API and
+// falling back to a hidden textarea + execCommand('copy'). Resolves a bool.
+async function copyToClipboard(text) {
+  try {
+    if (window.chatoss && window.chatoss.clipboard && window.chatoss.clipboard.writeText) {
+      return await window.chatoss.clipboard.writeText(String(text));
+    }
+  } catch (e) { /* fall through */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = String(text);
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
+// ---------- Collapsible thinking widget ----------
+function createThinkingWidget(text, opts) {
+  const o = opts || {};
+  const wrap = document.createElement("div");
+  wrap.className = "msg-thinking-collapsible" + (o.streaming ? " is-streaming" : "");
+  wrap.setAttribute("data-state", "collapsed");
+
+  const header = document.createElement("button");
+  header.type = "button";
+  header.className = "think-toggle";
+  header.setAttribute("aria-expanded", "false");
+  const icon = document.createElement("span");
+  icon.className = "think-icon";
+  icon.textContent = "💭";
+  const caret = document.createElement("span");
+  caret.className = "think-caret";
+  caret.textContent = "▸";
+  const label = document.createElement("span");
+  label.className = "think-label";
+  label.textContent = o.streaming ? "Thinking…" : "Thought process";
+  const meta = document.createElement("span");
+  meta.className = "think-meta";
+  meta.textContent = "";
+  header.appendChild(icon);
+  header.appendChild(caret);
+  header.appendChild(label);
+  header.appendChild(meta);
+
+  const body = document.createElement("div");
+  body.className = "think-body";
+  const inner = document.createElement("div");
+  inner.className = "think-inner";
+  inner.textContent = String(text || "");
+  body.appendChild(inner);
+
+  wrap.appendChild(header);
+  wrap.appendChild(body);
+
+  header.addEventListener("click", () => {
+    const open = wrap.getAttribute("data-state") === "open";
+    wrap.setAttribute("data-state", open ? "collapsed" : "open");
+    header.setAttribute("aria-expanded", open ? "false" : "true");
+  });
+  // Expose updaters for streaming.
+  wrap._update = (newText) => {
+    inner.textContent = String(newText || "");
+    if (!o.streaming) return;
+    const words = String(newText || "").trim().split(/\s+/).filter(Boolean).length;
+    meta.textContent = words ? words + " words" : "";
+  };
+  // When streaming ends, switch label from "Thinking…" to "Thought process".
+  wrap._finalize = () => {
+    wrap.classList.remove("is-streaming");
+    label.textContent = "Thought process";
+  };
+  return wrap;
+}
+
+// ---------- Tool-call activity chip ----------
+// Creates a compact inline chip: "▶ tool_name" with a spinner while running,
+// then a green check when done. Clicking expands the args/result detail.
+function createToolChip(name, args) {
+  const chip = document.createElement("div");
+  chip.className = "tool-chip";
+  chip.setAttribute("data-state", "collapsed");
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "tool-chip-head";
+  const icon = document.createElement("span");
+  icon.className = "tool-chip-icon";
+  icon.innerHTML = '<span class="tool-chip-play">▶</span><span class="tool-chip-spinner"></span>';
+  const label = document.createElement("span");
+  label.className = "tool-chip-name";
+  label.textContent = name || "tool";
+  const caret = document.createElement("span");
+  caret.className = "tool-chip-caret";
+  caret.textContent = "▸";
+  head.appendChild(icon);
+  head.appendChild(label);
+  head.appendChild(caret);
+
+  const detail = document.createElement("div");
+  detail.className = "tool-chip-detail";
+  const argLine = document.createElement("div");
+  argLine.className = "tool-chip-args";
+  argLine.textContent = JSON.stringify(args || {}, null, 2);
+  detail.appendChild(argLine);
+  const resultLabel = document.createElement("div");
+  resultLabel.className = "tool-chip-result-label";
+  resultLabel.textContent = "Result";
+  detail.appendChild(resultLabel);
+  const resultLine = document.createElement("div");
+  resultLine.className = "tool-chip-result";
+  detail.appendChild(resultLine);
+
+  chip.appendChild(head);
+  chip.appendChild(detail);
+
+  head.addEventListener("click", () => {
+    const open = chip.getAttribute("data-state") === "open";
+    chip.setAttribute("data-state", open ? "collapsed" : "open");
+  });
+
+  const markDone = (mark) => {
+    icon.innerHTML = mark;
+    chip.classList.add("is-done");
+  };
+  chip._setResult = (res) => {
+    markDone('<span class="tool-chip-done">✓</span>');
+    const txt = String(res == null ? "" : res);
+    // Truncate very long results in the detail view but keep full text via title.
+    resultLine.textContent = txt.length > 1200 ? txt.slice(0, 1200) + "\n…(truncated)" : txt;
+  };
+  chip._setError = (err) => {
+    icon.innerHTML = '<span class="tool-chip-error">✕</span>';
+    chip.classList.add("is-error");
+    resultLabel.textContent = "Error";
+    resultLine.textContent = String(err || "error");
+  };
+  return chip;
+}
+
+// ---------- Chat scroll management ----------
+// autoScroll tracks whether we should keep the log pinned to the bottom while
+// streaming. It is set false when the user scrolls up and re-enabled on
+// jump-to-latest / new conversation render.
+let chatAutoScroll = true;
+function chatScrollListener() {
+  if (!el.chatScroll) return;
+  const sc = el.chatScroll;
+  const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60;
+  chatAutoScroll = atBottom;
+  if (el.chatJumpBtn) el.chatJumpBtn.classList.toggle("hidden", atBottom);
+}
+function scrollChatBottom(smooth) {
+  if (!el.chatScroll) { if (el.chatLog) el.chatLog.scrollTop = el.chatLog.scrollHeight; return; }
+  const sc = el.chatScroll;
+  if (smooth) { sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" }); }
+  else { sc.scrollTop = sc.scrollHeight; }
+  chatAutoScroll = true;
+  if (el.chatJumpBtn) el.chatJumpBtn.classList.add("hidden");
+}
+function maybeScrollChatBottom() { if (chatAutoScroll) scrollChatBottom(false); }
+
+// ---------- Typing indicator ----------
+function createTypingIndicator() {
+  const row = document.createElement("div");
+  row.className = "msg assistant typing-row";
+  const dots = document.createElement("div");
+  dots.className = "typing-dots";
+  for (let i = 0; i < 3; i++) {
+    const d = document.createElement("span");
+    d.className = "typing-dot";
+    dots.appendChild(d);
+  }
+  row.appendChild(dots);
+  return row;
+}
+
 // ---------- Render: middle column (chat) ----------
 function renderChat() {
   const c = activeConversation();
@@ -1608,6 +2071,8 @@ function renderChat() {
     renderModelPicker();
     renderEffortPicker();
     renderBoardChip();
+    chatAutoScroll = true;
+    if (el.chatJumpBtn) el.chatJumpBtn.classList.add("hidden");
     return;
   }
   el.chatTitle.textContent = c.name;
@@ -1619,29 +2084,66 @@ function renderChat() {
   for (const m of c.messages) {
     renderMessage(m);
   }
-  scrollChatBottom();
+  // After a full history render, pin to the bottom and reset auto-scroll.
+  chatAutoScroll = true;
+  scrollChatBottom(false);
 }
 function renderMessage(m) {
+  const role = m.role || "system";
+  // Collapsible thinking widget (rendered ABOVE the message body).
   if (m.thinking) {
-    const th = document.createElement("div");
-    th.className = "msg-thinking";
-    th.textContent = m.thinking;
+    const th = createThinkingWidget(m.thinking, { streaming: false });
     el.chatLog.appendChild(th);
   }
   const row = document.createElement("div");
-  row.className = "msg " + (m.role || "system");
-  const body = document.createElement("div");
-  body.innerHTML = m.content ? m.content.split(/\n\n+/).map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("") : "";
-  row.appendChild(body);
-  if (m.toolCalls && m.toolCalls.length) {
-    const pre = document.createElement("pre");
-    pre.textContent = m.toolCalls.map((t) => "→ " + t.name + "(" + JSON.stringify(t.args || {}) + ")").join("\n");
-    row.appendChild(pre);
+  row.className = "msg " + role;
+
+  // Role avatar — a small glyph label to the left of the bubble (Codex-style).
+  const avatar = document.createElement("div");
+  avatar.className = "msg-avatar";
+  if (role === "user") { avatar.textContent = "You"; avatar.classList.add("avatar-user"); }
+  else if (role === "assistant") { avatar.textContent = "◆"; avatar.classList.add("avatar-assistant"); }
+  else { avatar.textContent = "•"; avatar.classList.add("avatar-system"); }
+
+  const col = document.createElement("div");
+  col.className = "msg-col";
+
+  // Role label row (hidden for system pills).
+  if (role !== "system") {
+    const lab = document.createElement("div");
+    lab.className = "msg-role";
+    lab.textContent = role === "user" ? "You" : "Orchestrator";
+    col.appendChild(lab);
   }
+
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  if (role === "assistant") {
+    body.innerHTML = renderMarkdown(m.content || "");
+  } else if (role === "user") {
+    body.innerHTML = renderMarkdown(m.content || "");
+  } else {
+    // System messages: keep plain (escaped) text, no markdown.
+    body.innerHTML = m.content ? m.content.split(/\n\n+/).map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("") : "";
+  }
+  col.appendChild(body);
+  // Tool-call activity chips (collapsed by default).
+  if (m.toolCalls && m.toolCalls.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg-tools";
+    for (const t of m.toolCalls) {
+      const chip = createToolChip(t.name, t.args || {});
+      if (t.result != null) chip._setResult(t.result);
+      if (t.error) chip._setError(t.error);
+      wrap.appendChild(chip);
+    }
+    col.appendChild(wrap);
+  }
+  if (role !== "system") { row.appendChild(avatar); }
+  row.appendChild(col);
   el.chatLog.appendChild(row);
   return row;
 }
-function scrollChatBottom() { el.chatLog.scrollTop = el.chatLog.scrollHeight; }
 
 // Display-only renders — no state mutation, no saveState here.
 function renderModelPicker() {
@@ -1766,11 +2268,12 @@ async function sendMessage() {
   c.messages.push({ role: "user", content: text });
   saveState();
   renderMessage({ role: "user", content: text });
-  scrollChatBottom();
+  scrollChatBottom(false);
 
   setRunning(true);
   setStatus("Generating…");
   abortController = new AbortController();
+  chatAutoScroll = true;
 
   // Snapshot the picker choices onto the conversation so history replays
   // with the same model/effort that was actually used.
@@ -1782,17 +2285,51 @@ async function sendMessage() {
   if (canThink && effort) { c.effort = effort; } else { c.effort = null; }
   saveState();
 
+  // Typing indicator — shown until the first content token streams in.
+  const typingRow = createTypingIndicator();
+  el.chatLog.appendChild(typingRow);
+  maybeScrollChatBottom();
+
   // Live assistant row — MUST be in the DOM before streaming so tokens are
-  // visible and tool rows can be inserted before it.
+  // visible and tool chips can be inserted before it. Hidden until first token.
   const liveRow = document.createElement("div");
-  liveRow.className = "msg assistant";
+  liveRow.className = "msg assistant is-streaming";
+  liveRow.style.display = "none";
+  const liveAvatar = document.createElement("div");
+  liveAvatar.className = "msg-avatar avatar-assistant";
+  liveAvatar.textContent = "◆";
+  const liveCol = document.createElement("div");
+  liveCol.className = "msg-col";
+  const liveLabel = document.createElement("div");
+  liveLabel.className = "msg-role";
+  liveLabel.textContent = "Orchestrator";
   const liveBody = document.createElement("div");
-  liveRow.appendChild(liveBody);
+  liveBody.className = "msg-body";
+  liveCol.appendChild(liveLabel);
+  liveCol.appendChild(liveBody);
+  liveRow.appendChild(liveAvatar);
+  liveRow.appendChild(liveCol);
   el.chatLog.appendChild(liveRow);
+
   let liveThink = null;
   let accContent = "";
   let accThink = "";
   const liveToolCalls = [];
+  let firstTokenSeen = false;
+
+  // rAF-throttled re-render so a burst of tokens only repaints once per frame —
+  // keeps streaming smooth with no layout jank. The streaming cursor is shown
+  // while tokens are incoming and removed on the final render.
+  let rafId = 0;
+  const flushContent = () => {
+    rafId = 0;
+    liveBody.innerHTML = renderMarkdown(accContent) + '<span class="md-stream-cursor" aria-hidden="true"></span>';
+    maybeScrollChatBottom();
+  };
+  const scheduleFlush = () => {
+    if (rafId) return;
+    rafId = requestAnimationFrame(flushContent);
+  };
 
   try {
     const systemPrompt = await buildSystemPrompt();
@@ -1809,37 +2346,51 @@ async function sendMessage() {
       tools: ORCHESTRATOR_TOOLS,
       onToken: (t) => {
         if (!t) return;
+        if (!firstTokenSeen) {
+          firstTokenSeen = true;
+          typingRow.remove();
+          liveRow.style.display = "";
+        }
         accContent += t;
-        liveBody.innerHTML = accContent.split(/\n\n+/).map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("");
-        scrollChatBottom();
+        scheduleFlush();
       },
       onThinking: (t) => {
         if (!t) return;
+        if (!firstTokenSeen) {
+          // Thinking before content: drop the typing dots, keep live row hidden.
+          firstTokenSeen = true;
+          typingRow.remove();
+        }
         if (!liveThink) {
-          liveThink = document.createElement("div");
-          liveThink.className = "msg-thinking";
+          liveThink = createThinkingWidget("", { streaming: true });
           el.chatLog.insertBefore(liveThink, liveRow);
         }
         accThink += t;
-        liveThink.textContent = accThink;
-        scrollChatBottom();
+        liveThink._update(accThink);
+        maybeScrollChatBottom();
       },
       onToolCall: async (call) => {
         const { name, args } = normalizeToolCall(call);
-        liveToolCalls.push({ name, args });
-        // Render the tool row before the live assistant row, then append the result.
-        const tr = document.createElement("div");
-        tr.className = "msg tool";
-        tr.textContent = "→ " + name + "(" + JSON.stringify(args) + ")";
-        el.chatLog.insertBefore(tr, liveRow);
-        scrollChatBottom();
+        const entry = { name, args, result: undefined, error: undefined };
+        liveToolCalls.push(entry);
+        if (!firstTokenSeen) {
+          firstTokenSeen = true;
+          typingRow.remove();
+          liveRow.style.display = "";
+        }
+        // Render a compact activity chip before the live assistant row.
+        const chip = createToolChip(name, args);
+        el.chatLog.insertBefore(chip, liveRow);
+        maybeScrollChatBottom();
         try {
           const res = await toolHandler(name, args);
-          tr.textContent += "\n" + String(res);
+          entry.result = res;
+          chip._setResult(res);
           return res; // string result feeds back into the engine's tool loop
         } catch (e) {
           const err = "Error: " + (e && e.message ? e.message : String(e));
-          tr.textContent += "\n" + err;
+          entry.error = err;
+          chip._setError(err);
           return err;
         }
       },
@@ -1847,6 +2398,11 @@ async function sendMessage() {
       thinkLevel: canThink && effort ? effort : undefined,
       signal: abortController.signal,
     });
+
+    // Flush any tail content that was queued behind a rAF, then drop the cursor.
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    liveBody.innerHTML = renderMarkdown(accContent);
+    if (liveThink) liveThink._finalize();
 
     const content = result && result.content ? result.content : accContent;
     const thinking = result && result.thinking ? result.thinking : accThink;
@@ -1857,6 +2413,7 @@ async function sendMessage() {
       setStatus("");
     }
 
+    typingRow.remove();
     liveRow.remove();
     if (liveThink) liveThink.remove();
     let storedToolCalls = liveToolCalls.length ? liveToolCalls : undefined;
@@ -1871,8 +2428,9 @@ async function sendMessage() {
     });
     saveState();
     renderMessage(c.messages[c.messages.length - 1]);
-    scrollChatBottom();
+    maybeScrollChatBottom();
   } catch (e) {
+    typingRow.remove();
     liveRow.remove();
     if (liveThink) liveThink.remove();
     setStatus("");
@@ -1880,7 +2438,7 @@ async function sendMessage() {
     c.messages.push({ role: "system", content: msg });
     saveState();
     renderMessage({ role: "system", content: msg });
-    scrollChatBottom();
+    maybeScrollChatBottom();
   } finally {
     setRunning(false);
     abortController = null;
@@ -2098,9 +2656,8 @@ window.termCoder.askChoice = function askChoice(config) {
     if (promptText) {
       const promptEl = document.createElement("div");
       promptEl.className = "choice-prompt";
-      // reuse the same paragraph-splitting convention as renderMessage()
-      promptEl.innerHTML = promptText.split(/\n\n+/)
-        .map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("");
+      // Render the prompt as markdown for a polished look (safe: escaped inside).
+      promptEl.innerHTML = renderMarkdown(promptText);
       body.appendChild(promptEl);
     }
 
@@ -2256,6 +2813,28 @@ async function init() {
       e.preventDefault();
       el.chatForm.requestSubmit();
     }
+  });
+
+  // Chat scroll tracking — show the "Jump to latest" button when scrolled up,
+  // and pause auto-scroll while streaming so the user can read history.
+  if (el.chatScroll) {
+    el.chatScroll.addEventListener("scroll", chatScrollListener, { passive: true });
+  }
+  if (el.chatJumpBtn) {
+    el.chatJumpBtn.addEventListener("click", () => scrollChatBottom(true));
+  }
+  // Delegated copy handler for code-block copy buttons.
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest && e.target.closest("[data-code-copy]");
+    if (!btn) return;
+    const codeEl = document.getElementById(btn.getAttribute("data-code-copy"));
+    if (!codeEl) return;
+    const text = codeEl.textContent || "";
+    const ok = await copyToClipboard(text);
+    const orig = btn.textContent;
+    btn.textContent = ok ? "Copied!" : "Failed";
+    btn.classList.toggle("is-copied", !!ok);
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove("is-copied"); }, 1400);
   });
 
   // right column — both "new session" buttons open the SAME spawn modal

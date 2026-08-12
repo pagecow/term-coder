@@ -5,7 +5,7 @@
   "description": "AI agent orchestrator with live terminal squares — spawn ollama/codex/claude sub-agents and watch them work.",
   "icon": "icon.svg",
   "entry": "index.html",
-  "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications"],
+  "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications", "clipboardWrite"],
   "scopedDataKeys": ["term-coder.state", "term-coder.settings", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "trustMode"],
   "dataStoreRequests": [],
   "toolsStoreRequests": []
