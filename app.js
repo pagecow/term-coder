@@ -48,6 +48,14 @@ let modelSelection = {
 };
 // The scopedData keys that back each model-selection field (top-level keys).
 const MS_KEYS = ["modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh"];
+
+// Trust-folder policy for spawned CLI agents (claude/codex/etc.):
+//   "ask"    -> when a "trust this folder?" dialog appears, ask the user IN CHAT
+//               via the askChoice pill picker before pressing Enter to confirm.
+//   "always" -> automatically confirm the trust dialog without asking.
+// Persisted as its own scopedData key ("trustMode"), separate from the bundled
+// settings blob so autoDriveStartup can read it in isolation.
+let trustMode = "ask"; // "ask" | "always"
 let models = [];
 let defaultModelId = null;
 let running = false;
@@ -127,6 +135,8 @@ const el = {
   complexityModelLow: $("complexity-model-low"),
   complexityModelMedium: $("complexity-model-medium"),
   complexityModelHigh: $("complexity-model-high"),
+  // trust-folder mode
+  trustModeRadios: $("trust-mode-radios"),
   // board picker
   boardPicker: $("board-picker"),
   boardPickerList: $("board-picker-list"),
@@ -322,7 +332,7 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "send_to_session",
-      description: "Send a line of text to a running CLI session's stdin (e.g. a task prompt, or arrow keys + Enter to navigate an interactive menu). Supports escape sequences: \\x1b[A=Up \\x1b[B=Down \\r=Enter \\x03=Ctrl+C.",
+      description: "Send keystrokes to a running CLI session's stdin. The text is parsed for escape codes before being written, so \\r=Enter, \\n=newline, \\x1b[A=Up, \\x1b[B=Down, \\x1b[C=Right, \\x1b[D=Left, \\x1b=Esc, \\x03=Ctrl+C are all interpreted as REAL keypresses, not typed literally. To submit a typed line in a TUI like Claude Code, end your text with \\r (Enter). Do NOT add a trailing \\n — Enter already submits it. The session auto-handles the 'trust this folder' dialog and the initial model menu, so you usually only need this for follow-up instructions once the agent is running.",
       parameters: {
         type: "object",
         properties: {
@@ -423,6 +433,173 @@ const ORCHESTRATOR_TOOLS = [
   },
 ];
 
+// ---------- PTY input: escape-sequence parser ----------
+// The orchestrator sends text containing literal escape codes as written in
+// tool descriptions (\\r, \\x1b[A, \\n, \\x03, etc.). These arrive as the raw
+// STRING "\\r" (backslash + 'r'), not a carriage-return byte — so we MUST parse
+// them into real control bytes before writing to the PTY, or the CLI sees the
+// literal characters typed into its input box instead of keypresses. This was
+// the core bug: Claude Code's TUI showed the prompt text but Enter never fired.
+function parseTerminalEscapes(s) {
+  if (typeof s !== "string") return s;
+  // Normalize the common backslash-escape sequences used in the tool docs.
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch !== "\\") { out += ch; continue; }
+    const next = s[i + 1];
+    if (next === undefined) { out += "\\"; break; }
+    switch (next) {
+      case "r": out += "\r"; i++; break;        // Enter (carriage return)
+      case "n": out += "\n"; i++; break;        // newline / line feed
+      case "t": out += "\t"; i++; break;        // tab
+      case "b": out += "\b"; i++; break;        // backspace
+      case "e": out += "\x1b"; i++; break;      // escape (alt: \e)
+      case "x": {                               // \x1b -> hex byte
+        const hex = s.slice(i + 2, i + 4);
+        if (/^[0-9a-fA-F]{2}$/.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 3; }
+        else { out += "\\x"; i++; }
+        break;
+      }
+      case "\\": out += "\\"; i++; break;        // literal backslash
+      default: out += "\\" + next; i++; break;   // unknown — leave as-is
+    }
+  }
+  return out;
+}
+
+// Strip ANSI escape sequences (colors, cursor moves, etc.) from raw terminal
+// output so the orchestrator reads readable text instead of escape noise.
+function stripAnsi(s) {
+  if (typeof s !== "string") return s;
+  // CSI sequences: ESC [ ... <0x40-0x7E>
+  s = s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
+  // OSC sequences: ESC ] ... BEL  or  ESC ] ... ESC \
+  s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+  // Other 2-char ESC sequences (ESC + one char): ESC ( B, ESC = , etc.
+  s = s.replace(/\x1b[@-_]/g, "");
+  // Remaining stray ESCs and other C0 control chars (except \n, \r, \t) -> drop
+  s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  return s;
+}
+
+// Auto-drive a freshly spawned CLI through its startup dialogs and into the
+// point where it will accept the task prompt, then send the prompt.
+// Claude Code / Codex / OpenCode show a "trust this folder?" prompt and then a
+// model-picker menu at launch. We handle those so the orchestrator's prompt
+// actually lands in the agent's input box instead of the wrong screen.
+//
+// Trust policy (trustMode):
+//   "ask"    -> pause the session, show a yes/no pill picker IN CHAT, and only
+//               press Enter to confirm trust after the user says yes. If they
+//               say no / dismiss it, kill the session (don't trust = don't run).
+//   "always" -> automatically press Enter to confirm trust without asking.
+//
+// Strategy: watch onData chunks for known dialog signatures. When the trust
+// dialog appears, handle it per trustMode. When the CLI's real input box is
+// ready (welcome line / `❯` prompt), send the task. Safety timeout = 12s.
+async function autoDriveStartup(session, prompt, label, cwd) {
+  if (!prompt) return;
+  const safe = (fn) => { try { return fn(); } catch (_) { return null; } };
+  const folderLabel = cwd || label || "(this folder)";
+
+  let settled = false;
+  let killed = false;
+  let buffer = "";
+  let sawTrust = false;
+  let trustHandled = false;
+  let trustBusy = false; // true while we're waiting for the user's chat answer
+  let modelPickerSeen = false;
+
+  const finish = async () => {
+    if (settled) return;
+    settled = true;
+    try { unsub && unsub(); } catch (_) {}
+    if (killed) return; // session was killed — don't send the prompt
+    // Type the prompt and press Enter so the CLI's input box submits it.
+    await safe(() => session.write(prompt + "\r"));
+  };
+
+  // Confirm the trust dialog by pressing Enter on the highlighted "Yes" option.
+  // Works for both Claude Code ("Yes, I trust this folder") and Codex
+  // ("1. Yes, continue" + "Press enter to continue").
+  const confirmTrust = async () => {
+    trustHandled = true;
+    await safe(() => session.write("\r"));
+  };
+
+  // Deny trust: kill the session so the untrusted agent doesn't run half-baked.
+  const denyTrust = async () => {
+    killed = true;
+    settled = true;
+    try { unsub && unsub(); } catch (_) {}
+    try { if (typeof session.kill === "function") await session.kill(); } catch (_) {}
+  };
+
+  // Handle the trust dialog according to trustMode. "ask" pauses here until the
+  // user answers the chat pill picker; "always" confirms immediately.
+  const handleTrust = async () => {
+    if (trustMode === "always") {
+      await confirmTrust();
+      return;
+    }
+    // trustMode === "ask" — ask in chat, wait for the answer.
+    trustBusy = true;
+    const ok = await askTrustInChat(folderLabel);
+    trustBusy = false;
+    if (settled) return; // safety timeout fired while we were waiting
+    if (ok) {
+      await confirmTrust();
+    } else {
+      await denyTrust();
+    }
+  };
+
+  let unsub = null;
+  try {
+    if (typeof session.onData === "function") {
+      unsub = session.onData((chunk) => {
+        if (settled || trustBusy) return; // don't act while waiting on the user
+        buffer += chunk;
+        const flat = stripAnsi(buffer).toLowerCase();
+
+        // 1) Trust dialog. Match BOTH CLIs robustly:
+        //    Claude Code: "Do you trust the files in this folder?"
+        //    Codex:       "Do you trust the contents of this directory?"
+        //                 + "Press enter to continue"
+        //    Also catch "Yes, I trust this folder" / "Yes, continue".
+        if (!sawTrust && /trust the (files|contents|folder|directory)|trust this folder|do you trust/.test(flat)) {
+          sawTrust = true;
+          handleTrust(); // fire-and-forget; it sets trustBusy while awaiting
+          return;
+        }
+
+        // 2) Model picker menu. We do NOT pick here — the model was already
+        //    passed via --model, OR the user picked it via Model Selection Mode
+        //    pills. If a picker still shows, leave it to the orchestrator/user.
+        if (/select model|\/model|navigate.*enter select|choose a model/.test(flat)) {
+          modelPickerSeen = true;
+          return;
+        }
+
+        // 3) Ready state: the CLI's input prompt is showing (welcome box done,
+        //    `❯` input line visible). Send the task now — but only if we're
+        //    past the trust dialog (or never saw one) and not blocked on a menu.
+        if (!modelPickerSeen && (sawTrust ? trustHandled : true)) {
+          if (/welcome back|try "how do i|what would you like|how can i help|enter a task|^\s*❯/.test(flat)) {
+            finish();
+          }
+        }
+      });
+    }
+  } catch (_) {}
+
+  // Safety net: never hang. After 12s, send the prompt regardless of state —
+  // the orchestrator can recover via read/send later. (Longer than before so
+  // the "ask" chat prompt has time to be answered.)
+  setTimeout(() => { if (!settled && !trustBusy) finish(); }, 12000);
+}
+
 // ---------- Tool handlers (async, always return a string) ----------
 // Resolve the project the model means: the id it passed, else the ACTIVE project.
 // This makes tools work even when the model calls them with {} (the common case).
@@ -479,7 +656,12 @@ async function toolHandler(name, args) {
         if (!s && sessions.size) { s = [...sessions.values()].pop(); }
         if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
         try {
-          await s.session.write(args.text + "\n");
+          // Parse escape sequences (\\r, \\x1b[A, \\n, …) into real control
+          // bytes BEFORE writing to the PTY. The model sends these as literal
+          // two-character strings; writing them un-parsed was the bug that left
+          // text sitting in the CLI's input box with Enter never firing.
+          const raw = parseTerminalEscapes(args.text);
+          await s.session.write(raw);
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
         }
@@ -493,7 +675,9 @@ async function toolHandler(name, args) {
         try {
           if (s.session && typeof s.session.getOutput === "function") {
             const text = await s.session.getOutput();
-            return text || "(terminal is empty — no output yet)";
+            // Strip ANSI color/cursor escapes so the orchestrator reads clean
+            // text and can pattern-match on it instead of wading through noise.
+            return text ? stripAnsi(text) : "(terminal is empty — no output yet)";
           }
           return "Error: getOutput() not available on this session";
         } catch (e) {
@@ -774,7 +958,13 @@ async function spawnChosen(choice) {
   // registerSession so mount() can wire output→terminal and input→stdin.
   await registerSession(session, "zsh", ["-lic", inner], choice.cwd, label);
   if (choice.prompt) {
-    try { await session.write(choice.prompt + "\n"); } catch (e) { /* non-fatal */ }
+    // Don't write the prompt immediately — the CLI (Claude Code / Codex) shows a
+    // "trust this folder?" dialog and sometimes a model picker at launch, and
+    // typing the prompt too early dumps it into the wrong screen. autoDriveStartup
+    // watches the live output, handles the trust dialog (per the Settings trust
+    // policy: ask in chat, or always trust), and sends the prompt once the agent's
+    // real input box is ready (with a 12s safety timeout).
+    try { autoDriveStartup(session, choice.prompt, label, choice.cwd); } catch (e) { /* non-fatal */ }
   }
   return { id: session.id, label, cwd: choice.cwd };
 }
@@ -817,6 +1007,7 @@ function openSettings() {
   el.setCwd.value = settings.cwdDefault || "";
   renderDetectedList();
   applyModelSelectionModeToUi();
+  applyTrustModeToUi();
   el.settingsPanel.classList.remove("hidden");
 }
 
@@ -832,6 +1023,7 @@ function saveSettingsFromPanel() {
   // saveModelSelectionMode), not the bundled settings blob. Sync it now so
   // any uncommitted picker value is captured on Save.
   saveModelSelectionMode();
+  saveTrustMode();
   saveSettings();
   el.settingsPanel.classList.add("hidden");
 }
@@ -921,6 +1113,52 @@ async function loadModelSelection() {
     } catch (e) { console.warn("loadModelSelection", key, e); }
   }
   applyModelSelectionModeToUi();
+}
+
+// ---------- Folder-trust policy ----------
+// Persist + restore trustMode ("ask" | "always") to its own scopedData key.
+async function loadTrustMode() {
+  try {
+    const v = await window.chatoss.scopedData.get("trustMode");
+    if (v === "ask" || v === "always") trustMode = v;
+  } catch (e) { console.warn("loadTrustMode", e); }
+}
+function persistTrustMode() {
+  try { window.chatoss.scopedData.set("trustMode", trustMode).catch((e) => console.warn("persistTrustMode", e)); }
+  catch (e) { console.warn("persistTrustMode", e); }
+}
+// Reflect the persisted trustMode into the settings UI radio group.
+function applyTrustModeToUi() {
+  if (!el.trustModeRadios) return;
+  const radio = el.trustModeRadios.querySelector(`input[name="trust-mode"][value="${trustMode || "ask"}"]`);
+  if (radio) radio.checked = true;
+}
+// Read the settings-UI trust radio back into trustMode and persist it.
+function saveTrustMode() {
+  if (!el.trustModeRadios) return;
+  const checked = el.trustModeRadios.querySelector('input[name="trust-mode"]:checked');
+  trustMode = checked ? checked.value : "ask";
+  persistTrustMode();
+}
+
+// Ask the user (IN CHAT, via the askChoice pill picker) whether to trust the
+// folder a CLI agent is prompting about. Resolves true for "trust", false for
+// "don't trust" or if dismissed. Used by autoDriveStartup when trustMode=ask.
+async function askTrustInChat(folderLabel) {
+  try {
+    const v = await window.termCoder.askChoice({
+      prompt: "A coding agent wants to trust this folder before it can run:\n\n" + (folderLabel || "(this folder)"),
+      options: [
+        { label: "Yes, trust this folder", value: "yes" },
+        { label: "No, don't trust", value: "no" },
+      ],
+      style: "pill",
+    });
+    return v === "yes";
+  } catch (e) {
+    console.warn("askTrustInChat", e);
+    return false;
+  }
 }
 
 // Shared read helper for other code (e.g. the session-startup integration).
@@ -1466,7 +1704,11 @@ async function buildSystemPrompt() {
     "1. Quickly inspect with list_project_files({}) and get_current_git_branch({}) — do this ONCE, don't loop.",
     "2. Create an isolated git worktree with create_worktree({}) for the work (returns a path).",
     "3. Call start_cli_session({ cwd: <worktree path>, taskPrompt: <the task> }) to SPIN UP A CODING AGENT in a terminal. The user approves and picks the CLI/model. This is the main way work gets done — the sub-agent writes the code, not you.",
-    "4. MONITOR the running session: call read_session({}) to see what the agent is doing — its output, errors, or progress. Use send_to_session({ text }) to send it a task prompt or navigate interactive menus (arrow keys: \\x1b[B=Down, \\r=Enter).",
+    "4. MONITOR the running session: call read_session({}) to see what the agent is doing — its output, errors, or progress. The read returns CLEAN text (ANSI escapes stripped) so you can read it directly. Use send_to_session({ text }) to send follow-up instructions or navigate menus.",
+    "   - send_to_session parses escape codes: use \\r for Enter (to submit a typed line), \\x1b[A / \\x1b[B for Up/Down arrows, \\x1b for Esc, \\x03 for Ctrl+C. Do NOT add a trailing \\n after \\r — Enter already submits.",
+    "   - The session AUTO-HANDLES its own startup: the 'trust this folder?' dialog is handled per your Settings (Term Coder asks you IN CHAT with a yes/no pill picker before confirming, or trusts automatically if set to 'Always'), and the taskPrompt you passed to start_cli_session is typed + submitted once the agent's input box is ready. So you do NOT need to re-send the task or press Enter on the trust dialog yourself — just call read_session({}) a few seconds later to watch it work. If you see a yes/no 'trust this folder' question appear in the chat, answer it to let the session proceed.",
+    "   - If read_session shows a model-picker menu ('Select model…' / '↑/↓ navigate • enter select'), the model selection did NOT happen automatically — use send_to_session with arrow keys + \\r to pick one, or tell the user to pick a model in the app's Model Selection Mode pills (Settings). Do not type your task text into the model menu.",
+    "   - If read_session returns 'Error: no such terminal session' shortly after start, the session was killed — most likely the user declined to trust the folder. Do NOT immediately re-call start_cli_session with the same args. Instead tell the user the folder wasn't trusted and ask how they'd like to proceed.",
     "5. When read_session shows the work is done (or the user confirms), read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete.",
     "",
     "ACT, don't just explore. When the user asks you to build or change something, your job is to SPIN UP one or more coding agents (start_cli_session) to do the work in their own terminals — then coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session). Don't try to write all the code yourself in chat; delegate it to sub-agents.",
@@ -1968,6 +2210,8 @@ async function init() {
   }
   // Restore Model Selection Mode from its own scopedData keys, then render the UI.
   await loadModelSelection();
+  // Restore the folder-trust policy ("ask" | "always").
+  await loadTrustMode();
   detection = {
     codex: !!(settings.detected && settings.detected.codex),
     claude: !!(settings.detected && settings.detected.claude),

@@ -1,12 +1,12 @@
 {
   "id": "com.thetjmccarty.termcoder",
   "name": "Term Coder",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "description": "AI agent orchestrator with live terminal squares — spawn ollama/codex/claude sub-agents and watch them work.",
   "icon": "icon.svg",
   "entry": "index.html",
   "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications"],
-  "scopedDataKeys": ["term-coder.state", "term-coder.settings", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh"],
+  "scopedDataKeys": ["term-coder.state", "term-coder.settings", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "trustMode"],
   "dataStoreRequests": [],
   "toolsStoreRequests": []
 }

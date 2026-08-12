@@ -221,6 +221,13 @@
           </label>
         </div>
 
+        <h3 class="settings-section-title">Folder trust</h3>
+        <p class="modal-hint">When a coding agent (Claude Code, Codex, etc.) asks to "trust this folder" at startup, Term Coder can ask you in chat before confirming, or always trust automatically.</p>
+        <div class="model-mode-radios" id="trust-mode-radios">
+          <label class="radio-row"><input type="radio" name="trust-mode" value="ask" /><span class="radio-label">Ask each time</span><span class="radio-sub">Show a yes/no prompt in the chat before confirming trust</span></label>
+          <label class="radio-row"><input type="radio" name="trust-mode" value="always" /><span class="radio-label">Always trust automatically</span><span class="radio-sub">Confirm the trust dialog without asking</span></label>
+        </div>
+
         <h3 class="settings-section-title">Detected tools</h3>
         <div id="detected-list" class="detected-list">
           <div class="detected-scanning">Scanning…</div>
