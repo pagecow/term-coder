@@ -677,14 +677,14 @@ button { font-family: inherit; }
   flex: 1;
   align-self: center;
   margin: auto 0;
-  max-width: 760px;
+  max-width: none;
   width: 100%;
-  text-align: center;
-  padding: 32px 24px;
+  text-align: left;
+  padding: 32px 48px;
   color: var(--chat-empty-fg);
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
   gap: 16px;
 }
@@ -707,19 +707,22 @@ button { font-family: inherit; }
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.01em;
+  text-align: left;
 }
 .chat-empty-body {
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--text-2);
-  max-width: 640px;
+  max-width: none;
+  width: 100%;
+  text-align: left;
 }
 .chat-empty-prompts {
   display: flex;
   flex-direction: column;
   gap: 10px;
   width: 100%;
-  max-width: 640px;
+  max-width: none;
   margin-top: 8px;
 }
 .chat-empty-prompt {
