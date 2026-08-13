@@ -6,7 +6,7 @@
   "icon": "icon.svg",
   "entry": "index.html",
   "capabilities": ["chatApi", "terminal", "fileAccess", "boards", "notifications", "clipboardWrite"],
-  "scopedDataKeys": ["term-coder.state", "term-coder.settings", "term-coder.worktrees", "term-coder.sessions", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "trustMode"],
+  "scopedDataKeys": ["term-coder.state", "term-coder.settings", "term-coder.worktrees", "term-coder.sessions", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "trustMode", "term-coder.userTerm"],
   "dataStoreRequests": [],
   "toolsStoreRequests": []
 }

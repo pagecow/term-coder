@@ -567,6 +567,16 @@ const el = {
   boardPicker: $("board-picker"),
   boardPickerList: $("board-picker-list"),
   boardPickerX: $("board-picker-x"),
+  // user terminal (bottom drawer) — entirely user-driven, separate from the
+  // orchestrator's right-side AI sessions. Toggled by sidebar icon / Cmd+J.
+  userTermBtn: $("user-term-btn"),
+  userTermDrawer: $("user-term-drawer"),
+  userTermResizer: $("user-term-resizer"),
+  userTermCwd: $("user-term-cwd"),
+  userTermMount: $("user-term-mount"),
+  userTermClear: $("user-term-clear"),
+  userTermRestart: $("user-term-restart"),
+  userTermClose: $("user-term-close"),
 };
 
 // ---------- Utils ----------
@@ -965,7 +975,7 @@ const ORCHESTRATOR_TOOLS = [
 const LEGACY_KEY_BYTES = {
   enter: "\r", escape: "\x1b", tab: "\t", space: " ", backspace: "\x7f",
   up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
-  "ctrl+c": "\x03", "ctrl+d": "\x04", "ctrl+u": "\x15",
+  "ctrl+c": "\x03", "ctrl+d": "\x04", "ctrl+u": "\x15", "ctrl+l": "\x0c",
   home: "\x1b[H", end: "\x1b[F", delete: "\x1b[3~",
   "shift+tab": "\x1b[Z", pageup: "\x1b[5~", pagedown: "\x1b[6~",
 };
@@ -5137,6 +5147,313 @@ function initColumnResizers() {
   bind($("rz-chat"), "chat");
 }
 
+// ============================================================
+// USER TERMINAL — bottom drawer
+// ============================================================
+// A terminal the USER controls directly. It is NOT one of the orchestrator's
+// AI sessions on the right — the orchestrator never spawns it, drives it, or
+// reads it. It slides up from the bottom of the screen as a drawer and hosts a
+// live interactive xterm running in the current project's working directory.
+//
+// The live session is kept alive across open/close toggles so reopening is
+// instant. We persist a tiny "open" flag + last height to scopedData so the
+// drawer can restore its open state and size across app restarts, but the live
+// PTY itself is gone after a restart (terminals are not portable across boots),
+// so on reopen we respawn a fresh shell if the drawer was open.
+const USER_TERM_KEY = "term-coder.userTerm";
+let userTerm = {
+  session: null,       // the live spawn() session handle (null when no shell)
+  handle: null,        // the mount() dispose handle (null when not mounted)
+  ro: null,            // ResizeObserver for the mount element
+  open: false,         // whether the drawer is currently showing
+  spawning: false,     // guard against concurrent spawn attempts
+  cwd: null,           // cwd the current shell was started in
+  persisted: { open: false, height: 0 }, // restored on boot
+};
+
+// Resolve the working directory for the user terminal: the active project's
+// folder, then the saved default cwd, then the root "/". Mirrors defaultCwd().
+function userTermCwd() {
+  const p = getProject(state.activeProjectId);
+  if (p && p.folderPath) return p.folderPath;
+  if (settings.cwdDefault) return settings.cwdDefault;
+  return "/";
+}
+
+// Spawn a fresh interactive shell for the user terminal. Uses the SAME login-
+// shell spawn pattern as the orchestrator sessions (zsh -lic) so the user gets
+// their full PATH. Returns the session or null on failure/denial.
+async function userTermSpawn() {
+  if (userTerm.spawning) return null;
+  userTerm.spawning = true;
+  try {
+    const cwd = userTermCwd();
+    const session = await window.chatoss.terminal.spawn("zsh", {
+      args: ["-l"],        // login shell, interactive — no command, so it drops to a prompt
+      cwd,
+      cols: 90,
+      rows: 24,
+    });
+    userTerm.session = session;
+    userTerm.cwd = cwd;
+    if (el.userTermCwd) {
+      el.userTermCwd.textContent = basename(cwd);
+      el.userTermCwd.title = cwd;
+    }
+    // If the shell exits on its own (the user typed `exit`, or it crashed),
+    // drop our references so the next open/restart spawns a fresh one.
+    try {
+      if (session.onExit) {
+        session.onExit(() => {
+          userTermUnmount();
+          userTerm.session = null;
+        });
+      }
+    } catch (e) { /* non-fatal */ }
+    return session;
+  } catch (e) {
+    console.warn("user terminal spawn failed:", e);
+    // Show an inline error so the user knows why the terminal is blank.
+    if (el.userTermMount) {
+      const errEl = document.createElement("div");
+      errEl.className = "term-mount-error";
+      errEl.textContent = "Terminal failed to start: " + (e && e.message ? e.message : String(e));
+      el.userTermMount.appendChild(errEl);
+    }
+    return null;
+  } finally {
+    userTerm.spawning = false;
+  }
+}
+
+// Mount the live xterm into the drawer's mount element. Reuses the exact
+// terminal.mount bridge the orchestrator sessions use. Call AFTER the drawer
+// is visible (mount needs a laid-out element to size the PTY).
+async function userTermMount() {
+  if (!userTerm.session || !el.userTermMount) return;
+  // Clear any prior error placeholder before mounting.
+  for (const e of el.userTermMount.querySelectorAll(".term-mount-error")) e.remove();
+  try {
+    const handle = await window.chatoss.terminal.mount(el.userTermMount, userTerm.session.id, { fontSize: 13 });
+    userTerm.handle = handle && handle.dispose ? handle : null;
+  } catch (e) {
+    console.warn("user terminal mount failed:", e);
+    const errEl = document.createElement("div");
+    errEl.className = "term-mount-error";
+    errEl.textContent = "Terminal failed to load: " + (e && e.message ? e.message : String(e));
+    el.userTermMount.appendChild(errEl);
+    return;
+  }
+  // Keep the PTY fitted to the drawer as it resizes.
+  if (userTerm.ro) { try { userTerm.ro.disconnect(); } catch (e) { /* non-fatal */ } }
+  try {
+    const ro = new ResizeObserver(() => userTermFit());
+    ro.observe(el.userTermMount);
+    userTerm.ro = ro;
+  } catch (e) { /* non-fatal */ }
+  requestAnimationFrame(userTermFit);
+}
+
+// Resize the PTY to match the mount element's box. Same cell math as fitTerminal.
+function userTermFit() {
+  if (!userTerm.session || !el.userTermMount) return;
+  const w = el.userTermMount.clientWidth;
+  const h = el.userTermMount.clientHeight;
+  if (!w || !h) return;
+  const cols = Math.max(20, Math.floor(w / 7.8));
+  const rows = Math.max(5, Math.floor(h / 16));
+  try { if (userTerm.session.resize) userTerm.session.resize(cols, rows); } catch (e) { /* non-fatal */ }
+}
+
+// Tear down the mount (NOT the session) so the shell keeps running in the
+// background and can be remounted instantly on reopen.
+function userTermUnmount() {
+  if (userTerm.ro) { try { userTerm.ro.disconnect(); } catch (e) { /* non-fatal */ } userTerm.ro = null; }
+  if (userTerm.handle) { try { userTerm.handle.dispose(); } catch (e) { /* non-fatal */ } userTerm.handle = null; }
+}
+
+// Kill the underlying shell entirely (used by Restart + the close-and-kill path).
+async function userTermKill() {
+  userTermUnmount();
+  if (userTerm.session) {
+    try { if (userTerm.session.kill) await userTerm.session.kill(); } catch (e) { /* non-fatal */ }
+    userTerm.session = null;
+  }
+  userTerm.cwd = null;
+}
+
+// Persist the open/closed flag + current height so the drawer can restore on
+// the next app launch. Fire-and-forget, never leaves an unhandled rejection.
+function userTermPersist() {
+  try {
+    const rec = { open: userTerm.open };
+    if (el.userTermDrawer && el.userTermDrawer.classList.contains("open")) {
+      const h = el.userTermDrawer.getBoundingClientRect().height;
+      if (h > 80) rec.height = h;
+      else if (userTerm.persisted.height) rec.height = userTerm.persisted.height;
+    } else if (userTerm.persisted.height) {
+      rec.height = userTerm.persisted.height;
+    }
+    userTerm.persisted = rec;
+    window.chatoss.scopedData.set(USER_TERM_KEY, rec).catch((e) => console.warn("userTermPersist", e));
+  } catch (e) { console.warn("userTermPersist", e); }
+}
+
+// Apply a height (px) to the drawer, clamped to a usable range.
+function userTermApplyHeight(px) {
+  if (!el.userTermDrawer) return;
+  const vh = window.innerHeight;
+  const min = 140;
+  const max = Math.floor(vh * 0.85);
+  const h = Math.max(min, Math.min(max, px || Math.floor(vh * 0.35)));
+  el.userTermDrawer.style.height = h + "px";
+  userTerm.persisted.height = h;
+}
+
+// OPEN the drawer: spawn a shell if none exists, mount it, slide it up.
+async function userTermOpen() {
+  if (userTerm.open) { userTermFocus(); return; }
+  userTerm.open = true;
+  // Restore the saved height (default ~35% of viewport).
+  const vh = window.innerHeight;
+  const h = (userTerm.persisted && userTerm.persisted.height) || Math.floor(vh * 0.35);
+  userTermApplyHeight(h);
+  if (el.userTermDrawer) {
+    el.userTermDrawer.classList.add("open");
+    el.userTermDrawer.setAttribute("aria-hidden", "false");
+  }
+  if (el.userTermBtn) {
+    el.userTermBtn.classList.add("active");
+    el.userTermBtn.setAttribute("aria-pressed", "true");
+  }
+  // Update the cwd label up front so it shows immediately.
+  const cwd = userTermCwd();
+  if (el.userTermCwd) {
+    el.userTermCwd.textContent = basename(cwd);
+    el.userTermCwd.title = cwd;
+  }
+  // Spawn (or reuse) the shell, then mount once the drawer is laid out.
+  if (!userTerm.session) {
+    await userTermSpawn();
+  }
+  // Mount needs the drawer to be visible/sized first.
+  requestAnimationFrame(async () => {
+    await userTermMount();
+    userTermFocus();
+  });
+  userTermPersist();
+}
+
+// CLOSE the drawer: slide it down and unmount the xterm, but keep the shell
+// alive so reopening is instant. The session is killed only on app exit.
+function userTermClose() {
+  if (!userTerm.open) return;
+  userTerm.open = false;
+  if (el.userTermDrawer) {
+    el.userTermDrawer.classList.remove("open");
+    el.userTermDrawer.setAttribute("aria-hidden", "true");
+  }
+  if (el.userTermBtn) {
+    el.userTermBtn.classList.remove("active");
+    el.userTermBtn.setAttribute("aria-pressed", "false");
+  }
+  userTermUnmount();
+  userTermPersist();
+}
+
+// Toggle open/closed — the single entry point for the sidebar icon + shortcut.
+function userTermToggle() {
+  if (userTerm.open) userTermClose();
+  else userTermOpen();
+}
+
+// Focus the terminal so keystrokes go to it.
+function userTermFocus() {
+  if (!el.userTermMount) return;
+  const xtermEl = el.userTermMount.querySelector(".xterm");
+  if (xtermEl && xtermEl.focus) { try { xtermEl.focus({ preventScroll: true }); } catch (e) { /* non-fatal */ } }
+}
+
+// Restart the shell (kill + respawn + remount). Used by the Restart button.
+async function userTermRestart() {
+  await userTermKill();
+  await userTermSpawn();
+  if (userTerm.open) await userTermMount();
+  userTermFocus();
+}
+
+// "Clear" — send the clear-screen control sequence to the live shell (Ctrl+L
+// works in most shells) plus a reset of the scrollback via the xterm helper if
+// present. We don't kill the shell — the working directory + history persist.
+async function userTermClear() {
+  if (!userTerm.session) return;
+  try { await sendKey(userTerm.session, "ctrl+l"); } catch (e) { /* non-fatal */ }
+}
+
+// Horizontal drag-resize for the drawer height.
+function initUserTermResizer() {
+  const handle = el.userTermResizer;
+  if (!handle) return;
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+
+  const onMove = (clientY) => {
+    if (!dragging) return;
+    const delta = startY - clientY; // drag up = taller
+    userTermApplyHeight(startH + delta);
+  };
+
+  handle.addEventListener("mousedown", (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startH = el.userTermDrawer.getBoundingClientRect().height;
+    document.body.classList.add("is-resizing");
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => onMove(e.clientY));
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("is-resizing");
+    userTermPersist();
+    requestAnimationFrame(userTermFit);
+  });
+  // Keyboard-resizable (the handle is focusable role="separator").
+  handle.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 48 : 16;
+    let d = 0;
+    if (e.key === "ArrowUp") d = step;
+    else if (e.key === "ArrowDown") d = -step;
+    else if (e.key === "Enter") { e.preventDefault(); userTermToggle(); return; }
+    else return;
+    e.preventDefault();
+    const cur = el.userTermDrawer.getBoundingClientRect().height;
+    userTermApplyHeight(cur + d);
+    requestAnimationFrame(userTermFit);
+  });
+}
+
+// Restore the drawer's persisted state on boot. A live PTY does not survive an
+// app restart, so if it was open we respawn a fresh shell and reopen the drawer.
+async function userTermRestore() {
+  try {
+    const saved = await window.chatoss.scopedData.get(USER_TERM_KEY);
+    if (saved && typeof saved === "object") {
+      userTerm.persisted = { open: !!saved.open, height: saved.height || 0 };
+    }
+  } catch (e) { console.warn("userTermRestore", e); }
+  if (userTerm.persisted.open) {
+    // Defer until after the first render so the drawer element is laid out.
+    requestAnimationFrame(() => userTermOpen().catch((e) => console.warn("userTermRestore open", e)));
+  }
+}
+
+// Kill the shell on app exit/close so it doesn't linger. Called from pagehide.
+async function userTermShutdown() {
+  await userTermKill();
+}
+
 // ---------- Init ----------
 async function init() {
   // restore state + settings
@@ -5367,7 +5684,29 @@ async function init() {
         applyColWidths(settings.layout.projects, settings.layout.chat, { fit: false });
       }
       for (const rec of sessions.values()) fitTerminal(rec);
+      // Keep the user terminal's PTY fitted when the window changes too.
+      if (userTerm.open) requestAnimationFrame(userTermFit);
     }, 120);
+  });
+
+  // ---- User terminal (bottom drawer) wiring ----
+  // Toggled by the sidebar footer icon OR the Cmd/Ctrl+J shortcut. Entirely
+  // user-driven — the orchestrator never touches it.
+  if (el.userTermBtn) el.userTermBtn.addEventListener("click", userTermToggle);
+  if (el.userTermClose) el.userTermClose.addEventListener("click", userTermClose);
+  if (el.userTermClear) el.userTermClear.addEventListener("click", () => userTermClear().catch((e) => console.warn("userTermClear", e)));
+  if (el.userTermRestart) el.userTermRestart.addEventListener("click", () => userTermRestart().catch((e) => console.warn("userTermRestart", e)));
+  initUserTermResizer();
+
+  // Cmd+J (mac) / Ctrl+J toggles the bottom drawer. Only fires on the modifier
+  // combo — a plain "j" while typing in any input (including the orchestrator's
+  // chat box) must never toggle, so we require metaKey OR ctrlKey explicitly.
+  document.addEventListener("keydown", (e) => {
+    const isCombo = (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey &&
+      (e.key === "j" || e.key === "J" || e.code === "KeyJ");
+    if (!isCombo) return;
+    e.preventDefault();
+    userTermToggle();
   });
 
   // Wake the orchestrator when a delegated agent finishes its turn.
@@ -5385,6 +5724,10 @@ async function init() {
     // Cancel a pending debounced flush and run an immediate one instead.
     if (_persistSessionsTimer) { clearTimeout(_persistSessionsTimer); _persistSessionsTimer = null; }
     persistSessions().catch((e) => console.warn("flushSessions", e));
+    // Persist the user terminal's open/height state and tear down its shell so
+    // it doesn't linger past the app closing.
+    userTermPersist();
+    userTermShutdown().catch((e) => console.warn("userTermShutdown", e));
   };
   window.addEventListener("pagehide", flushSessions);
   window.addEventListener("beforeunload", flushSessions);
@@ -5419,6 +5762,10 @@ async function init() {
   // auto-detection at startup (non-blocking; cached 60s). If terminal is
   // denied, everything degrades to "ask" mode — no crash.
   detectTools(true).catch((e) => console.warn("detect", e));
+
+  // Restore the user terminal drawer if it was open on the last run. Done last
+  // so the app's main layout is fully laid out before the drawer slides up.
+  userTermRestore().catch((e) => console.warn("userTermRestore", e));
 }
 
 init().catch((e) => {
