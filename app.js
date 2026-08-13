@@ -35,6 +35,7 @@ let state = {
   activeConversationId: null,
   activeSessionId: null,
   termView: "squares", // "squares" | "columns" | "rows" — layout of the sessions panel
+  convShown: {},       // project id -> how many conversations are visible (pagination)
 };
 let settings = {
   cliDefault: "ask",       // 'ask' | 'ollama' | 'codex' | 'claude'
@@ -46,6 +47,7 @@ let settings = {
   // after every subtask.
   autoFollow: true,
   detected: { codex: false, claude: false, ollama: false, models: [], denied: false },
+  editorWidth: 380,          // code editor column width (px) when open
 };
 // Model Selection Mode — single source of truth for how sub-agent sessions
 // choose a model. Persisted as individual scopedData keys (one per field, see
@@ -502,6 +504,17 @@ const el = {
   // left
   newProjectBtn: $("new-project-btn"),
   projectList: $("project-list"),
+  projSessionsBody: null,   // filled in by renderProjects (selected project only)
+  projSessionsCount: null,
+  // code editor column
+  editor: $("code-editor"),
+  rzEditor: $("rz-editor"),
+  editorInput: $("editor-input"),
+  editorFilename: $("editor-filename"),
+  editorModifiedDot: $("editor-modified-dot"),
+  editorSaveBtn: $("editor-save-btn"),
+  editorCloseBtn: $("editor-close-btn"),
+  editorStatus: $("editor-status"),
   // middle
   modelPicker: $("model-picker"),
   effortPicker: $("effort-picker"),
@@ -2538,7 +2551,13 @@ async function openBoardPicker() {
   }
 }
 
-// ---------- Render: left column ----------
+// Collapse state — which projects have their body (conversations + files +
+// sessions) hidden. Every project CAN be collapsed, unlike before where one
+// project was always forced open.
+let collapsedProjects = new Set();
+// Codex-style sidebar: bold project rows with folder glyph + chevron, hover
+// actions on the right, and the selected project's content (Conversations +
+// Files tree) nested underneath with an indentation guide.
 function renderProjects() {
   el.projectList.innerHTML = "";
   if (!state.projects.length) {
@@ -2549,7 +2568,7 @@ function renderProjects() {
     empty.className = "projects-empty";
     const glyph = document.createElement("div");
     glyph.className = "projects-empty-glyph";
-    glyph.textContent = "◫";
+    glyph.innerHTML = '<svg viewBox="0 0 16 16" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.5a1.25 1.25 0 0 1 1.25-1.25h3l1.5 1.5h6.75a1.25 1.25 0 0 1 1.25 1.25v6a1.25 1.25 0 0 1-1.25 1.25H3a1.25 1.25 0 0 1-1.25-1.25v-7.5z"/></svg>';
     const title = document.createElement("div");
     title.className = "projects-empty-title";
     title.textContent = "No projects yet";
@@ -2569,72 +2588,242 @@ function renderProjects() {
     return;
   }
   for (const p of state.projects) {
+    const isActive = p.id === state.activeProjectId;
+    const isCollapsed = collapsedProjects.has(p.id);
     const item = document.createElement("div");
-    item.className = "project-item" + (p.id === state.activeProjectId ? " selected" : "");
+    item.className = "project-item" + (isActive ? " selected" : "") + (isCollapsed ? " is-collapsed" : "");
+
+    const row = document.createElement("div");
+    row.className = "project-row";
+
+    // Chevron — ALWAYS a collapse toggle now. Clicking it expands/collapses this
+    // project's body without changing the active conversation.
+    const chev = document.createElement("span");
+    chev.className = "proj-chev" + (isCollapsed ? " is-collapsed" : "");
+    chev.title = isCollapsed ? "Expand project" : "Collapse project";
+    chev.setAttribute("role", "button");
+    chev.setAttribute("aria-expanded", String(!isCollapsed));
+    chev.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 10 8l-4.5 4.5"/></svg>';
+    chev.onclick = (e) => {
+      e.stopPropagation();
+      if (collapsedProjects.has(p.id)) collapsedProjects.delete(p.id);
+      else collapsedProjects.add(p.id);
+      saveState();
+      renderProjects();
+    };
+    row.appendChild(chev);
+
+    // Folder glyph (lighter in the resting state so it doesn't compete with the
+    // accent chevron of the selected row).
+    const folder = document.createElement("span");
+    folder.className = "proj-folder";
+    folder.innerHTML = '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.75 4.5a1.25 1.25 0 0 1 1.25-1.25h3l1.5 1.5h6.75a1.25 1.25 0 0 1 1.25 1.25v6a1.25 1.25 0 0 1-1.25 1.25H3a1.25 1.25 0 0 1-1.25-1.25v-7.5z"/></svg>';
+    row.appendChild(folder);
 
     const name = document.createElement("div");
     name.className = "project-name";
     const nameText = document.createElement("span");
     nameText.className = "project-name-text";
     nameText.textContent = p.name;
+    nameText.title = p.folderPath || p.name;
     name.appendChild(nameText);
+    row.appendChild(name);
 
+    // Hover actions — pencil always on hover; delete shows after a beat.
+    const acts = document.createElement("div");
+    acts.className = "proj-actions";
     const renameBtn = document.createElement("button");
     renameBtn.className = "btn-icon";
-    renameBtn.title = "Rename";
-    renameBtn.textContent = "✎";
+    renameBtn.title = "Rename project";
+    renameBtn.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.3 2.2a1.4 1.4 0 0 1 2 0l.5.5a1.4 1.4 0 0 1 0 2L7 11.5l-3.2.7.7-3.2 6.8-6.8z"/></svg>';
     renameBtn.onclick = (e) => { e.stopPropagation(); renameProject(p, nameText); };
-
     const delBtn = document.createElement("button");
-    delBtn.className = "btn-icon btn-danger";
-    delBtn.title = "Delete";
-    delBtn.textContent = "✕";
+    delBtn.className = "btn-icon btn-danger proj-delete";
+    delBtn.title = "Delete project";
+    delBtn.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 5.5h10M6.2 5.5V3.8c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.7M4.8 5.5l.6 6.6c.05.55.5 1 1.05 1h3.1c.55 0 1-.45 1.05-1l.6-6.6"/></svg>';
     delBtn.onclick = (e) => { e.stopPropagation(); confirmDelete(() => deleteProject(p), delBtn); };
+    acts.appendChild(renameBtn);
+    acts.appendChild(delBtn);
+    row.appendChild(acts);
 
-    name.appendChild(renameBtn);
-    name.appendChild(delBtn);
-    item.appendChild(name);
+    row.onclick = () => selectProject(p.id);
+    item.appendChild(row);
 
-    const convList = document.createElement("div");
-    convList.className = "conversation-list";
+    if (isActive && !isCollapsed) {
+      const body = document.createElement("div");
+      body.className = "proj-body";
 
-    for (const c of p.conversations) {
-      const ci = document.createElement("div");
-      ci.className = "conversation-item" + (p.id === state.activeProjectId && c.id === state.activeConversationId ? " selected" : "");
-      const cn = document.createElement("span");
-      cn.className = "conv-name";
-      cn.textContent = c.name;
-      ci.appendChild(cn);
-      const cdel = document.createElement("button");
-      cdel.className = "btn-icon btn-danger";
-      cdel.title = "Delete conversation";
-      cdel.textContent = "✕";
-      cdel.onclick = (e) => { e.stopPropagation(); confirmDelete(() => deleteConversation(p, c), cdel); };
-      ci.appendChild(cdel);
-      ci.onclick = () => selectConversation(p.id, c.id);
-      convList.appendChild(ci);
-    }
+      // Conversations group — a "New conversation" command + one row per chat.
+      // Newest first; paginated: 7 shown by default, +10 per "Show more",
+      // "Show less" back.
+      const convWrap = document.createElement("div");
+      convWrap.className = "proj-group";
+      const convList = document.createElement("div");
+      convList.className = "conversation-list";
+      const stateKey = "convShown:" + p.id;
+      const allConvs = p.conversations;
+      const base = 7, step = 10;
+      // Most recent first (newest is appended at the end of the array).
+      const recent = [...allConvs].reverse();
+      const maxShown = Math.min(allConvs.length, state.convShown[p.id] || base);
+      const shown = recent.slice(0, maxShown);
 
-    if (p.id === state.activeProjectId) {
+      for (const c of shown) {
+        const ci = document.createElement("div");
+        ci.className = "conversation-item" + (c.id === state.activeConversationId ? " selected" : "");
+        const cn = document.createElement("span");
+        cn.className = "conv-name";
+        cn.textContent = c.name;
+        ci.appendChild(cn);
+        const cacts = document.createElement("div");
+        cacts.className = "conv-actions";
+        const cren = document.createElement("button");
+        cren.className = "btn-icon";
+        cren.title = "Rename conversation";
+        cren.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.3 2.2a1.4 1.4 0 0 1 2 0l.5.5a1.4 1.4 0 0 1 0 2L7 11.5l-3.2.7.7-3.2 6.8-6.8z"/></svg>';
+        cren.onclick = (e) => { e.stopPropagation(); renameConversation(p, c, cn); };
+        const cdel = document.createElement("button");
+        cdel.className = "btn-icon btn-danger";
+        cdel.title = "Delete conversation";
+        cdel.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 5.5h10M6.2 5.5V3.8c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.7M4.8 5.5l.6 6.6c.05.55.5 1 1.05 1h3.1c.55 0 1-.45 1.05-1l.6-6.6"/></svg>';
+        cdel.onclick = (e) => { e.stopPropagation(); confirmDelete(() => deleteConversation(p, c), cdel); };
+        cacts.appendChild(cren);
+        cacts.appendChild(cdel);
+        ci.appendChild(cacts);
+        ci.onclick = () => selectConversation(p.id, c.id);
+        convList.appendChild(ci);
+      }
+
+      // Show more / Show less — more reveals up to 10 more at a time; less
+      // collapses straight back to the initial 7.
+      if (allConvs.length > base) {
+        const moreRow = document.createElement("div");
+        moreRow.className = "conv-more-row";
+        if (maxShown < allConvs.length) {
+          const more = document.createElement("button");
+          more.className = "conv-more";
+          more.type = "button";
+          more.innerHTML = '<span class="conv-more-icon"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 6 8 9.5 11.5 6"/></svg></span><span>Show more</span>';
+          more.title = "Show up to 10 more conversations";
+          more.onclick = (e) => {
+            e.stopPropagation();
+            state.convShown[p.id] = Math.min(allConvs.length, maxShown + step);
+            saveState();
+            renderProjects();
+          };
+          moreRow.appendChild(more);
+        } else {
+          const less = document.createElement("button");
+          less.className = "conv-more";
+          less.type = "button";
+          less.innerHTML = '<span class="conv-more-icon"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10 8 6.5 11.5 10"/></svg></span><span>Show less</span>';
+          less.onclick = (e) => {
+            e.stopPropagation();
+            delete state.convShown[p.id];
+            saveState();
+            renderProjects();
+          };
+          moreRow.appendChild(less);
+        }
+        convList.appendChild(moreRow);
+      }
+
       const add = document.createElement("div");
       add.className = "conversation-item conv-new";
-      add.textContent = "+ New conversation";
+      add.innerHTML = '<span class="conv-plus"><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3.5v5M5.5 6h5"/></svg></span><span>New conversation</span>';
       add.onclick = () => newConversation(p);
       convList.appendChild(add);
-    }
+      convWrap.appendChild(convList);
+      body.appendChild(convWrap);
 
-    item.appendChild(convList);
-
-    // File tree (only for the selected project) — toggle with the ▸ triangle
-    if (p.id === state.activeProjectId) {
+      // File tree (live, expandable) — same group styling.
       const filesWrap = document.createElement("div");
       filesWrap.className = "file-tree";
       renderFileTree(p, filesWrap);
-      item.appendChild(filesWrap);
+      body.appendChild(filesWrap);
+
+      // Sessions group — live agent status (click selects in the grid).
+      const sesWrap = document.createElement("div");
+      sesWrap.className = "proj-group proj-sessions-group";
+      const sesHead = document.createElement("div");
+      sesHead.className = "proj-sessions-head";
+      const sesTitle = document.createElement("span");
+      sesTitle.className = "file-tree-title";
+      sesTitle.textContent = "Sessions";
+      const sesCount = document.createElement("span");
+      sesCount.className = "proj-sessions-count";
+      sesHead.appendChild(sesTitle);
+      sesHead.appendChild(sesCount);
+      const sesBody = document.createElement("div");
+      sesBody.className = "proj-sessions-list";
+      sesWrap.appendChild(sesHead);
+      sesWrap.appendChild(sesBody);
+      body.appendChild(sesWrap);
+      el.projSessionsBody = sesBody;
+      el.projSessionsCount = sesCount;
+      paintProjSessions();
+
+      item.appendChild(body);
     }
 
-    name.onclick = () => selectProject(p.id);
     el.projectList.appendChild(item);
+  }
+}
+
+// ---------- Sidebar Sessions section ----------
+// Live agent status mirror in the Projects column, refreshed every 2s by the
+// auto-follow ticker. Clicking a row selects that session in the terminal grid.
+function paintProjSessions() {
+  const body = el.projSessionsBody;
+  if (!body || !body.isConnected) return;
+  const total = sessions.size + deadSessions.size;
+  if (el.projSessionsCount) el.projSessionsCount.textContent = String(total);
+
+  body.innerHTML = "";
+  const recs = [...sessions.values()].sort((a, b) => (b.lastOutputAt || 0) - (a.lastOutputAt || 0));
+  const deads = [...deadSessions.values()].sort((a, b) => (b.endedAt || b.createdAt || 0) - (a.endedAt || a.createdAt || 0));
+  if (!recs.length && !deads.length) {
+    const note = document.createElement("div");
+    note.className = "proj-sessions-empty";
+    note.textContent = "No sessions";
+    body.appendChild(note);
+    return;
+  }
+  const labelFor = (s) => {
+    const lab = s.label || s.id || "session";
+    const idx = lab.indexOf(" · ");
+    return idx >= 0 ? lab.slice(0, idx) : lab;
+  };
+  for (const rec of recs) {
+    const act = sessionActivity(rec);
+    const row = document.createElement("div");
+    row.className = "proj-session-row";
+    row.dataset.status = act === "ERROR LOOP" ? "error" : act === "NEEDS INPUT" ? "input" : act === "WORKING" ? "working" : act === "IDLE" ? "idle" : "starting";
+    const dot = document.createElement("span");
+    dot.className = "proj-session-dot";
+    const nm = document.createElement("span");
+    nm.className = "proj-session-name";
+    nm.textContent = labelFor(rec);
+    row.appendChild(dot);
+    row.appendChild(nm);
+    row.title = act + (rec.worktreeBranch ? " · branch " + rec.worktreeBranch : "");
+    row.onclick = () => { selectSession(rec.id); };
+    body.appendChild(row);
+  }
+  for (const snap of deads) {
+    const row = document.createElement("div");
+    row.className = "proj-session-row";
+    row.dataset.status = "exited";
+    const dot = document.createElement("span");
+    dot.className = "proj-session-dot";
+    const nm = document.createElement("span");
+    nm.className = "proj-session-name";
+    nm.textContent = labelFor(snap);
+    row.appendChild(dot);
+    row.appendChild(nm);
+    row.title = (snap.merged ? "Merged · " : "Ended · ") + (snap.worktreeBranch ? "branch " + snap.worktreeBranch : "output preserved");
+    row.onclick = () => { selectSession(snap.id); };
+    body.appendChild(row);
   }
 }
 
@@ -2743,8 +2932,8 @@ function renderFileTree(project, container) {
   head.appendChild(title);
   const refresh = document.createElement("button");
   refresh.className = "btn-icon";
-  refresh.title = "Refresh";
-  refresh.textContent = "⟳";
+  refresh.title = "Refresh file tree";
+  refresh.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2.4h-2.4"/></svg>';
   refresh.onclick = (e) => {
     e.stopPropagation();
     fileTree.cache.clear();
@@ -2798,10 +2987,14 @@ function paintFileTree(body, rootPath) {
       const open = entry.isDir && fileTree.expanded.has(childPath);
       const row = document.createElement("div");
       row.className = "file-row" + (entry.isDir ? " is-dir" : "") + (open ? " is-open" : "");
-      row.style.paddingLeft = (8 + depth * 12) + "px";
+      // Row indent; the ::before connector sits at the same depth so children
+      // are tied back to their parent's chevron.
+      row.style.setProperty("--depth", depth);
       const icon = document.createElement("span");
       icon.className = "file-icon";
-      icon.textContent = entry.isDir ? "▸" : fileIcon(entry.name);
+      icon.innerHTML = entry.isDir
+        ? '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>'
+        : fileIcon(entry.name);
       const nm = document.createElement("span");
       nm.className = "file-name";
       nm.textContent = entry.name;
@@ -2819,7 +3012,8 @@ function paintFileTree(body, rootPath) {
           repaintFileTree();
         };
       } else {
-        row.title = childPath;
+        row.title = "Open in editor";
+        row.onclick = (e) => { e.stopPropagation(); openFileInEditor(childPath); };
       }
       rows.appendChild(row);
       if (open) paintLevel(childPath, depth + 1);
@@ -2837,14 +3031,248 @@ function fileTreeNote(text, depth) {
   const d = document.createElement("div");
   d.className = "file-tree-loading";
   d.textContent = text;
-  d.style.paddingLeft = (8 + (depth || 0) * 12) + "px";
+  d.style.setProperty("--depth", depth || 0);
   return d;
 }
 
 function fileIcon(name) {
   const ext = name.split(".").pop().toLowerCase();
-  const map = { js:"JS", ts:"TS", json:"{}", html:"<>", css:"#", md:"M↓", svg:"◈", png:"▦", jpg:"▦", txt:"≡" };
-  return map[ext] || "·";
+  switch (ext) {
+    case "js": case "mjs": case "cjs": case "jsx":
+      return '<span class="file-ext" data-ext="js">JS</span>';
+    case "ts": case "tsx": case "mts": case "cts":
+      return '<span class="file-ext" data-ext="ts">TS</span>';
+    case "json":
+      return '<span class="file-ext" data-ext="json">{}</span>';
+    case "html": case "htm":
+      return '<span class="file-ext" data-ext="html">&lt;&gt;</span>';
+    case "css": case "scss": case "less":
+      return '<span class="file-ext" data-ext="css">#</span>';
+    case "md":
+      return '<span class="file-ext" data-ext="md">M↓</span>';
+    case "svg":
+      return '<span class="file-ext" data-ext="svg">◈</span>';
+    case "png": case "jpg": case "jpeg": case "gif": case "webp": case "ico":
+      return '<span class="file-ext" data-ext="img">▦</span>';
+    case "sh": case "zsh": case "bash":
+      return '<span class="file-ext" data-ext="sh">$</span>';
+    default:
+      return '<span class="file-ext" data-ext="plain">·</span>';
+  }
+}
+
+// ---------- Code editor column ----------
+// Thin in-sidebar editor between Projects and Chat. Files open by clicking the
+// Files tree; unsaved changes gate closing/saving, and ⌘S / Ctrl+S saves.
+const editorState = {
+  path: null,          // absolute path of the open file (null = closed)
+  original: "",        // contents as last saved (or as loaded)
+  size: 360,           // persisted column width
+};
+
+const isBinaryExt = (name) => {
+  const ext = name.split(".").pop().toLowerCase();
+  return ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "tiff", "pdf", "zip",
+          "gz", "tar", "7z", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4",
+          "mov", "avi", "exe", "dll", "so", "dylib", "class", "jar", "bin", "o",
+          "a", "wasm", "db", "sqlite", "sqlite3", "icns", "lock"].includes(ext);
+};
+
+async function openFileInEditor(path) {
+  // Unsaved changes? Ask before switching files.
+  if (editorState.path && editorState.path !== path && editorIsDirty()) {
+    const ok = await editorConfirm("Discard unsaved changes to open another file?");
+    if (!ok) return;
+  }
+  if (isBinaryExt(path)) {
+    editorSetStatus("Can't edit binary files.", true);
+    return;
+  }
+  try {
+    const text = await window.chatoss.files.readFile(path);
+    if (typeof text !== "string") {
+      editorSetStatus("Read failed: not a text file.", true);
+      return;
+    }
+    editorState.path = path;
+    editorState.original = text;
+    el.editorInput.value = text;
+    el.editorFilename.textContent = path.split("/").pop();
+    el.editorFilename.title = path;
+    editorSetStatus("Loaded " + (text.split("\n").length) + " lines");
+    openEditorPane();
+  } catch (e) {
+    editorSetStatus("Error opening file: " + (e && e.message ? e.message : String(e)), true);
+  }
+}
+
+function openEditorPane() {
+  if (el.editor.classList.contains("hidden")) {
+    el.editor.classList.remove("hidden");
+    el.rzEditor.classList.remove("hidden");
+    const shell = shellEl();
+    const editorWidth = editorState.size || 380;
+    shell.style.setProperty("--col-editor", editorWidth + "px");
+    shell.style.setProperty("--rz-editor", RZ_W + "px");
+    // Re-clamp the chat column so the editor doesn't crush it or overflow.
+    applyColWidths(null, null, {});
+  }
+  el.editorInput.focus();
+}
+
+function closeEditorPane() {
+  if (el.editor.classList.contains("hidden")) return;
+  el.editor.classList.add("hidden");
+  el.rzEditor.classList.add("hidden");
+  editorState.path = null;
+  editorState.original = "";
+  el.editorInput.value = "";
+  el.editorFilename.textContent = "";
+  el.editorFilename.title = "";
+  editorSetStatus("");
+  el.editorSaveBtn.disabled = true;
+  el.editorModifiedDot.classList.add("hidden");
+  const shell = shellEl();
+  shell.style.setProperty("--col-editor", "0px");
+  shell.style.setProperty("--rz-editor", "0px");
+  applyColWidths(null, null, {});
+  // Chat is the primary column — give it focus back.
+  el.chatInput && el.chatInput.focus();
+}
+
+function editorIsDirty() {
+  return !!editorState.path && el.editorInput.value !== editorState.original;
+}
+
+function editorRefreshDirty() {
+  const dirty = editorIsDirty();
+  el.editorSaveBtn.disabled = !dirty;
+  el.editorModifiedDot.classList.toggle("hidden", !dirty);
+  if (dirty) editorSetStatus("Unsaved changes — press Save");
+}
+
+function editorSetStatus(msg, isError) {
+  el.editorStatus.textContent = msg || "";
+  el.editorStatus.classList.toggle("is-error", !!isError);
+  el.editorStatus.classList.remove("is-saving");
+}
+
+async function editorSave() {
+  if (!editorState.path) return;
+  const contents = el.editorInput.value;
+  if (contents === editorState.original) { editorSetStatus("No changes"); return; }
+  el.editorStatus.classList.add("is-saving");
+  el.editorStatus.classList.remove("is-error");
+  editorSetStatus("Saving…");
+  try {
+    await window.chatoss.files.writeFile(editorState.path, contents);
+    editorState.original = contents;
+    editorRefreshDirty();
+    editorSetStatus("Saved");
+  } catch (e) {
+    editorSetStatus("Save failed: " + (e && e.message ? e.message : String(e)), true);
+  }
+}
+
+// Inline confirm (no window.confirm — blocked in the sandbox).
+function editorConfirm(question) {
+  return new Promise((resolve) => {
+    const status = el.editorStatus;
+    status.classList.add("is-error");
+    status.textContent = question + " Click ✓ to confirm.";
+    const yes = document.createElement("button");
+    yes.className = "btn btn-small btn-primary";
+    yes.textContent = "✓ Discard";
+    const no = document.createElement("button");
+    no.className = "btn btn-small btn-ghost";
+    no.textContent = "Cancel";
+    no.style.marginLeft = "4px";
+    status.appendChild(yes);
+    status.appendChild(no);
+    const cleanup = (val) => {
+      yes.remove(); no.remove();
+      editorRefreshDirty();
+      resolve(val);
+    };
+    yes.onclick = () => cleanup(true);
+    no.onclick = () => cleanup(false);
+  });
+}
+
+function initEditor() {
+  if (!el.editor) return;
+  el.editorInput.addEventListener("input", editorRefreshDirty);
+  el.editorInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { el.editorCloseBtn.click(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      editorSave();
+    }
+  });
+  el.editorSaveBtn.onclick = editorSave;
+  el.editorCloseBtn.onclick = async () => {
+    if (editorIsDirty()) {
+      const ok = await editorConfirm("Discard unsaved changes and close the editor?");
+      if (!ok) return;
+    }
+    closeEditorPane();
+  };
+
+  // Editor resizer — same pattern as the other column handles.
+  const handle = el.rzEditor;
+  if (!handle) return;
+  let startX = 0, startW = 0, dragging = false;
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    startX = e.clientX;
+    startW = parseFloat(getComputedStyle(shellEl()).getPropertyValue("--col-editor")) || editorState.size;
+    dragging = true;
+    handle.classList.add("is-dragging");
+    document.body.classList.add("is-resizing");
+    const onMove = (ev) => {
+      if (!dragging) return;
+      const w = Math.max(200, Math.min(720, startW + (ev.clientX - startX)));
+      shellEl().style.setProperty("--col-editor", w + "px");
+      applyColWidths(null, null, {});
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove("is-dragging");
+      document.body.classList.remove("is-resizing");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const w = parseFloat(getComputedStyle(shellEl()).getPropertyValue("--col-editor")) || editorState.size;
+      editorState.size = w;
+      settings.editorWidth = w;
+      saveSettings();
+      applyColWidths(null, null, { fit: true });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+  handle.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 32 : 8;
+    let d = 0;
+    if (e.key === "ArrowLeft") d = -step;
+    else if (e.key === "ArrowRight") d = step;
+    else return;
+    e.preventDefault();
+    const w = Math.max(200, Math.min(720, (editorState.size || 380) + d));
+    editorState.size = w;
+    shellEl().style.setProperty("--col-editor", w + "px");
+    settings.editorWidth = w;
+    saveSettings();
+    applyColWidths(null, null, {});
+  });
+  handle.addEventListener("dblclick", () => {
+    editorState.size = 360;
+    shellEl().style.setProperty("--col-editor", "360px");
+    settings.editorWidth = 360;
+    saveSettings();
+    applyColWidths(null, null, {});
+  });
+  handle.title = "Drag to resize the code editor · double-click to reset";
 }
 
 // Inline rename (no window.prompt — blocked in the sandbox)
@@ -2873,21 +3301,49 @@ function renameProject(p, nameText) {
   input.addEventListener("blur", commit);
 }
 
+// Same inline-rename pattern for a conversation row.
+function renameConversation(p, c, nameEl) {
+  const input = document.createElement("input");
+  input.className = "conv-rename-input";
+  input.value = c.name;
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    if (v) { c.name = v; saveState(); }
+    renderProjects();
+    renderChat();
+    renderSessionInfo();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+    if (e.key === "Escape") { done = true; renderProjects(); }
+  });
+  input.addEventListener("blur", commit);
+}
+
 // Two-step confirm (no window.confirm — blocked in the sandbox)
 function confirmDelete(fn, btn) {
   if (btn.dataset.armed === "1") { fn(); return; }
   btn.dataset.armed = "1";
-  const orig = btn.textContent;
+  const orig = btn.innerHTML;
   btn.textContent = "✓?";
   btn.style.opacity = "1";
   setTimeout(() => {
     btn.dataset.armed = "0";
-    btn.textContent = orig;
+    btn.innerHTML = orig;
   }, 2500);
 }
 
 function selectProject(pid) {
   state.activeProjectId = pid;
+  // Selecting a project always reveals its body — a hidden one would make the
+  // click look broken.
+  collapsedProjects.delete(pid);
   const p = getProject(pid);
   const cur = getConversation(pid, state.activeConversationId);
   if (!cur) state.activeConversationId = p && p.conversations.length ? p.conversations[0].id : null;
@@ -2939,6 +3395,7 @@ function newConversation(p) {
   p.conversations.push(c);
   state.activeProjectId = p.id;
   state.activeConversationId = c.id;
+  collapsedProjects.delete(p.id);
   saveState();
   renderProjects();
   renderChat();
@@ -4319,6 +4776,12 @@ function autoFollowTick() {
 function startAutoFollow() {
   if (autoFollowTimer) return;
   autoFollowTimer = setInterval(autoFollowTick, 2500);
+  // Lightweight status refresh: bump activity markers + count in the sidebar
+  // Sessions section and update the Projects column without rebuilding the
+  // file tree. No PTY reads — purely the in-memory activity classification.
+  setInterval(() => {
+    if (el.projSessionsBody && el.projSessionsBody.isConnected) paintProjSessions();
+  }, 2000);
 }
 
 // ---------- Right column: terminal grid ----------
@@ -5069,7 +5532,12 @@ function applyColWidths(projects, chat, opts) {
   const shell = shellEl();
   if (!shell) return;
   const cur = currentColWidths();
-  const avail = cur.total - 2 * RZ_W;
+  const editorOpen = !el.editor.classList.contains("hidden");
+  const editorW = editorOpen
+    ? (parseFloat(getComputedStyle(shell).getPropertyValue("--col-editor")) || editorState.size)
+    : 0;
+  const resizerW = editorOpen ? 3 * RZ_W : 2 * RZ_W;
+  const avail = cur.total - resizerW - editorW;
   let p = Math.round(projects != null ? projects : cur.projects);
   p = Math.max(COL_MIN.projects, p);
   p = Math.min(p, Math.max(COL_MIN.projects, avail - COL_MIN.chat - COL_MIN.terminals));
@@ -5169,6 +5637,10 @@ let userTerm = {
   spawning: false,     // guard against concurrent spawn attempts
   cwd: null,           // cwd the current shell was started in
   persisted: { open: false, height: 0 }, // restored on boot
+  cellW: 0,            // measured character cell width (px) — set after mount
+  cellH: 0,            // measured character row height (px) — set after mount
+  lastCols: 0,         // last cols we resized the PTY to (skip redundant resizes)
+  lastRows: 0,         // last rows we resized the PTY to
 };
 
 // Resolve the working directory for the user terminal: the active project's
@@ -5181,18 +5653,21 @@ function userTermCwd() {
 }
 
 // Spawn a fresh interactive shell for the user terminal. Uses the SAME login-
-// shell spawn pattern as the orchestrator sessions (zsh -lic) so the user gets
-// their full PATH. Returns the session or null on failure/denial.
-async function userTermSpawn() {
+// shell spawn pattern as the orchestrator sessions (zsh -l) so the user gets
+// their full PATH. Accepts optional { cols, rows } so the PTY can be born at
+// the drawer's REAL size — spawning at a placeholder size and resizing right
+// after mount makes zsh re-render its prompt and leaves a stray "%" line.
+async function userTermSpawn(dims) {
   if (userTerm.spawning) return null;
   userTerm.spawning = true;
   try {
     const cwd = userTermCwd();
+    const d = dims || { cols: 90, rows: 24 };
     const session = await window.chatoss.terminal.spawn("zsh", {
       args: ["-l"],        // login shell, interactive — no command, so it drops to a prompt
       cwd,
-      cols: 90,
-      rows: 24,
+      cols: d.cols,
+      rows: d.rows,
     });
     userTerm.session = session;
     userTerm.cwd = cwd;
@@ -5202,9 +5677,13 @@ async function userTermSpawn() {
     }
     // If the shell exits on its own (the user typed `exit`, or it crashed),
     // drop our references so the next open/restart spawns a fresh one.
+    // Identity-guard: a Restart kills the OLD shell whose onExit fires AFTER
+    // the new session is in place — without this check it would null out the
+    // fresh session and the remounted terminal would vanish.
     try {
       if (session.onExit) {
         session.onExit(() => {
+          if (userTerm.session !== session) return; // stale exit from a previous shell
           userTermUnmount();
           userTerm.session = null;
         });
@@ -5251,17 +5730,74 @@ async function userTermMount() {
     ro.observe(el.userTermMount);
     userTerm.ro = ro;
   } catch (e) { /* non-fatal */ }
-  requestAnimationFrame(userTermFit);
+  // Re-measure the cell metrics from the xterm's ACTUAL computed font (now that
+  // it's mounted) and fit immediately — synchronously, so the caller's post-
+  // mount \x0c repaint (if any) lands AFTER the fit, not before it. The pre-spawn
+  // probe used a best-guess font; if it was slightly off, this corrects the PTY
+  // size now, and the "lastCols/lastRows" seed prevents a redundant double-resize.
+  const m = measureUserTermCells();
+  userTerm.cellW = m.cellW;
+  userTerm.cellH = m.cellH;
+  userTermFit();
 }
 
-// Resize the PTY to match the mount element's box. Same cell math as fitTerminal.
+// Measure the actual character cell dimensions for the xterm's font. We can't
+// call the xterm instance's fit() directly (the mount handle only exposes
+// dispose()), so we probe the font ourselves: render a block of characters in
+// a hidden element with the SAME font-family and font-size the xterm uses, and
+// divide the total width by the character count. This lets us compute the
+// EXACT cols/rows the xterm will display — a hardcoded 7.8px approximation is
+// wrong for most font/size combos and causes a PTY-width ≠ xterm-width
+// mismatch, which makes zsh think every line is "partial" and print a stray
+// "%" + spaces before each prompt.
+function measureUserTermCells() {
+  const mount = el.userTermMount;
+  if (!mount) return { cellW: 7.8, cellH: 16 };
+  // After mount, read the font from the xterm's own root element so we match
+  // exactly. Before mount (pre-spawn probe), fall back to the mount defaults.
+  const xt = mount.querySelector(".xterm");
+  let fontFamily = "monospace", fontSize = "13px";
+  if (xt) {
+    const cs = getComputedStyle(xt);
+    if (cs.fontFamily) fontFamily = cs.fontFamily;
+    if (cs.fontSize) fontSize = cs.fontSize;
+  }
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:absolute;visibility:hidden;white-space:pre;" +
+    "font-family:" + fontFamily + ";font-size:" + fontSize + ";" +
+    "line-height:normal;display:inline-block;";
+  probe.textContent = "M".repeat(200);
+  mount.appendChild(probe);
+  const rect = probe.getBoundingClientRect();
+  mount.removeChild(probe);
+  if (rect.width > 0 && rect.height > 0) {
+    return { cellW: rect.width / 200, cellH: rect.height };
+  }
+  return { cellW: 7.8, cellH: 16 };
+}
+
+// Resize the PTY to match the mount element's box. Uses the MEASURED cell
+// dimensions (not a hardcoded approximation) so the PTY cols exactly match the
+// xterm's rendered cols — a mismatch makes zsh print a stray "%" partial-line
+// marker before every prompt.
 function userTermFit() {
   if (!userTerm.session || !el.userTermMount) return;
   const w = el.userTermMount.clientWidth;
   const h = el.userTermMount.clientHeight;
   if (!w || !h) return;
-  const cols = Math.max(20, Math.floor(w / 7.8));
-  const rows = Math.max(5, Math.floor(h / 16));
+  if (!userTerm.cellW || !userTerm.cellH) {
+    const m = measureUserTermCells();
+    userTerm.cellW = m.cellW;
+    userTerm.cellH = m.cellH;
+  }
+  const cols = Math.max(20, Math.floor(w / userTerm.cellW));
+  const rows = Math.max(5, Math.floor(h / userTerm.cellH));
+  // Skip if unchanged — avoids SIGWINCH spam and the "%" artifact that every
+  // unnecessary resize produces on a raw shell prompt.
+  if (userTerm.lastCols === cols && userTerm.lastRows === rows) return;
+  userTerm.lastCols = cols;
+  userTerm.lastRows = rows;
   try { if (userTerm.session.resize) userTerm.session.resize(cols, rows); } catch (e) { /* non-fatal */ }
 }
 
@@ -5333,12 +5869,36 @@ async function userTermOpen() {
     el.userTermCwd.title = cwd;
   }
   // Spawn (or reuse) the shell, then mount once the drawer is laid out.
-  if (!userTerm.session) {
-    await userTermSpawn();
+  const fresh = !userTerm.session;
+  if (fresh) {
+    // Pre-measure the character cell size so we can spawn the PTY at the EXACT
+    // cols/rows the xterm will render. A mismatch (spawn at 90 cols, xterm
+    // renders at 105) makes zsh re-render on the first fit and leave a stray
+    // "%" partial-line marker. The probe uses the same font the xterm will
+    // use (monospace at 13px); after mount we re-measure from the xterm's own
+    // computed style to correct any discrepancy.
+    const pre = measureUserTermCells();
+    const w = (el.userTermMount && el.userTermMount.clientWidth) || window.innerWidth;
+    const mh = (el.userTermMount && el.userTermMount.clientHeight) || Math.max(200, h - 40);
+    const cols = Math.max(20, Math.floor(w / pre.cellW));
+    const rows = Math.max(5, Math.floor(mh / pre.cellH));
+    userTerm.lastCols = cols;   // seed so the first fit won't double-resize
+    userTerm.lastRows = rows;
+    await userTermSpawn({ cols, rows });
   }
   // Mount needs the drawer to be visible/sized first.
   requestAnimationFrame(async () => {
     await userTermMount();
+    // A remount (drawer reopened after X-close) attaches a FRESH xterm to a
+    // shell that printed its prompt long ago — that output predates the mount
+    // and never reaches the new xterm, leaving a bare cursor. The shell is
+    // idle at its prompt now (ZLE is in raw mode), so Ctrl+L makes zsh
+    // clear-and-repaint exactly one clean prompt. We DON'T do this for a
+    // fresh spawn: the line editor isn't in raw mode yet and the raw \x0c
+    // byte would echo as a visible "^L" before the prompt.
+    if (!fresh && userTerm.session && typeof userTerm.session.write === "function") {
+      try { await userTerm.session.write("\x0c"); } catch (e) { /* non-fatal */ }
+    }
     userTermFocus();
   });
   userTermPersist();
@@ -5376,18 +5936,42 @@ function userTermFocus() {
 
 // Restart the shell (kill + respawn + remount). Used by the Restart button.
 async function userTermRestart() {
-  await userTermKill();
-  await userTermSpawn();
+  // Unmount first and null the session so the OLD shell's onExit (which fires
+  // when we kill it below) can't null out the NEW session in a race.
+  userTermUnmount();
+  const old = userTerm.session;
+  userTerm.session = null;
+  if (old) {
+    try { if (old.kill) await old.kill(); } catch (e) { /* non-fatal */ }
+  }
+  userTerm.cwd = null;
+  // Spawn at the current drawer size, measured with the same cell metrics so
+  // the PTY is born correctly sized (no post-spawn resize → no "%" artifact).
+  const pre = measureUserTermCells();
+  const w = (el.userTermMount && el.userTermMount.clientWidth) || window.innerWidth;
+  const mh = (el.userTermMount && el.userTermMount.clientHeight) || 480;
+  const cols = Math.max(20, Math.floor(w / pre.cellW));
+  const rows = Math.max(5, Math.floor(mh / pre.cellH));
+  userTerm.lastCols = cols;
+  userTerm.lastRows = rows;
+  await userTermSpawn({ cols, rows });
   if (userTerm.open) await userTermMount();
   userTermFocus();
 }
 
-// "Clear" — send the clear-screen control sequence to the live shell (Ctrl+L
-// works in most shells) plus a reset of the scrollback via the xterm helper if
-// present. We don't kill the shell — the working directory + history persist.
+// "Clear" — clear the shell screen with Ctrl+L (\x0c). The host's key() API
+// doesn't support 'ctrl+l' (interactive key set only), so write the control
+// byte directly. We don't kill the shell — the working directory + history
+// persist.
 async function userTermClear() {
   if (!userTerm.session) return;
-  try { await sendKey(userTerm.session, "ctrl+l"); } catch (e) { /* non-fatal */ }
+  try {
+    if (typeof userTerm.session.write === "function") {
+      await userTerm.session.write("\x0c");
+    } else {
+      await sendKey(userTerm.session, "ctrl+l");
+    }
+  } catch (e) { /* non-fatal */ }
 }
 
 // Horizontal drag-resize for the drawer height.
@@ -5459,7 +6043,7 @@ async function init() {
   // restore state + settings
   try {
     const saved = await window.chatoss.scopedData.get(STORE_KEY);
-    if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null, termView: "squares" }, saved);
+    if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null, termView: "squares", convShown: {} }, saved);
   } catch (e) { console.warn("restore state", e); }
   try {
     const savedSettings = await window.chatoss.scopedData.get(SETTINGS_KEY);
@@ -5724,19 +6308,38 @@ async function init() {
     // Cancel a pending debounced flush and run an immediate one instead.
     if (_persistSessionsTimer) { clearTimeout(_persistSessionsTimer); _persistSessionsTimer = null; }
     persistSessions().catch((e) => console.warn("flushSessions", e));
-    // Persist the user terminal's open/height state and tear down its shell so
-    // it doesn't linger past the app closing.
     userTermPersist();
+  };
+  // Kill the user's shell ONLY on a real app close — NOT on visibilitychange.
+  // On macOS, swiping to another Space fires visibilitychange("hidden"); if we
+  // killed the shell there, the prompt would vanish when the user swiped back.
+  // The shell must stay alive (and its xterm mounted) until the user closes the
+  // drawer with the × button, or the app actually quits.
+  const flushAndShutdown = () => {
+    flushSessions();
     userTermShutdown().catch((e) => console.warn("userTermShutdown", e));
   };
-  window.addEventListener("pagehide", flushSessions);
-  window.addEventListener("beforeunload", flushSessions);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushSessions(); });
+  window.addEventListener("pagehide", flushAndShutdown);
+  window.addEventListener("beforeunload", flushAndShutdown);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      flushSessions();
+    } else if (document.visibilityState === "visible" && userTerm.open) {
+      // Coming back from another Space: the shell + xterm persisted, but the
+      // window dimensions may have shifted while we were away — refit so the
+      // prompt stays correctly laid out.
+      requestAnimationFrame(() => userTermFit());
+    }
+  });
 
   // initial render
   renderProjects();
   renderChat();
   renderSessionInfo();
+  // Code editor column: bind events + restore the saved width (the pane stays
+  // hidden until a file is opened).
+  if (settings.editorWidth) editorState.size = settings.editorWidth;
+  initEditor();
   // Render restored (persisted) terminal sessions as ended cards BEFORE the
   // empty-state check, so a reopen with prior sessions shows them instead of
   // "No active sessions". Newest first so the most recent work is on top.

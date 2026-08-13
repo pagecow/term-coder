@@ -42,9 +42,13 @@
 
     <!-- COLUMN 1 — Projects -->
     <aside class="col-projects pane">
-      <header class="pane-titlebar">
+      <header class="pane-titlebar proj-titlebar">
         <span class="pane-label">Projects</span>
-        <button id="new-project-btn" class="icon-button" type="button" title="New project" aria-label="New project">+</button>
+        <button id="new-project-btn" class="icon-button" type="button" title="Add a project folder" aria-label="New project">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+            <path d="M8 3.5v9M3.5 8h9"/>
+          </svg>
+        </button>
       </header>
       <nav id="project-list" class="project-list" aria-label="Projects"></nav>
       <!-- Footer toolbar pinned to the bottom of the sidebar. The user's own
@@ -67,6 +71,31 @@
     <!-- Drag to resize the Projects column (arrow keys work too). -->
     <div id="rz-projects" class="col-resizer" role="separator" aria-orientation="vertical"
          aria-label="Resize the Projects column" tabindex="0"></div>
+
+    <!-- CODE EDITOR — thin in-sidebar editor between Projects and the AI chat.
+         Opens when a file is clicked in the Files tree; close it to reclaim the
+         space. -->
+    <section id="code-editor" class="col-editor pane hidden" aria-label="Code editor">
+      <header class="pane-titlebar editor-titlebar">
+        <div class="editor-title-left">
+          <span class="editor-file-icon" aria-hidden="true"></span>
+          <span id="editor-filename" class="editor-filename" title=""></span>
+          <span id="editor-modified-dot" class="editor-modified-dot hidden" title="Unsaved changes" aria-label="Unsaved changes"></span>
+        </div>
+        <div class="editor-actions">
+          <button id="editor-save-btn" class="btn btn-primary btn-small" type="button" disabled title="Save (⌘S / Ctrl+S)">Save</button>
+          <button id="editor-close-btn" class="icon-button" type="button" title="Close editor" aria-label="Close editor">&times;</button>
+        </div>
+      </header>
+      <textarea id="editor-input" class="editor-input" spellcheck="false" autocomplete="off"
+                placeholder="Select a file from the Files tree to view and edit it."
+                aria-label="File contents"></textarea>
+      <div id="editor-status" class="editor-status" role="status" aria-live="polite"></div>
+    </section>
+
+    <!-- Drag to resize the editor column (arrow keys work too). -->
+    <div id="rz-editor" class="col-resizer hidden" role="separator" aria-orientation="vertical"
+         aria-label="Resize the code editor column" tabindex="0"></div>
 
     <!-- COLUMN 2 — Orchestrator chat -->
     <section class="col-chat pane">
