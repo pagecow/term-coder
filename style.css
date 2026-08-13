@@ -1649,19 +1649,112 @@ body.is-resizing .term-mount { pointer-events: none; }
   font-weight: 700;
 }
 
+/* ---- View-mode switcher (top-right of the terminals header) ----
+   A compact segmented control of three small icon buttons. The active
+   mode is highlighted with the accent color; the others are quiet. */
+.term-view-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.term-view-btn {
+  width: 26px;
+  height: 24px;
+  flex: 0 0 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  transition: background .12s ease, color .12s ease;
+}
+.term-view-btn:hover { background: var(--surface-3); color: var(--text-2); }
+.term-view-btn.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.term-view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .term-grid {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
   padding: 16px;
+}
+
+/* ---- View: squares (default) — the current grid of squares in rows ---- */
+.term-grid.view-squares {
+  overflow-y: auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 16px;
   align-content: start;
 }
 
+/* ---- View: columns — full-height columns, scroll horizontally ----
+   scroll-snap-type: x proximity (not mandatory) gently locks the scroll to
+   each full-height column once you get close, so flipping through the active
+   sessions left/right feels tidy without fighting the user. */
+.term-grid.view-columns {
+  overflow-x: auto;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 16px;
+  scroll-snap-type: x proximity;
+}
+.term-grid.view-columns .term-square,
+.term-grid.view-columns .term-square-ended {
+  flex: 0 0 420px;
+  min-width: 320px;
+  max-width: 560px;
+  height: auto;
+  scroll-snap-align: start;
+}
+/* The expanded (fullscreen overlay) square must override the column sizing. */
+.term-grid.view-columns .term-square.expanded {
+  position: fixed;
+  inset: 64px 32px 32px 32px;
+  flex-basis: auto;
+  max-width: none;
+  height: auto;
+}
+
+/* ---- View: rows — full-width rows stacked vertically, scroll up/down ---- */
+.term-grid.view-rows {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.term-grid.view-rows .term-square,
+.term-grid.view-rows .term-square-ended {
+  width: 100%;
+  height: 320px;
+  flex: 0 0 320px;
+}
+/* The expanded (fullscreen overlay) square must override the row sizing. */
+.term-grid.view-rows .term-square.expanded {
+  position: fixed;
+  inset: 64px 32px 32px 32px;
+  width: auto;
+  height: auto;
+}
+
+
 .term-empty {
   grid-column: 1 / -1;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 240px;
   display: flex;
   flex-direction: column;
   align-items: center;
