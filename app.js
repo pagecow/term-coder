@@ -211,7 +211,7 @@ async function formatSessionStatusOutput(s, statusOverride, opts) {
     let needsInputLine = "";
     if (s.active !== false && s.waitingForInput) {
       if (s.pendingQuestion && !/^\(agent appears idle/.test(s.pendingQuestion)) {
-        needsInputLine = "\n[NEEDS INPUT: the agent asked a question. The app auto-handles permission prompts; this is a genuine question for YOU.]\n[QUESTION: " + s.pendingQuestion + "]\n[To answer: call send_to_session({ sessionId: \"" + (s.id || "") + "\", text: \"<your answer>\\r\" }). After you respond, the agent will continue.]";
+        needsInputLine = "\n[NEEDS INPUT: the agent asked a question. The app auto-handles permission prompts; this is a genuine question for YOU.]\n[QUESTION: " + s.pendingQuestion + "]\n[To answer: call send_to_session({ sessionId: \"" + (s.id || "") + "\", text: \"<your answer>\", key: \"enter\" }). After you respond, the agent will continue.]";
       } else if (s.pendingQuestion && /^\(agent appears idle/.test(s.pendingQuestion)) {
         needsInputLine = "\n[NEEDS INPUT: " + s.pendingQuestion + "]";
       } else {
@@ -560,14 +560,14 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "send_to_session",
-      description: "Send keystrokes to a running CLI session's stdin. The text is parsed for escape codes before being written, so \\r=Enter, \\n=newline, \\x1b[A=Up, \\x1b[B=Down, \\x1b[C=Right, \\x1b[D=Left, \\x1b=Esc, \\x03=Ctrl+C are all interpreted as REAL keypresses, not typed literally. To submit a typed line in a TUI like Claude Code, end your text with \\r (Enter). Do NOT add a trailing \\n — Enter already submits it. The session auto-handles the 'trust this folder' dialog and the initial model menu, so you usually only need this for follow-up instructions once the agent is running.",
+      description: "Type into a running CLI session. Pass `text` for content and `key` for a keypress — they are separate things. To send an instruction AND submit it, pass both: { text: \"do X instead\", key: \"enter\" }. That is the normal way to talk to a running agent. Do NOT put escape codes in `text` (no \\r, no \\x1b[A) — use `key` instead; text is typed as literal content. Multi-line text is fine. The session auto-handles the 'trust this folder' dialog and submits the initial taskPrompt itself, so this is for follow-ups: correcting a stuck agent, answering its question, or giving it more work.",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "Optional. Defaults to the most recently started session." },
-          text: { type: "string", description: "The text or control sequence to send." },
+          text: { type: "string", description: "Content to type. Sent as literal text — newlines stay newlines. Omit if you only want a keypress." },
+          key: { type: "string", description: "One keypress, sent after any text: enter, escape, tab, shift+tab, space, backspace, delete, up, down, left, right, home, end, pageup, pagedown, ctrl+c, ctrl+d, ctrl+u. Use key:\"enter\" to submit, key:\"ctrl+c\" to interrupt a runaway operation." },
         },
-        required: ["text"],
       },
     },
   },
@@ -715,7 +715,67 @@ const ORCHESTRATOR_TOOLS = [
   },
 ];
 
-// ---------- PTY input: escape-sequence parser ----------
+// ---------- PTY input (ChatOSS >= 1.8.4 native input APIs) ----------
+// session.key(name) delivers ONE keypress as its own read(), so a TUI handles it
+// as a keystroke instead of folding it into a preceding paste. session.paste(text)
+// sends content, bracketed by the host when the child actually enabled
+// bracketed-paste mode (only the host can see the child's DECSET ?2004).
+//
+// This replaces the whole type → wait-for-quiet → send \r → scrape-the-screen →
+// retry dance that existed because a text+\r written together arrived as one
+// read() and had its \r absorbed into the paste.
+//
+// Feature-detected: on a host older than 1.8.4 these methods are absent, so fall
+// back to raw write() with the bytes the host would have sent.
+const LEGACY_KEY_BYTES = {
+  enter: "\r", escape: "\x1b", tab: "\t", space: " ", backspace: "\x7f",
+  up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
+  "ctrl+c": "\x03", "ctrl+d": "\x04", "ctrl+u": "\x15",
+  home: "\x1b[H", end: "\x1b[F", delete: "\x1b[3~",
+  "shift+tab": "\x1b[Z", pageup: "\x1b[5~", pagedown: "\x1b[6~",
+};
+function hasNativeInput(session) {
+  return !!(session && typeof session.key === "function" && typeof session.paste === "function");
+}
+async function sendKey(session, name) {
+  const key = String(name || "").trim().toLowerCase();
+  if (session && typeof session.key === "function") {
+    try { await session.key(key); return true; } catch (e) { console.warn("session.key", key, e); return false; }
+  }
+  const bytes = LEGACY_KEY_BYTES[key];
+  if (bytes && session && typeof session.write === "function") {
+    try { await session.write(bytes); return true; } catch (e) { return false; }
+  }
+  return false;
+}
+// Send text as CONTENT. Returns true when the host bracketed it (newlines are
+// then literal and safe); false when it went through as plain bytes.
+async function sendText(session, text) {
+  if (session && typeof session.paste === "function") {
+    try { return (await session.paste(text)) === true; } catch (e) { console.warn("session.paste", e); }
+  }
+  if (session && typeof session.write === "function") {
+    try { await session.write(text); } catch (e) { /* non-fatal */ }
+  }
+  return false;
+}
+// Does the child have bracketed-paste mode on? Decides whether a multi-line
+// payload is safe to send in one piece: WITHOUT bracketing every \n acts as a
+// submit and would split the prompt into many broken messages.
+async function bracketedPasteOn(session) {
+  if (!session || typeof session.modes !== "function") return false;
+  try {
+    const m = await session.modes();
+    return !!(m && m.bracketedPaste);
+  } catch (e) { return false; }
+}
+
+// ---------- PTY input: escape-sequence parser (LEGACY COMPAT ONLY) ----------
+// Kept solely to translate the OLD escape-string form the model may still send
+// in send_to_session ("answer\r", "\x03", "\x1b[A") — from habit, or replayed
+// from earlier conversation history written against the previous tool contract.
+// Pasting those literally would type visible junk into the agent, so they are
+// translated to key() calls instead. New code should use key names.
 // The orchestrator sends text containing literal escape codes as written in
 // tool descriptions (\\r, \\x1b[A, \\n, \\x03, etc.). These arrive as the raw
 // STRING "\\r" (backslash + 'r'), not a carriage-return byte — so we MUST parse
@@ -793,34 +853,6 @@ function stripAnsi(s) {
   return s;
 }
 
-// Resolve once the terminal has produced no new output for `quietMs`, or after
-// `maxMs` regardless. Used to separate a typed payload from the Enter keystroke
-// that submits it: a TUI that is still repainting the pasted text will swallow
-// an Enter that arrives in the same read() as the text.
-function waitForQuiet(session, quietMs, maxMs) {
-  return new Promise((resolve) => {
-    let unsub = null;
-    let timer = null;
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      try { unsub && unsub(); } catch (_) {}
-      resolve();
-    };
-    const arm = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(finish, quietMs);
-    };
-    try {
-      if (typeof session.onData === "function") unsub = session.onData(arm);
-    } catch (_) { /* no stream — the max timer still resolves us */ }
-    arm();
-    setTimeout(finish, maxMs);
-  });
-}
-
 // Auto-drive a freshly spawned CLI through its startup dialogs and into the
 // point where it will accept the task prompt, then send the prompt.
 // Claude Code / Codex / OpenCode show a "trust this folder?" prompt and then a
@@ -847,12 +879,13 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   // a marker line, then the question. The app's universal terminal monitor
   // watches every session's output for that marker, so it works with any CLI.
   //
-  // IMPORTANT #1: This is a SINGLE LINE (no \n newlines). When we session.write()
-  // a string to the PTY, every \n acts as an Enter/submit — so a multi-line
-  // protocol block would get split into dozens of broken separate messages and
-  // the actual task would never arrive as one coherent submission. The agent
-  // (an LLM) doesn't need newlines for formatting — it reads the protocol fine
-  // as one sentence.
+  // NOTE on newlines: with ChatOSS >= 1.8.4 the payload goes through
+  // session.paste(), and when the child has bracketed-paste mode on the host
+  // brackets it so newlines stay LITERAL — a multi-line prompt then arrives as
+  // one message. When the child has NOT enabled that mode, paste falls through to
+  // plain bytes and every \n still acts as a submit, which would split the prompt
+  // into dozens of broken messages. So the payload is flattened only in that
+  // case — see the bracketedPasteOn() check at submit time.
   //
   // IMPORTANT #2 — DO NOT put the assembled marker literal in this text. The
   // agent's TUI renders the submitted prompt into its own transcript, so every
@@ -872,9 +905,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
     "orchestrator to type a response. The joined marker must be the FIRST thing on that line. " +
     "Do NOT use the marker for routine edits or command execution — only when you genuinely need a decision. " +
     "TASK: ";
-  // Flatten any newlines in the task prompt itself — same PTY-submit reason.
-  const flatPrompt = (prompt || "").replace(/\r?\n/g, "  ");
-  const fullPrompt = ORCH_PROTOCOL + flatPrompt;
+  const fullPrompt = ORCH_PROTOCOL + (prompt || "");
 
   let settled = false;
   let killed = false;
@@ -890,7 +921,6 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   // submissions yet. These flags track that transition.
   let modelLoading = false;
   let modelLoaded = false;
-  let submitFallbackScheduled = false;
 
   const finish = async () => {
     if (settled) return;
@@ -911,70 +941,44 @@ async function autoDriveStartup(session, prompt, label, cwd) {
     if (rec && rec.trustState === "pending") rec.trustState = "confirmed";
 
     // ---------- Submit the task ----------
-    // THE BUG THIS SOLVES: writing the text and the Enter key back-to-back
-    // (`write(prompt)` immediately followed by `write("\r")`) put both into the
-    // PTY fast enough that the agent's TUI read them as ONE chunk. Ink-based
-    // TUIs like Claude Code treat a large single chunk as a PASTE, and a \r
-    // inside pasted content is inserted as a literal newline in the input box
-    // rather than being handled as an Enter keypress. Result: the whole task sat
-    // in the input box, unsubmitted, forever — exactly the 10-minute hang.
+    // Two calls, no delays, no retries, no screen scraping. paste() sends the
+    // payload as CONTENT and key('enter') is delivered as its own read(), so the
+    // Enter can no longer be absorbed into the paste.
     //
-    // So the Enter MUST be isolated in time from the text: type the text, wait
-    // for the TUI to finish rendering it, and only then send \r on its own.
-    await safe(() => session.write(fullPrompt));
+    // This replaced a much worse thing. Writing the text and "\r" back-to-back
+    // put both into the PTY fast enough to arrive as ONE read(); an Ink TUI like
+    // Claude Code treats a large single chunk as a paste and inserts the \r as a
+    // literal newline instead of submitting. The task then sat in the input box
+    // indefinitely — the original 10-minute hang. The app worked around it with a
+    // wait-for-quiet, an input-box scrape, and a \r/\r/\n escalation ladder; all
+    // of that is now the host's job and is gone from here.
+    //
+    // Newlines: safe to send literally only when the child enabled bracketed
+    // paste (the host brackets it and \n stays text). Otherwise each \n submits,
+    // which would fragment the prompt — so flatten in that case only.
+    const nativeInput = hasNativeInput(session);
+    const bracketed = await bracketedPasteOn(session);
+    const payload = bracketed ? fullPrompt : fullPrompt.replace(/\r?\n/g, "  ");
+    await sendText(session, payload);
     // Drop the echoed prompt out of the monitor's buffer — it contains the whole
     // protocol text and would otherwise sit there being re-scanned as if it were
     // terminal output from the agent.
     try { if (rec && rec._resetMonitorBuffer) rec._resetMonitorBuffer(); } catch (_) {}
-    await waitForQuiet(session, 260, 2500);
-    await safe(() => session.write("\r"));
-
-    // Verify it actually submitted, and retry if not. A duplicate \r sent to an
-    // agent that already accepted the task submits an empty line, which every
-    // CLI we target ignores — so retrying is cheap and strictly safer than
-    // leaving the task stranded in the input box.
-    if (!submitFallbackScheduled) {
-      submitFallbackScheduled = true;
-      // A distinctive fragment from the END of what we typed. While the text is
-      // still in the input box this fragment sits in the last few lines of the
-      // screen; once submitted, the input box empties and the agent's response
-      // pushes it up out of that window.
-      const probeFragment = fullPrompt.replace(/\s+/g, " ").trim().slice(-30);
-      const looksUnsubmitted = async () => {
-        if (!probeFragment || probeFragment.length < 12) return false;
-        let txt = "";
-        try { txt = stripAnsi((await session.getOutput()) || ""); } catch (_) { return false; }
-        // Look ONLY at the live input box — everything from the LAST prompt glyph
-        // to the end of the screen. Scanning "the last N lines" instead was too
-        // loose: the agent's own output pushed the count around and produced
-        // spurious retries even though the task had submitted cleanly.
-        const lines = txt.split("\n").map((l) => l.replace(/[│┃▌▎]/g, " ").trim());
-        let start = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-          if (/^[❯›»>]/.test(lines[i])) { start = i; break; }
-        }
-        if (start === -1) return false;
-        const box = lines.slice(start).join(" ").replace(/\s+/g, " ");
-        return box.includes(probeFragment);
-      };
-      (async () => {
-        // Escalate: \r again, then \r once more, then \n for a CLI that submits
-        // on line feed instead.
-        for (const [delay, key] of [[900, "\r"], [1400, "\r"], [1800, "\n"]]) {
-          await new Promise((r) => setTimeout(r, delay));
-          if (killed) return;
-          if (!(await looksUnsubmitted())) return; // submitted — nothing to do
-          console.warn("[Term Coder] task still unsubmitted in", label, "— re-sending Enter");
-          await safe(() => session.write(key));
-        }
-        if (!killed && (await looksUnsubmitted())) {
-          console.warn("[Term Coder] could not submit the task in", label,
-            "— the text is in the agent's input box; the user or orchestrator can press Enter.");
-        }
-      })();
+    if (!nativeInput) {
+      // LEGACY HOST (ChatOSS < 1.8.4): there is no key() to guarantee the Enter
+      // lands in its own read(), so two back-to-back write()s can still coalesce
+      // and have the \r absorbed into the paste. A pause is the best an app can
+      // do from out here — it is a mitigation, not a fix. Update ChatOSS.
+      console.warn("[Term Coder] host lacks session.key/paste (ChatOSS < 1.8.4) — using the legacy submit path; update ChatOSS for reliable submission.");
+      await new Promise((r) => setTimeout(r, 350));
     }
+    await sendKey(session, "enter");
+
     // Mark the task as sent so idle detection can tell "finished a turn" from
-    // "never started" (see markTaskSubmitted / wait_for_session).
+    // "never started" (see markTaskSubmitted / wait_for_session). If a CLI still
+    // fails to submit, wait_for_session's STALLED check catches it within 45s and
+    // tells the orchestrator exactly what to do — that is the safety net now,
+    // instead of blind keystroke retries down here.
     try { if (rec && rec._markTaskSubmitted) rec._markTaskSubmitted(); } catch (_) {}
   };
 
@@ -983,7 +987,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   // ("1. Yes, continue" + "Press enter to continue").
   const confirmTrust = async () => {
     trustHandled = true;
-    await safe(() => session.write("\r"));
+    await sendKey(session, "enter");
   };
 
   // Deny trust: kill the session so the untrusted agent doesn't run half-baked.
@@ -1339,10 +1343,10 @@ async function toolHandler(name, args) {
               ") is ALREADY running in " + cwd + " — status " + act + ".\n\n" +
               "Two agents in one working directory edit the same files and will clobber each other.\n" +
               "Do this instead:\n" +
-              "  • To give that agent new or corrected instructions: send_to_session({ sessionId: \"" + existing.id + "\", text: \"<instruction>\\r\" }). This keeps its context and its work in progress.\n" +
+              "  • To give that agent new or corrected instructions: send_to_session({ sessionId: \"" + existing.id + "\", text: \"<instruction>\", key: \"enter\" }). This keeps its context and its work in progress.\n" +
               "  • If it is stuck retrying an error, tell it plainly what to do differently" +
               (existing.lastErrorText ? " — its last error was: " + existing.lastErrorText : "") + ".\n" +
-              "  • To interrupt a runaway operation first: send_to_session({ sessionId: \"" + existing.id + "\", text: \"\\x03\" }), then send your instruction.\n" +
+              "  • To interrupt a runaway operation first: send_to_session({ sessionId: \"" + existing.id + "\", key: \"ctrl+c\" }), then send your instruction.\n" +
               "  • Only if the agent is genuinely unusable: close_session({ sessionId: \"" + existing.id + "\" }) and THEN start a replacement.\n" +
               "  • For a genuinely separate subtask, create_worktree first and pass that new worktreePath as cwd.";
           }
@@ -1383,12 +1387,49 @@ async function toolHandler(name, args) {
           return "Blocked: this session is waiting for the user to approve 'trust this folder' in chat. Keystrokes cannot bypass the approval. Wait for the user to respond.";
         }
         try {
-          // Parse escape sequences (\\r, \\x1b[A, \\n, …) into real control
-          // bytes BEFORE writing to the PTY. The model sends these as literal
-          // two-character strings; writing them un-parsed was the bug that left
-          // text sitting in the CLI's input box with Enter never firing.
-          const raw = parseTerminalEscapes(args.text);
-          await s.session.write(raw);
+          // Preferred contract: `text` is CONTENT and `key` is a KEYPRESS.
+          // Sending both types the text then presses the key, which is the common
+          // "answer a question and submit" case.
+          let keyName = args.key ? String(args.key).trim().toLowerCase() : "";
+          let text = args.text != null ? String(args.text) : "";
+
+          // Backward compatibility: the model may still send the OLD escape-string
+          // form ("answer\r", "\x03", "\x1b[A") — either from habit or replayed
+          // from earlier turns written against the previous tool contract. Pasting
+          // those literally would type visible junk into the agent, so translate
+          // them into a key instead.
+          if (text) {
+            const parsed = parseTerminalEscapes(text);
+            const WHOLE_PAYLOAD_KEYS = {
+              "\r": "enter", "\n": "enter", "\x1b": "escape", "\x03": "ctrl+c",
+              "\x04": "ctrl+d", "\x15": "ctrl+u", "\t": "tab",
+              "\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
+              "\x1b[Z": "shift+tab", "\x7f": "backspace",
+            };
+            const whole = WHOLE_PAYLOAD_KEYS[parsed];
+            if (whole) {
+              if (!keyName) keyName = whole;
+              text = "";
+            } else if (/[\r\n]$/.test(parsed)) {
+              // "answer\r" — the trailing newline meant "submit".
+              text = parsed.replace(/[\r\n]+$/, "");
+              if (!keyName) keyName = "enter";
+            } else {
+              text = parsed;
+            }
+          }
+
+          if (text) {
+            // Flatten interior newlines when the child has no bracketed paste,
+            // or each one would submit and fragment the message.
+            const bracketed = await bracketedPasteOn(s.session);
+            await sendText(s.session, bracketed ? text : text.replace(/\r?\n/g, "  "));
+          }
+          if (keyName) {
+            const ok = await sendKey(s.session, keyName);
+            if (!ok) return "Error: unknown key name \"" + keyName + "\". Valid: enter, escape, tab, shift+tab, space, backspace, delete, up, down, left, right, home, end, pageup, pagedown, ctrl+c, ctrl+d, ctrl+u.";
+          }
+          if (!text && !keyName) return "Error: pass text (content to type) and/or key (a keypress name).";
           // The orchestrator just answered an agent's question (or sent a follow-
           // up). Clear the NEEDS INPUT / pending question state so the status
           // tools stop reporting it as blocked, and the idle timer can re-arm.
@@ -1504,7 +1545,7 @@ async function toolHandler(name, args) {
           return await formatSessionStatusOutput(
             s,
             "[SESSION: " + (s.label || s.id) + " | STATUS: STALLED — the agent has produced almost no output since it was launched]\n" +
-            "[LIKELY CAUSE: the task text is sitting in the agent's input box without having been submitted, or the CLI is still on a startup screen. Look at the output below: if you can see the task text next to the input prompt, call send_to_session({ sessionId: \"" + s.id + "\", text: \"\\r\" }) to press Enter. If the CLI is showing a menu or dialog, tell the user what it says instead of keystroking it.]"
+            "[LIKELY CAUSE: the task text is sitting in the agent's input box without having been submitted, or the CLI is still on a startup screen. Look at the output below: if you can see the task text next to the input prompt, call send_to_session({ sessionId: \"" + s.id + "\", key: \"enter\" }) to press Enter. If the CLI is showing a menu or dialog, tell the user what it says instead of keystroking it.]"
           );
         }
         if (s.active === false) return await formatSessionStatusOutput(s);
@@ -1521,7 +1562,7 @@ async function toolHandler(name, args) {
             s,
             "[SESSION: " + (s.label || s.id) + " | STATUS: STUCK ON A REPEATING ERROR (" + (s.errorCount || 0) + "x)]\n" +
             "[ERROR: " + (s.lastErrorText || "(see output)") + "]\n" +
-            "[WHAT TO DO: this agent is retrying something that will keep failing. TALK TO IT — call send_to_session({ sessionId: \"" + s.id + "\", text: \"<a plain-language correction>\\r\" }) telling it what to do differently. For example, if the error is about image input, tell it that its model cannot read images and it should work from the code instead. Do NOT close this session and do NOT start a second agent in the same worktree — correcting the running agent keeps its context and its work.]"
+            "[WHAT TO DO: this agent is retrying something that will keep failing. TALK TO IT — call send_to_session({ sessionId: \"" + s.id + "\", text: \"<a plain-language correction>\", key: \"enter\" }) telling it what to do differently. For example, if the error is about image input, tell it that its model cannot read images and it should work from the code instead. Do NOT close this session and do NOT start a second agent in the same worktree — correcting the running agent keeps its context and its work.]"
           );
         }
         if (reason === "NEEDS INPUT") return await formatSessionStatusOutput(s);
@@ -3464,14 +3505,14 @@ async function buildSystemPrompt() {
     "  • Report progress on ALL agents to the user — which are still working, which are done, which hit errors.",
     "  • Use send_to_session({ sessionId: <id>, text }) ONLY for follow-up instructions AFTER an agent's input box is accepting text — not for startup dialogs.",
     "  • Do NOT loop read_session rapidly. Prefer wait_for_session to block for completion, or list_sessions to check status without dumping output. Only call read_session when you need to read the actual terminal text.",
-    "  • send_to_session parses escape codes: use \\r for Enter, \\x1b[A / \\x1b[B for arrows, etc. But you almost never need it for startup.",
-    "  • NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send \\r or arrow keys to it.",
+    "  • send_to_session takes CONTENT in `text` and a KEYPRESS in `key` — e.g. { text: \"do X instead\", key: \"enter\" }. Never put escape codes in `text`; they would be typed as visible characters. Use key:\"ctrl+c\" to interrupt, key:\"enter\" to submit.",
+    "  • NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send Enter or arrow keys to it.",
     "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
     "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session / wait_for_session to watch. Do not re-send the initial task.",
-    "  • The session ALSO auto-handles command approvals: when ANY coding agent (Codex, Claude Code, or any CLI) asks for permission to run a command or make an edit, the app auto-approves safe edits/commands and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send \\r or Esc to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
+    "  • The session ALSO auto-handles command approvals: when ANY coding agent (Codex, Claude Code, or any CLI) asks for permission to run a command or make an edit, the app auto-approves safe edits/commands and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send Enter or Escape to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
     "  • A session showing NEEDS INPUT means the coding agent is blocked. There are two cases:",
     "    (a) PERMISSION PROMPT — the agent is asking to run a command/make an edit. The app auto-handles these (safe = auto-approve, destructive = asks user in chat). Do NOT send keystrokes — just keep monitoring the other agents.",
-    "    (b) GENUINE QUESTION FOR YOU — the agent printed the [ORCHESTRATOR_INPUT_NEEDED] sentinel and is asking YOU a question (shown in the QUESTION field of the NEEDS INPUT header). You CAN and SHOULD answer it: call send_to_session({ sessionId: <id>, text: \"<your answer>\\r\" }). After you respond, the agent will continue.",
+    "    (b) GENUINE QUESTION FOR YOU — the agent printed the [ORCHESTRATOR_INPUT_NEEDED] sentinel and is asking YOU a question (shown in the QUESTION field of the NEEDS INPUT header). You CAN and SHOULD answer it: call send_to_session({ sessionId: <id>, text: \"<your answer>\", key: \"enter\" }). After you respond, the agent will continue.",
     "  • The app injects an ORCHESTRATOR PROTOCOL into every agent's task prompt telling it to print [ORCHESTRATOR_INPUT_NEEDED] <question> when it needs a decision from you. So if an agent gets stuck or needs clarification, it will ask you this way — and you'll see the question in read_session / list_sessions. Answer it promptly with send_to_session so the agent isn't blocked.",
     "  • If a session shows NEEDS INPUT with '(agent appears idle)' it means the terminal is showing a prompt cursor with no recent activity. Use read_session to check what it actually shows — it may be done, or waiting on something the app didn't recognize. Use your judgment.",
     "  • If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
@@ -3494,12 +3535,12 @@ async function buildSystemPrompt() {
     "A running agent holds context you cannot recover: everything it has read, the plan it made, and any edits it has not yet written to disk. Replacing it throws all of that away and starts from zero. So a stuck agent is a CONVERSATION problem first, not a lifecycle problem. Work down this ladder IN ORDER and do not skip steps:",
     "",
     "  1. UNDERSTAND the failure. Read its output. If the app reports STATUS: ERROR LOOP, the exact error text is in the header — that is what you must address.",
-    "  2. CORRECT IT IN PLAIN LANGUAGE with send_to_session({ sessionId, text: \"<instruction>\\r\" }). Tell it what to do differently, as you would tell a colleague. Examples:",
+    "  2. CORRECT IT IN PLAIN LANGUAGE with send_to_session({ sessionId, text: \"<instruction>\", key: \"enter\" }). Tell it what to do differently, as you would tell a colleague. Examples:",
     "       • 'API Error: this model does not support image input' → \"Your model cannot read images. Do not open or read any image files. Work from the source code and the text descriptions instead.\"",
     "       • context/token limit → \"You are running out of context. Stop exploring, summarise what you have learned, and make the edits now.\"",
     "       • rate limit / 429 / overloaded → \"Wait a few seconds and retry that request once, then continue.\"",
     "       • it is looping on the same action → \"Stop repeating that step. It is failing and will keep failing. Skip it and continue with the rest of the task.\"",
-    "  3. INTERRUPT then correct, if it is mid-operation and not reading you: send_to_session({ sessionId, text: \"\\x03\" }) (Ctrl+C), wait a moment, THEN send the instruction from step 2.",
+    "  3. INTERRUPT then correct, if it is mid-operation and not reading you: send_to_session({ sessionId, key: \"ctrl+c\" }), wait a moment, THEN send the instruction from step 2.",
     "  4. ONLY IF IT IS GENUINELY UNUSABLE after steps 2 and 3: close_session({ sessionId, reason }) and start a fresh agent in the SAME worktree (its committed and on-disk work is still there).",
     "",
     "Hard rules:",
@@ -4312,20 +4353,17 @@ async function registerSession(session, cmd, args, cwd, label) {
               // leave autoApproveBusy set (the watchdog would clear it, but only
               // after 45s of the orchestrator being blind to this terminal).
               askCommandApproval(rec, verdict.command).then((approved) => {
-                try { session.write(approved ? "\r" : "\x1b"); } catch (e) { /* non-fatal */ }
-                settle();
+                sendKey(session, approved ? "enter" : "escape").finally(settle);
               }).catch((e) => {
                 console.warn("askCommandApproval failed", e);
-                try { session.write("\x1b"); } catch (_) { /* non-fatal */ }
-                settle();
+                sendKey(session, "escape").finally(settle);
               });
             } else {
               // Safe edit / safe command — auto-approve. For Claude the default
               // highlighted option is "1. Yes", so Enter accepts it (we never
               // pick option 2 "allow all edits during this session" — that stays
               // the user's per-edit choice).
-              try { session.write("\r"); } catch (e) { /* non-fatal */ }
-              settle();
+              sendKey(session, "enter").finally(settle);
             }
             return;
           }
