@@ -47,6 +47,21 @@
         <button id="new-project-btn" class="icon-button" type="button" title="New project" aria-label="New project">+</button>
       </header>
       <nav id="project-list" class="project-list" aria-label="Projects"></nav>
+      <!-- Footer toolbar pinned to the bottom of the sidebar. The user's own
+           terminal lives here: a toggle that slides a bottom-drawer terminal
+           up from below the whole app. It is entirely user-driven — the
+           orchestrator never touches it. -->
+      <footer class="sidebar-footer">
+        <button id="user-term-btn" class="sidebar-footer-btn" type="button"
+                title="Toggle terminal (Cmd/Ctrl+J)" aria-label="Toggle terminal"
+                aria-pressed="false">
+          <svg class="user-term-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/>
+            <path d="M4 6.5l2 1.75L4 10"/>
+            <path d="M8 10h3.5"/>
+          </svg>
+        </button>
+      </footer>
     </aside>
 
     <!-- Drag to resize the Projects column (arrow keys work too). -->
@@ -158,6 +173,29 @@
     </section>
 
   </main>
+
+  <!-- USER TERMINAL — bottom drawer.
+       A terminal the USER controls directly (NOT the orchestrator's AI sessions).
+       Slides up from the bottom of the screen and runs an interactive xterm in
+       the current project directory. Toggled by the sidebar icon or Cmd/Ctrl+J.
+       The drawer sits ABOVE the app's DOM (fixed at the bottom, full width) so it
+       overlays the three-column layout without disturbing it. -->
+  <div id="user-term-drawer" class="user-term-drawer" aria-hidden="true" role="region" aria-label="User terminal">
+    <div id="user-term-resizer" class="user-term-resizer" role="separator" aria-orientation="horizontal"
+         aria-label="Resize the terminal drawer" tabindex="0" title="Drag to resize"></div>
+    <header class="user-term-header">
+      <div class="user-term-title-left">
+        <span class="user-term-prompt-glyph" aria-hidden="true">❯</span>
+        <span id="user-term-cwd" class="user-term-cwd" title="Working directory">project</span>
+      </div>
+      <div class="user-term-actions">
+        <button id="user-term-clear" class="term-head-btn" type="button" title="Clear terminal" aria-label="Clear terminal">Clear</button>
+        <button id="user-term-restart" class="term-head-btn" type="button" title="Restart shell" aria-label="Restart shell">Restart</button>
+        <button id="user-term-close" class="term-head-btn term-close-btn" type="button" title="Close drawer (Cmd/Ctrl+J)" aria-label="Close terminal drawer">&times;</button>
+      </div>
+    </header>
+    <div id="user-term-mount" class="user-term-mount"></div>
+  </div>
 
   <!-- SPAWN MODAL -->
   <div id="spawn-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="spawn-title">
