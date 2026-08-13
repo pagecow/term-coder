@@ -192,7 +192,11 @@
     <div class="modal-card">
       <header class="modal-header">
         <strong id="settings-title">Settings</strong>
-        <button id="settings-close-x" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button>
+        <div class="modal-header-actions">
+          <button id="settings-cancel" class="btn btn-ghost btn-small" type="button">Cancel</button>
+          <button id="settings-save" class="btn btn-primary btn-small" type="button">Save</button>
+          <button id="settings-close-x" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button>
+        </div>
       </header>
       <div class="modal-body">
         <h3 class="settings-section-title">Defaults</h3>
@@ -217,11 +221,6 @@
           <span class="form-label">Default working directory</span>
           <input id="set-cwd" class="form-input" type="text" placeholder="Blank = ask" />
         </label>
-        <div class="settings-actions">
-          <button id="settings-save" class="btn btn-primary" type="button">Save</button>
-          <button id="settings-cancel" class="btn btn-ghost" type="button">Cancel</button>
-        </div>
-
         <h3 class="settings-section-title">Model Selection Mode</h3>
         <p class="modal-hint">Choose how sub-agent sessions pick their model. Models are auto-detected from <code>ollama list</code>.</p>
         <div class="model-mode-radios" id="model-mode-radios">

@@ -1820,7 +1820,11 @@ body.is-resizing .term-mount { pointer-events: none; }
   width: 460px;
   max-width: 100%;
   max-height: calc(100vh - 80px);
-  overflow-y: auto;
+  /* The CARD must not scroll — only .modal-body does. The card used to be the
+     scroll container, which meant the header scrolled away with the content. That
+     is fine for a title, but not now that Save lives in the header: on a tall
+     dialog like Settings the primary action would scroll out of reach. */
+  overflow: hidden;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1843,12 +1847,26 @@ body.is-resizing .term-mount { pointer-events: none; }
   flex: 0 0 auto;
 }
 .modal-header strong { font-size: 15px; font-weight: 650; }
+/* Primary actions live in the header, immediately left of the close X. In the
+   settings dialog they used to sit mid-body under the first section, which read
+   as "save the Defaults section" rather than "save the dialog". */
+.modal-header-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* The settings dialog holds several sections of radio rows and model pickers, so
+   it needs more room than the narrow 460px shared modal width. */
+#settings-panel .modal-card { width: 680px; }
+@media (max-width: 760px) { #settings-panel .modal-card { width: 100%; } }
 .modal-body {
   padding: 18px;
   display: flex;
   flex-direction: column;
   gap: 14px;
   overflow-y: auto;
+  /* Take the leftover height inside the card and scroll internally, so the
+     header (and its Save button) stays pinned and always reachable.
+     min-height:0 is required — without it a flex child refuses to shrink below
+     its content and the card grows past max-height instead of scrolling. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .modal-footer {
   display: flex;
@@ -1908,7 +1926,7 @@ textarea.form-input { resize: vertical; }
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
-.settings-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* .settings-actions is gone — Save/Cancel moved into .modal-header-actions. */
 
 /* Model Selection Mode */
 .model-mode-radios {

@@ -630,7 +630,7 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "close_session",
-      description: "Kill a terminal session and remove its square. This is a LAST RESORT for an agent that is genuinely unusable — it destroys the agent's context and any work it had not written to disk. Before using it, try correcting the agent with send_to_session (a plain-language instruction), and interrupting it with text \"\\x03\" (Ctrl+C) if it is mid-operation. Never close an agent merely because it hit one error.",
+      description: "Kill a terminal session and remove its square. This is a LAST RESORT for an agent that is genuinely unusable — it destroys the agent's context and any work it had not written to disk. Before using it, try correcting the agent with send_to_session ({ text: \"<instruction>\", key: \"enter\" }), and interrupting it with { key: \"ctrl+c\" } if it is mid-operation. Never close an agent merely because it hit one error.",
       parameters: {
         type: "object",
         properties: {
@@ -2109,37 +2109,56 @@ window.termCoder.getModelSelectionConfig = function () {
 // Returns "low" | "medium" | "high".
 function assessComplexity(taskPrompt) {
   const text = (taskPrompt || "").toLowerCase();
-  const len = text.length;
+  if (!text.trim()) return "medium";
 
-  // Words that signal a non-trivial, multi-step, or architecturally
-  // involved task.
-  const HIGH_KEYWORDS = [
-    "refactor", "architect", "architecture", "design", "implement",
-    "migrate", "migration", "database", "security", "performance",
-    "optimize", "optimise", "scale", "auth", "authentication", "authorize",
-    "full", "complete", "system", "multiple", "integrate", "integration",
-    "complex", "deploy", "ci/cd", "pipeline", "infrastructure",
-    "microservice", "concurrent", "async", "distributed", "end-to-end",
-    "comprehensive", "overhaul", "rewrite",
-  ];
-  // Words that signal an ordinary, focused change.
-  const MEDIUM_KEYWORDS = [
-    "add", "create", "build", "fix", "update", "change", "modify",
-    "feature", "component", "screen", "page", "endpoint", "handler",
-    "function", "method", "style", "css", "layout",
-  ];
+  // LENGTH IS NOT A PROXY FOR COMPLEXITY HERE. The previous version returned
+  // "high" for anything over 200 characters — but the system prompt explicitly
+  // instructs the orchestrator to write FOCUSED, DETAILED task prompts naming
+  // exact files and constraints, so every delegated subtask cleared 200 chars.
+  // The result: every session got the high-complexity model and the Low/Medium
+  // settings were dead configuration. A verbose brief for a trivial job is still
+  // a trivial job, so length is now only a last-resort nudge.
+  const word = (w) => new RegExp("\\b" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b").test(text);
+  const anyWord = (list) => list.some(word);
 
-  let highHits = 0;
-  let medHits = 0;
-  for (const kw of HIGH_KEYWORDS) if (text.includes(kw)) highHits++;
-  for (const kw of MEDIUM_KEYWORDS) if (text.includes(kw)) medHits++;
+  // Verbs that change the repo vs verbs that only look at it.
+  const MUTATE = ["write", "create", "add", "implement", "build", "refactor", "rewrite",
+    "modify", "change", "update", "fix", "delete", "remove", "rename", "migrate",
+    "port", "install", "configure", "redesign", "overhaul", "optimize", "optimise"];
+  const INSPECT = ["read", "list", "report", "summarise", "summarize", "describe",
+    "show", "display", "print", "count", "find", "locate", "check", "review",
+    "explain", "audit", "inspect"];
 
-  // Long, keyword-rich prompts are high complexity.
-  if (len > 200 || highHits >= 3) return "high";
-  // Moderate length or at least one complexity keyword -> medium.
-  if (len > 80 || highHits >= 1 || medHits >= 2) return "medium";
-  // Short, simple, everyday prompts.
-  return "low";
+  // A pure read-and-report task is LOW however long the brief is. This is the
+  // case the old heuristic got most wrong.
+  if (anyWord(INSPECT) && !anyWord(MUTATE)) return "low";
+
+  const HIGH = ["architect", "architecture", "migration", "database", "schema",
+    "security", "authentication", "authorization", "performance", "scalability",
+    "concurren", "distributed", "microservice", "pipeline", "ci/cd",
+    "infrastructure", "end-to-end", "refactor", "rewrite", "overhaul",
+    "comprehensive", "from scratch", "redesign", "test suite", "state management",
+    "design system"];
+  const MED = ["add", "create", "build", "fix", "update", "change", "modify",
+    "feature", "component", "screen", "page", "endpoint", "handler", "function",
+    "method", "style", "css", "layout", "dark mode", "responsive", "accessib"];
+
+  let high = 0, med = 0;
+  for (const w of HIGH) if (text.includes(w)) high++;
+  for (const w of MED) if (text.includes(w)) med++;
+
+  // Breadth signals — these say "big" far more reliably than length does.
+  const fileMentions = (text.match(/\b[\w./-]+\.(?:js|ts|tsx|jsx|css|scss|html|json|py|rb|go|rs|java|swift|md)\b/g) || []).length;
+  const enumeratedSteps = (text.match(/^\s*(?:\d+[.)]|[-*•])\s+/gm) || []).length;
+  if (fileMentions >= 4) high++;
+  if (enumeratedSteps >= 6) high++;
+  if (/\b(?:entire|whole|every|all)\b.{0,24}\b(?:app|project|codebase|file|component)/.test(text)) high++;
+
+  if (high >= 2) return "high";
+  if (high === 1) return med >= 3 ? "high" : "medium";
+  if (med >= 1) return "medium";
+  // Nothing recognisable: a very long brief is probably not trivial.
+  return text.length > 600 ? "medium" : "low";
 }
 
 // Single helper that routes through the configured Model Selection Mode.
@@ -3443,21 +3462,14 @@ async function buildSystemPrompt() {
     "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
     "",
     "═══════════════════════════════════════════════════════════════",
-    "TURN BUDGET — READ THIS BEFORE PLANNING ANYTHING",
+    "STATE DOES NOT SURVIVE YOUR TURN — RECORD IT OR RECOVER IT",
     "═══════════════════════════════════════════════════════════════",
     "",
-    "Two hard constraints shape how you must work. Ignoring them is the single most common way this goes wrong:",
+    "Use as many tool calls as the job needs. Do NOT pace yourself, do NOT ration calls, and do NOT announce that you are running low on them — just do the work. If a turn ever does get cut short, you will be prompted to continue and you pick up where you left off.",
     "",
-    "1. EACH TURN ALLOWS ONLY ABOUT 8 TOOL CALLS. A four-agent build needs 16+ (4 worktrees + 4 spawns + 4 waits + 4 merges), so it CANNOT complete in one turn. You will be cut off mid-workflow if you try.",
-    "2. YOUR TOOL CALLS AND THEIR RESULTS ARE NOT CARRIED INTO YOUR NEXT TURN. Next turn you see the conversation text only — not the JSON you got back from create_worktree, not the session ids. Anything you need later must either be WRITTEN INTO YOUR REPLY TEXT or be recoverable from list_sessions / list_worktrees, which read live app state and always work.",
-    "",
-    "So work in PHASES — one phase per turn — and end every turn with a short report to the user:",
-    "  • TURN 1 (plan): state your decomposition in chat. Use no tools, or at most list_project_files to look around. Ask the user to confirm or adjust.",
-    "  • TURN 2 (launch): for each subtask, create_worktree then start_cli_session — 2 calls per subtask, so cover at most 3 subtasks per turn. Then STOP and report a line per agent: subtask, branch name, worktree path, session id. If there are more subtasks, launch them next turn.",
-    "  • TURN 3+ (monitor): OPEN THE TURN with list_sessions({}) and list_worktrees({}) to recover state. Then wait_for_session on a running agent, and merge_worktree each branch whose agent has EXITED. A few agents per turn.",
-    "  • FINAL TURN (close out): confirm via list_sessions that nothing is RUNNING and via list_worktrees that nothing is unmerged, then summarize what was built.",
-    "",
-    "If you are running low on calls mid-phase, STOP and hand off cleanly in your reply. Never end a turn without reporting the session ids and branch names you created — and never assume a branch you made earlier is still open, ALWAYS check list_worktrees first.",
+    "The one real constraint: YOUR TOOL CALLS AND THEIR RESULTS ARE NOT REPLAYED INTO YOUR NEXT TURN. Next turn you see the conversation text only — not the JSON create_worktree returned, not the session ids. So:",
+    "  • WRITE THE FACTS INTO YOUR REPLY as you go: one line per agent with its subtask, branch name, worktree path and session id. This is how you (and the user) keep track.",
+    "  • RECOVER state instead of guessing: list_sessions({}) and list_worktrees({}) read live app state and always work, and a live snapshot of every terminal is already in your context each turn. Use them at the start of a turn rather than assuming a branch or session from earlier still exists.",
     "",
     "═══════════════════════════════════════════════════════════════",
     "CORE STRATEGY: PARALLEL MULTI-AGENT DELEGATION",
