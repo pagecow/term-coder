@@ -5,6 +5,12 @@
 const STORE_KEY = "term-coder.state";
 const SETTINGS_KEY = "term-coder.settings";
 const WORKTREES_KEY = "term-coder.worktrees";
+// Persisted terminal session list. On app close/reopen the live PTY processes
+// are gone — this is what lets the Sessions column show the user what ran, what
+// each agent was working on, what's finished, and the last output each one
+// produced. Restored at load (loadPersistedSessions) as read-only "ended" cards
+// alongside any live sessions created during the current run.
+const SESSIONS_KEY = "term-coder.sessions";
 const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
 const DETECT_TTL_MS = 60 * 1000;
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
@@ -72,6 +78,18 @@ let detection = { codex: false, claude: false, ollama: false, models: [], scanne
 
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
+
+// Persisted (now-ended) sessions: sessionId -> snapshot record. These are
+// terminals whose underlying PTY has died (process exit OR app close/reopen),
+// shown as read-only "session ended — output preserved" cards so the user can
+// still see what happened. They are NOT live and cannot be reattached to. A
+// live session from THIS run (sessions Map) is also persisted to scopedData as
+// a snapshot, so on the next reopen it reappears here as a dead card.
+//
+// Snapshot record shape (also what is written to SESSIONS_KEY):
+//   { id, label, cwd, agent (cli label), worktreeBranch?, status, exitCode?,
+//     createdAt, endedAt?, output (clean text tail), merged? }
+const deadSessions = new Map();
 
 // The marker a coding agent prints when it needs a decision from the
 // orchestrator (see ORCH_PROTOCOL in autoDriveStartup). Anchored to the start of
@@ -251,6 +269,222 @@ async function loadWorktrees() {
       }
     }
   } catch (e) { console.warn("loadWorktrees", e); }
+}
+
+// Derive the worktree branch a session's cwd belongs to. Worktrees created by
+// create_worktree live at "<project>/.chatoss/worktrees/<branch>", so the last
+// path segment is the branch. We also cross-check against worktreeMeta (which
+// records the wtPath per branch) so a branch recorded at creation wins over a
+// guess. Returns null for a cwd that isn't one of our worktrees.
+function worktreeBranchForCwd(cwd) {
+  const c = String(cwd || "").replace(/\/+$/, "");
+  if (!c) return null;
+  // Exact match against a known worktree path — authoritative.
+  for (const [branch, m] of worktreeMeta.entries()) {
+    if (m.wtPath && m.wtPath.replace(/\/+$/, "") === c) return branch;
+  }
+  // Fall back to the path-shape heuristic: <base>/.chatoss/worktrees/<branch>.
+  const idx = c.indexOf("/.chatoss/worktrees/");
+  if (idx >= 0) {
+    const seg = c.slice(idx + "/.chatoss/worktrees/".length);
+    if (seg && !seg.includes("/")) return seg;
+  }
+  return null;
+}
+
+// ---------- Persisted terminal sessions ----------
+// A "snapshot" is the minimal per-session record we persist to scopedData so the
+// Sessions column can show prior terminals (their state + last output) after the
+// app is closed and reopened, even though the live PTY is gone. These are read-
+// only; we never pretend to reattach to a dead process.
+//
+// The persisted array is the union of:
+//   • live sessions (sessions Map) — written as snapshots so they survive a reopen
+//   • dead sessions (deadSessions Map) — already-ended ones carried over
+// This way closing/reopening never loses a session, and deleting one (closeSession
+// or the merged-worktree cleanup) removes it from BOTH the in-memory maps and the
+// persisted array via persistSessions().
+
+// Build a plain snapshot of one live session record for persistence. Captures the
+// clean tail of its current output so reopening shows what happened.
+async function snapshotLiveSession(rec) {
+  let output = "";
+  try {
+    if (rec.session && typeof rec.session.getOutput === "function") {
+      const raw = await rec.session.getOutput();
+      output = raw ? stripAnsi(raw) : "";
+    }
+  } catch (e) { /* a dead session just gets no output */ }
+  // Keep the tail manageable — a full ~64KB scrollback per session would bloat
+  // the persisted blob fast. The last ~6000 chars is plenty to recall what happened.
+  if (output.length > 6000) output = "…(earlier output trimmed)…\n" + output.slice(-6000);
+  const act = sessionActivity(rec);
+  let status;
+  if (rec.active === false) status = "exited";
+  else if (act === "ERROR LOOP") status = "error";
+  else if (act === "NEEDS INPUT") status = "needs-input";
+  else if (act === "IDLE") status = "idle";
+  else if (act === "WORKING") status = "working";
+  else status = "starting";
+  return {
+    id: rec.id,
+    label: rec.label || rec.id,
+    cwd: rec.cwd || "",
+    agent: rec.agent || rec.label || rec.id,
+    worktreeBranch: rec.worktreeBranch || null,
+    status,
+    exitCode: (rec.active === false) ? rec.exitCode : null,
+    createdAt: rec.createdAt || Date.now(),
+    endedAt: rec.endedAt || null,
+    output,
+    merged: !!rec.merged,
+  };
+}
+
+// Persist the union of live + dead sessions to scopedData. Fire-and-forget but
+// never leaves an unhandled rejection. Called debounced during a live run and
+// eagerly on exit/close/delete.
+let _persistSessionsTimer = null;
+function schedulePersistSessions() {
+  if (_persistSessionsTimer) return;
+  _persistSessionsTimer = setTimeout(() => {
+    _persistSessionsTimer = null;
+    persistSessions().catch((e) => console.warn("schedulePersistSessions", e));
+  }, 1500);
+}
+async function persistSessions() {
+  try {
+    // Live sessions need an async output read; dead sessions are already plain.
+    const liveSnaps = [];
+    for (const rec of sessions.values()) {
+      try { liveSnaps.push(await snapshotLiveSession(rec)); } catch (e) { /* skip */ }
+    }
+    const deadSnaps = [...deadSessions.values()];
+    // Live ones first (most recent activity on top), then dead ones, newest first.
+    const all = liveSnaps.concat(deadSnaps);
+    await window.chatoss.scopedData.set(SESSIONS_KEY, all);
+  } catch (e) { console.warn("persistSessions", e); }
+}
+
+// Load persisted snapshots from scopedData into the deadSessions map as read-only
+// ended cards. Called once at init, BEFORE the UI renders, so the Sessions column
+// shows prior terminals immediately. A snapshot whose status was "working" at the
+// last save is shown as "ended" (the PTY is necessarily gone across a reopen).
+async function loadPersistedSessions() {
+  try {
+    const arr = await window.chatoss.scopedData.get(SESSIONS_KEY);
+    if (!Array.isArray(arr)) return;
+    for (const s of arr) {
+      if (!s || !s.id) continue;
+      // If a live session with the same id somehow already exists this run, don't
+      // shadow it with a dead card.
+      if (sessions.has(s.id)) continue;
+      // Anything persisted across a reopen is, by definition, no longer live.
+      const snap = {
+        id: s.id,
+        label: s.label || s.id,
+        cwd: s.cwd || "",
+        agent: s.agent || s.label || s.id,
+        worktreeBranch: s.worktreeBranch || null,
+        // "working"/"starting"/"needs-input" all become "ended" after a reopen.
+        status: (s.status === "exited") ? "exited" : "ended",
+        exitCode: (s.status === "exited") ? s.exitCode : null,
+        createdAt: s.createdAt || Date.now(),
+        endedAt: s.endedAt || Date.now(),
+        output: s.output || "",
+        merged: !!s.merged,
+      };
+      deadSessions.set(snap.id, snap);
+    }
+  } catch (e) { console.warn("loadPersistedSessions", e); }
+}
+
+// Render the read-only "ended" card for a dead/persisted session into the grid.
+// Shows the agent, working dir, an ended indicator, and the captured output tail.
+// NOT live — there is no xterm mount, no input. Has only a Dismiss (✕) button.
+function renderDeadSessionCard(snap) {
+  const square = document.createElement("div");
+  square.className = "term-square term-square-ended";
+  square.dataset.deadId = snap.id;
+
+  const header = document.createElement("div");
+  header.className = "term-square-header";
+  const dot = document.createElement("span");
+  dot.className = "term-status-dot exited";
+  dot.title = "Session ended — output preserved";
+  const lab = document.createElement("span");
+  lab.className = "term-label";
+  // Label reflects the ended state clearly.
+  lab.textContent = snap.label + (snap.status === "exited" ? " (exited)" : " (ended)");
+  const cwdEl = document.createElement("span");
+  cwdEl.className = "term-cwd";
+  cwdEl.textContent = basename(snap.cwd);
+  cwdEl.title = snap.cwd;
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "term-head-btn term-close-btn";
+  dismissBtn.type = "button";
+  dismissBtn.textContent = "✕";
+  dismissBtn.title = "Dismiss this ended session";
+  header.appendChild(dot);
+  header.appendChild(lab);
+  header.appendChild(cwdEl);
+  header.appendChild(dismissBtn);
+
+  const body = document.createElement("div");
+  body.className = "term-ended-body";
+
+  // A short status line describing how it ended.
+  const statusLine = document.createElement("div");
+  statusLine.className = "term-ended-status";
+  let statusText = "Session ended — output preserved (the live terminal is gone).";
+  if (snap.merged) statusText = "Session ended — worktree merged. Output preserved.";
+  else if (snap.status === "exited") statusText = "Agent exited (code " + (snap.exitCode == null ? "killed" : snap.exitCode) + "). Output preserved.";
+  else if (snap.worktreeBranch) statusText = "Session ended (app was closed). Output preserved. Worktree branch: " + snap.worktreeBranch;
+  statusLine.textContent = statusText;
+  body.appendChild(statusLine);
+
+  // The captured output tail, shown in a scrollable monospace block.
+  const out = document.createElement("pre");
+  out.className = "term-ended-output";
+  out.textContent = (snap.output && snap.output.trim()) ? snap.output : "(no output was captured)";
+  body.appendChild(out);
+
+  square.appendChild(header);
+  square.appendChild(body);
+
+  // insert before the empty-state card so the grid stays clean
+  if (el.termEmpty && el.termEmpty.parentNode === el.termGrid) el.termGrid.insertBefore(square, el.termEmpty);
+  else el.termGrid.appendChild(square);
+
+  // clicking selects it (highlights); dismiss removes it
+  square.addEventListener("click", (e) => {
+    if (e.target === dismissBtn) return;
+    selectSession(snap.id);
+  });
+  dismissBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    dismissDeadSession(snap.id);
+  });
+
+  return square;
+}
+
+// Remove a dead/persisted session from the UI + memory + scopedData.
+async function dismissDeadSession(id) {
+  const snap = deadSessions.get(id);
+  if (!snap) return;
+  deadSessions.delete(id);
+  // Remove the card from the DOM.
+  const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
+  if (card) card.remove();
+  if (state.activeSessionId === id) {
+    state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
+  }
+  saveState();
+  ensureEmptyHint();
+  renderTabs();
+  renderSessionInfo();
+  await persistSessions();
 }
 
 // Promise + resolver for the spawn modal wait (set while the modal is open).
@@ -1298,7 +1532,60 @@ async function toolHandler(name, args) {
         await window.chatoss.terminal.exec(loginShell("git branch -D \"" + branch + "\""), { cwd: base });
         worktreeMeta.delete(branch);
         saveWorktrees();
-        return "Merged branch " + branch + " into " + parentBranch + " successfully. Worktree cleaned up.\n" + mergeOut;
+
+        // ---- Part 2: ask whether to delete the finished terminal session ----
+        // The merge is done, so the worktree is gone. If a terminal session was
+        // running in that worktree AND its agent is FINISHED (IDLE = turn complete
+        // at its prompt, or EXITED), the session is now just a closed loop sitting
+        // in the Sessions column. Ask the user in chat (via the askChoice pill
+        // picker — the same pattern askTrustInChat uses) whether to delete that
+        // terminal. This blocks until the user answers.
+        //
+        // "Already merged" detection: we are here precisely because the merge
+        // succeeded, so the branch/worktree is merged. We match the session by its
+        // worktreeBranch (derived from the cwd at registration) equaling the just-
+        // merged branch. If the app doesn't track a merge state per session, this
+        // branch-match is the proxy (noted here intentionally).
+        const matchedSession = [...sessions.values()].find(
+          (s) => s.worktreeBranch === branch || (wtPath && String(s.cwd || "") === wtPath)
+        );
+        let deletedNote = "";
+        if (matchedSession) {
+          const act = sessionActivity(matchedSession);
+          const finished = (act === "IDLE" || act === "EXITED");
+          // Mark the session's worktree as merged regardless, so its persisted
+          // snapshot (if it survives a reopen) shows the merged state.
+          matchedSession.merged = true;
+          persistSessions().catch((e) => console.warn("persistSessions merge", e));
+          if (finished) {
+            try {
+              const v = await window.termCoder.askChoice({
+                prompt: "The agent **" + (matchedSession.label || matchedSession.id) +
+                  "** finished its work and its worktree branch **" + branch +
+                  "** has been merged into **" + parentBranch + "**.\n\n" +
+                  "Delete this terminal session now?",
+                options: [
+                  { label: "Yes, delete the terminal", value: "yes" },
+                  { label: "No, keep it", value: "no" },
+                ],
+                style: "pill",
+              });
+              if (v === "yes") {
+                await closeSession(matchedSession.id);
+                deletedNote = "\nThe finished terminal session was deleted at your request.";
+              } else {
+                deletedNote = "\nThe terminal session was kept (left as finished in the Sessions column).";
+              }
+            } catch (e) {
+              console.warn("merge delete prompt failed", e);
+              deletedNote = "\n(Delete prompt failed: the terminal session was kept.)";
+            }
+          } else {
+            deletedNote = "\nThe terminal session is still " + act + " — it was left running. Merge its worktree again only if you gave it new work.";
+          }
+        }
+
+        return "Merged branch " + branch + " into " + parentBranch + " successfully. Worktree cleaned up." + deletedNote + "\n" + mergeOut;
       }
       case "close_session": {
         const s = args.sessionId ? sessions.get(args.sessionId) : null;
@@ -4024,8 +4311,10 @@ function startAutoFollow() {
 
 // ---------- Right column: terminal grid ----------
 function ensureEmptyHint() {
-  if (el.termEmpty) el.termEmpty.style.display = sessions.size ? "none" : "";
-  if (el.termCount) el.termCount.textContent = String(sessions.size);
+  // Both live sessions and persisted (ended) cards count toward "not empty".
+  const total = sessions.size + deadSessions.size;
+  if (el.termEmpty) el.termEmpty.style.display = total ? "none" : "";
+  if (el.termCount) el.termCount.textContent = String(total);
 }
 
 function renderTabs() {
@@ -4034,16 +4323,24 @@ function renderTabs() {
   for (const rec of sessions.values()) {
     rec.squareEl.classList.toggle("active", rec.id === state.activeSessionId);
   }
-  if (el.termCount) el.termCount.textContent = String(sessions.size);
+  // Mark an active ended card too (clicking one selects it).
+  for (const card of el.termGrid.querySelectorAll(".term-square-ended")) {
+    card.classList.toggle("active", card.dataset.deadId === state.activeSessionId);
+  }
+  if (el.termCount) el.termCount.textContent = String(sessions.size + deadSessions.size);
 }
 
 function selectSession(id) {
+  // Live session?
   const rec = sessions.get(id);
-  if (!rec) return;
+  // Ended/persisted session?
+  const dead = deadSessions.get(id);
+  if (!rec && !dead) return;
   state.activeSessionId = id;
   saveState();
   renderTabs();
-  rec.squareEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  const target = rec ? rec.squareEl : (el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]'));
+  if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
   renderSessionInfo();
 }
 
@@ -4106,8 +4403,19 @@ async function registerSession(session, cmd, args, cwd, label) {
     // useless as a completion signal (waiting for it was why monitoring felt
     // dead for minutes at a time).
     lastOutputAt: Date.now(), taskSubmittedAt: 0, bytesSinceTask: 0, tailAtPrompt: false,
-    lastErrorText: "", errorCount: 0, lastErrorAt: 0, errorLoop: false };
+    lastErrorText: "", errorCount: 0, lastErrorAt: 0, errorLoop: false,
+    // Persistence metadata — used to snapshot the session to scopedData so the
+    // Sessions column survives an app close/reopen. `agent` is the CLI label
+    // (e.g. "claude", "codex"); `worktreeBranch` is the git branch this session's
+    // cwd is a worktree of (derived from the path / worktreeMeta), so the merged-
+    // worktree cleanup can match a session to a merged branch.
+    agent: label ? String(label).split(" · ")[0] : label,
+    createdAt: Date.now(), endedAt: null, worktreeBranch: worktreeBranchForCwd(cwd), merged: false };
   sessions.set(session.id, rec);
+  // Persist immediately so a session that's spawned but produces no output
+  // before the app is closed still survives a reopen (otherwise it would never
+  // reach SESSIONS_KEY until the first output chunk triggers schedulePersist).
+  schedulePersistSessions();
 
   // autoDriveStartup calls this right after it sends the task, so idle detection
   // can distinguish "finished a turn" from "never started".
@@ -4252,6 +4560,10 @@ async function registerSession(session, cmd, args, cwd, label) {
         lastOutputTime = Date.now();
         rec.lastOutputAt = lastOutputTime;
         if (rec.taskSubmittedAt) rec.bytesSinceTask += chunk.length;
+        // Debounced-save this session's output snapshot to scopedData so it
+        // survives an app close/reopen (see SESSIONS_KEY). schedulePersistSessions
+        // batches many chunks into one write — never per byte.
+        schedulePersistSessions();
         // Cap the buffer so a long session can't grow it unbounded — prompts
         // and markers are always near the tail, so keeping the last ~8KB is plenty.
         if (monitorBuffer.length > 8192) monitorBuffer = monitorBuffer.slice(-4096);
@@ -4437,6 +4749,7 @@ async function registerSession(session, cmd, args, cwd, label) {
       session.onExit((exitCode) => {
         rec.active = false;
         rec.exitCode = exitCode;
+        rec.endedAt = Date.now();
         // Tear down monitor timers so an exited session can't keep firing
         // renderTabs()/renderSessionInfo() or flag a dead terminal as idle.
         if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
@@ -4450,6 +4763,9 @@ async function registerSession(session, cmd, args, cwd, label) {
         renderTabs();
         try { window.chatoss.notifications.send({ title: "Session ended", body: label + " finished" }); } catch (e) { /* non-fatal */ }
         renderSessionInfo();
+        // Eagerly persist the final ended snapshot so the last output is saved
+        // even if the app is closed immediately after the process exits.
+        persistSessions().catch((e) => console.warn("persistSessions onExit", e));
       });
     }
   } catch (e) { console.warn("onExit failed:", e); }
@@ -4502,6 +4818,9 @@ async function closeSession(id) {
   if (rec.ro) { try { rec.ro.disconnect(); } catch (e) { /* non-fatal */ } }
   rec.squareEl.remove();
   sessions.delete(id);
+  // A closed session should NOT come back as a dead card on the next reopen,
+  // so drop it from the persisted snapshot list too.
+  persistSessions().catch((e) => console.warn("persistSessions closeSession", e));
   if (state.activeSessionId === id) {
     state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
   }
@@ -4513,10 +4832,12 @@ async function closeSession(id) {
 
 function renderSessionInfo() {
   const rec = state.activeSessionId ? sessions.get(state.activeSessionId) : null;
+  const dead = (!rec && state.activeSessionId) ? deadSessions.get(state.activeSessionId) : null;
   const c = activeConversation();
   let bits = [];
   if (c) bits.push("Conversation: " + c.name);
   if (rec) bits.push("Session: " + rec.label + " @ " + rec.cwd + (rec.active ? "" : " (exited)"));
+  else if (dead) bits.push("Session: " + dead.label + " @ " + dead.cwd + " (ended)");
   el.sessionInfo.textContent = bits.join("  ·  ");
 }
 
@@ -4833,6 +5154,11 @@ async function init() {
   // Restore worktrees created in earlier sessions so they stay mergeable after a
   // reload (buildSystemPrompt surfaces them; list_worktrees enumerates them).
   await loadWorktrees();
+  // Restore persisted terminal sessions as read-only "ended" cards so the user
+  // immediately sees what ran, what's finished, and the last output — even
+  // though the live PTY processes are gone. (Must run AFTER loadWorktrees so
+  // worktreeBranchForCwd can match against the restored worktreeMeta.)
+  await loadPersistedSessions();
   detection = {
     codex: !!(settings.detected && settings.detected.codex),
     claude: !!(settings.detected && settings.detected.claude),
@@ -5007,10 +5333,34 @@ async function init() {
   // Wake the orchestrator when a delegated agent finishes its turn.
   startAutoFollow();
 
+  // Best-effort final flush of session snapshots when the app is closed or
+  // hidden, so the Sessions column survives a close/reopen with the LATEST
+  // output rather than whatever the debounced save last happened to write.
+  // pagehide is the reliable signal (fires for both tab close and navigation);
+  // beforeunload covers older browsers. visibilitychange covers the app being
+  // backgrounded (the window may be torn down without a pagehide). These all
+  // schedule an eager persistSessions() (canceling any pending debounce) — we
+  // don't await inside the listener because pagehide may not wait on promises.
+  const flushSessions = () => {
+    // Cancel a pending debounced flush and run an immediate one instead.
+    if (_persistSessionsTimer) { clearTimeout(_persistSessionsTimer); _persistSessionsTimer = null; }
+    persistSessions().catch((e) => console.warn("flushSessions", e));
+  };
+  window.addEventListener("pagehide", flushSessions);
+  window.addEventListener("beforeunload", flushSessions);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushSessions(); });
+
   // initial render
   renderProjects();
   renderChat();
   renderSessionInfo();
+  // Render restored (persisted) terminal sessions as ended cards BEFORE the
+  // empty-state check, so a reopen with prior sessions shows them instead of
+  // "No active sessions". Newest first so the most recent work is on top.
+  if (deadSessions.size) {
+    const snaps = [...deadSessions.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    for (const snap of snaps) renderDeadSessionCard(snap);
+  }
   ensureEmptyHint();
   renderTabs();
 

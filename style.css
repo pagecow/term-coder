@@ -1796,6 +1796,53 @@ body.is-resizing .term-mount { pointer-events: none; }
   line-height: 1.5;
 }
 
+/* ---- Ended / persisted session card (read-only) ----
+   Shown for a terminal whose underlying PTY has died (process exit OR app
+   close/reopen). NOT live: no xterm mount, no input — just the agent label, an
+   ended indicator, and the captured output tail. Uses the same frame as a live
+   term-square so the Sessions column looks coherent. */
+.term-square-ended {
+  border-style: dashed;
+  opacity: .96;
+}
+.term-square-ended.active {
+  border-color: var(--accent);
+  border-style: dashed;
+  box-shadow: 0 0 0 2px var(--accent-tint), var(--shadow-md);
+}
+.term-ended-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px 10px;
+  background: var(--term-bg);
+  gap: 6px;
+}
+.term-ended-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.term-ended-output {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--term-bg);
+  border: 1px solid var(--term-border);
+  border-radius: 8px;
+  color: #c9d1d9;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ============================================================
    Modals
    ============================================================ */
