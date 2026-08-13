@@ -33,6 +33,11 @@ let settings = {
   cliDefault: "ask",       // 'ask' | 'ollama' | 'codex' | 'claude'
   modelDefault: "ask",     // 'ask' | <ollama model name>
   cwdDefault: "",
+  // Wake the orchestrator automatically when a delegated agent finishes its turn
+  // or exits. Coding CLIs are REPLs that never exit, so without this the
+  // orchestrator has nothing to react to and the user has to prod it by hand
+  // after every subtask.
+  autoFollow: true,
   detected: { codex: false, claude: false, ollama: false, models: [], denied: false },
 };
 // Model Selection Mode — single source of truth for how sub-agent sessions
@@ -89,17 +94,48 @@ const APPROVE_BUSY_TIMEOUT_MS = 45000;
 // again, spraying stray Enter keystrokes into a working agent.
 const APPROVE_COOLDOWN_MS = 1800;
 
+// How long a terminal must be silent, while sitting at an input prompt, before
+// we call the agent's turn finished. Coding CLIs stream output continuously while
+// they work (spinner frames, tool output), so silence at a prompt is a reliable
+// "done for now" signal — and unlike process exit, it actually happens.
+const TURN_IDLE_MS = 4000;
+// Bytes of output the agent must have produced since we submitted the task
+// before idleness can mean "finished". Without this, the quiet prompt that
+// exists BEFORE the task is submitted would read as an instantly-completed turn.
+const MIN_WORK_BYTES = 200;
+
+// Classify what a session is doing right now, without touching the PTY.
+// Returns one of: "EXITED" | "NEEDS INPUT" | "WORKING" | "IDLE" | "STARTING".
+function sessionActivity(s) {
+  if (!s) return "EXITED";
+  if (s.active === false) return "EXITED";
+  if (s.waitingForInput) return "NEEDS INPUT";
+  const quietFor = Date.now() - (s.lastOutputAt || 0);
+  if (!s.taskSubmittedAt) return quietFor >= TURN_IDLE_MS ? "IDLE" : "STARTING";
+  if (s.bytesSinceTask < MIN_WORK_BYTES) return "STARTING";
+  if (quietFor < TURN_IDLE_MS) return "WORKING";
+  return s.tailAtPrompt ? "IDLE" : "WORKING";
+}
+
 // Build the structured status + output block shared by read_session and
 // wait_for_session. Returns a header line (status / exit code / working dir)
 // followed by the clean terminal screen text. Preserves the trust-dialog
 // masking so the orchestrator never sees raw "Do you trust..." text it would
 // try to keystroke past.
-async function formatSessionStatusOutput(s, statusOverride) {
+async function formatSessionStatusOutput(s, statusOverride, opts) {
+  const o = opts || {};
+  // Default to the TAIL of the screen. Returning the whole ~64KB scrollback on
+  // every read was slow and burned a large chunk of the turn's context for
+  // output the orchestrator had already seen.
+  const maxChars = o.full ? Infinity : (o.maxChars || 4000);
   try {
     let clean = "(terminal is empty — no output yet)";
     if (s.session && typeof s.session.getOutput === "function") {
       const text = await s.session.getOutput();
       clean = text ? stripAnsi(text) : "(terminal is empty — no output yet)";
+      if (clean.length > maxChars) {
+        clean = "…(earlier output trimmed — pass full:true to read_session for everything)…\n" + clean.slice(-maxChars);
+      }
       // MASK the trust dialog from the orchestrator when user must approve it
       // in chat. If the orchestrator sees the raw "Do you trust..." text, it
       // will try to send keystrokes to bypass the pill picker. Hide it and
@@ -111,7 +147,7 @@ async function formatSessionStatusOutput(s, statusOverride) {
     }
     let statusLine;
     if (statusOverride) {
-      // Caller-supplied status line (e.g. wait_for_session's "STILL RUNNING
+      // Caller-supplied status line (e.g. wait_for_session's "STILL WORKING
       // (timed out …)" message). Reuses the same output-fetch + trust-dialog
       // masking below so every session read masks the trust dialog uniformly.
       statusLine = statusOverride;
@@ -121,7 +157,15 @@ async function formatSessionStatusOutput(s, statusOverride) {
       // Exited but no exit code recorded (e.g. killed) — report "killed".
       statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: EXITED | EXIT CODE: killed]";
     } else {
-      statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: RUNNING | EXIT CODE: n/a]";
+      // Report the ACTIVITY, not just "RUNNING". A coding CLI is always
+      // "running" — that told the orchestrator nothing about whether the agent
+      // was still working or had finished its turn minutes ago.
+      const act = sessionActivity(s);
+      const quiet = Math.round((Date.now() - (s.lastOutputAt || Date.now())) / 1000);
+      statusLine = "[SESSION: " + (s.label || s.id) + " | STATUS: " + act +
+        (act === "IDLE" ? " — turn complete, idle " + quiet + "s at its prompt (the CLI stays running; that is normal)" : "") +
+        (act === "WORKING" ? " — actively producing output" : "") +
+        (act === "STARTING" ? " — launched, task not yet under way" : "") + "]";
     }
     const dirLine = "[WORKING DIR: " + (s.cwd || "(unknown)") + "]";
     // Surface a blocked-on-prompt signal so the orchestrator knows the coding
@@ -246,6 +290,7 @@ const el = {
   complexityModelHigh: $("complexity-model-high"),
   // trust-folder mode
   trustModeRadios: $("trust-mode-radios"),
+  autoFollow: $("auto-follow"),
   // board picker
   boardPicker: $("board-picker"),
   boardPickerList: $("board-picker-list"),
@@ -492,11 +537,13 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "read_session",
-      description: "Read the current output of a running CLI session — everything the terminal shows right now (up to ~64KB). The result now includes a STATUS HEADER showing whether the session is RUNNING or EXITED (with its exit code) and the working directory, followed by the clean terminal screen text. Use this to see what the agent has done, check for errors, or detect when a task is finished. For just waiting until an agent is done, prefer wait_for_session; to see all agents at once, use list_sessions.",
+      description: "Read a session's terminal output. Returns a STATUS HEADER (WORKING / IDLE — turn complete / NEEDS INPUT / EXITED, plus the working directory) followed by the TAIL of the clean screen text. NOTE: a live snapshot of every terminal is already included in your system context each turn, so use this when you need MORE of one agent's output than the snapshot shows — not to find out whether an agent is busy. To wait for an agent to finish, use wait_for_session.",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "Optional. Defaults to the most recently started session." },
+          maxChars: { type: "number", description: "How many characters of the tail to return. Default 4000." },
+          full: { type: "boolean", description: "Return the entire scrollback (up to ~64KB) instead of the tail. Use sparingly — it is large." },
         },
       },
     },
@@ -516,12 +563,13 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "wait_for_session",
-      description: "Wait for a terminal session to exit (finish), then return its final status and last screen output. Use this instead of repeatedly calling read_session to poll — it blocks until the agent is done (up to the timeout), eliminating wasteful polling loops. Returns the session status (EXITED + exit code, or still RUNNING if timed out) and the terminal output.",
+      description: "Wait until a coding agent FINISHES ITS CURRENT TURN, then return its status and screen output. This is the main way to monitor an agent — call it once per agent instead of polling read_session. IMPORTANT: coding CLIs are REPLs. Claude Code and Codex do NOT exit when they finish a task, they sit at their input prompt — so 'still running' does NOT mean 'still working'. This call returns as soon as the agent goes quiet at its prompt (turn complete), gets blocked needing input, or the process actually exits. Use generous timeouts (5-10 min) for substantial subtasks; it returns early the moment the agent stops.",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "The session id to wait for. Defaults to the most recently started session." },
-          timeoutMs: { type: "number", description: "Maximum time to wait in milliseconds. Default 120000 (2 min). The call returns early if the session exits before the timeout." },
+          timeoutMs: { type: "number", description: "Maximum time to wait in milliseconds. Default 300000 (5 min). Returns early as soon as the agent finishes its turn or needs input, so a large value costs nothing." },
+          waitFor: { type: "string", description: "'idle' (default) returns when the agent finishes its turn — what you almost always want. 'exit' waits for the process to actually terminate, which for an interactive coding CLI usually only happens if it crashes or is closed." },
         },
       },
     },
@@ -674,6 +722,34 @@ function stripAnsi(s) {
   return s;
 }
 
+// Resolve once the terminal has produced no new output for `quietMs`, or after
+// `maxMs` regardless. Used to separate a typed payload from the Enter keystroke
+// that submits it: a TUI that is still repainting the pasted text will swallow
+// an Enter that arrives in the same read() as the text.
+function waitForQuiet(session, quietMs, maxMs) {
+  return new Promise((resolve) => {
+    let unsub = null;
+    let timer = null;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      try { unsub && unsub(); } catch (_) {}
+      resolve();
+    };
+    const arm = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(finish, quietMs);
+    };
+    try {
+      if (typeof session.onData === "function") unsub = session.onData(arm);
+    } catch (_) { /* no stream — the max timer still resolves us */ }
+    arm();
+    setTimeout(finish, maxMs);
+  });
+}
+
 // Auto-drive a freshly spawned CLI through its startup dialogs and into the
 // point where it will accept the task prompt, then send the prompt.
 // Claude Code / Codex / OpenCode show a "trust this folder?" prompt and then a
@@ -763,37 +839,72 @@ async function autoDriveStartup(session, prompt, label, cwd) {
     // session on an already-trusted folder.
     if (rec && rec.trustState === "pending") rec.trustState = "confirmed";
 
-    // Type the prompt, then press Enter. We send the text and the Enter key as
-    // SEPARATE writes so a CLI that echoes input character-by-character has a
-    // chance to render the full prompt before the submit keystroke arrives.
+    // ---------- Submit the task ----------
+    // THE BUG THIS SOLVES: writing the text and the Enter key back-to-back
+    // (`write(prompt)` immediately followed by `write("\r")`) put both into the
+    // PTY fast enough that the agent's TUI read them as ONE chunk. Ink-based
+    // TUIs like Claude Code treat a large single chunk as a PASTE, and a \r
+    // inside pasted content is inserted as a literal newline in the input box
+    // rather than being handled as an Enter keypress. Result: the whole task sat
+    // in the input box, unsubmitted, forever — exactly the 10-minute hang.
     //
-    // Robust submit: \r (carriage return) is the standard Enter in a PTY, but
-    // some Codex versions submit on \n (line feed) instead. We send \r first and
-    // watch for output; only if the terminal stays SILENT for 400ms (i.e. the \r
-    // did nothing) do we send \n. Sending it unconditionally typed a stray
-    // newline into the input box of an agent that had already accepted the task.
+    // So the Enter MUST be isolated in time from the text: type the text, wait
+    // for the TUI to finish rendering it, and only then send \r on its own.
     await safe(() => session.write(fullPrompt));
-    await safe(() => session.write("\r"));
     // Drop the echoed prompt out of the monitor's buffer — it contains the whole
     // protocol text and would otherwise sit there being re-scanned as if it were
     // terminal output from the agent.
     try { if (rec && rec._resetMonitorBuffer) rec._resetMonitorBuffer(); } catch (_) {}
+    await waitForQuiet(session, 260, 2500);
+    await safe(() => session.write("\r"));
 
+    // Verify it actually submitted, and retry if not. A duplicate \r sent to an
+    // agent that already accepted the task submits an empty line, which every
+    // CLI we target ignores — so retrying is cheap and strictly safer than
+    // leaving the task stranded in the input box.
     if (!submitFallbackScheduled) {
       submitFallbackScheduled = true;
-      let sawPostSubmitOutput = false;
-      let probe = null;
-      try {
-        if (typeof session.onData === "function") {
-          probe = session.onData(() => { sawPostSubmitOutput = true; });
+      // A distinctive fragment from the END of what we typed. While the text is
+      // still in the input box this fragment sits in the last few lines of the
+      // screen; once submitted, the input box empties and the agent's response
+      // pushes it up out of that window.
+      const probeFragment = fullPrompt.replace(/\s+/g, " ").trim().slice(-30);
+      const looksUnsubmitted = async () => {
+        if (!probeFragment || probeFragment.length < 12) return false;
+        let txt = "";
+        try { txt = stripAnsi((await session.getOutput()) || ""); } catch (_) { return false; }
+        // Look ONLY at the live input box — everything from the LAST prompt glyph
+        // to the end of the screen. Scanning "the last N lines" instead was too
+        // loose: the agent's own output pushed the count around and produced
+        // spurious retries even though the task had submitted cleanly.
+        const lines = txt.split("\n").map((l) => l.replace(/[│┃▌▎]/g, " ").trim());
+        let start = -1;
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (/^[❯›»>]/.test(lines[i])) { start = i; break; }
         }
-      } catch (_) {}
-      setTimeout(() => {
-        try { probe && probe(); } catch (_) {}
-        if (killed || sawPostSubmitOutput) return;
-        try { session.write("\n"); } catch (_) {}
-      }, 400);
+        if (start === -1) return false;
+        const box = lines.slice(start).join(" ").replace(/\s+/g, " ");
+        return box.includes(probeFragment);
+      };
+      (async () => {
+        // Escalate: \r again, then \r once more, then \n for a CLI that submits
+        // on line feed instead.
+        for (const [delay, key] of [[900, "\r"], [1400, "\r"], [1800, "\n"]]) {
+          await new Promise((r) => setTimeout(r, delay));
+          if (killed) return;
+          if (!(await looksUnsubmitted())) return; // submitted — nothing to do
+          console.warn("[Term Coder] task still unsubmitted in", label, "— re-sending Enter");
+          await safe(() => session.write(key));
+        }
+        if (!killed && (await looksUnsubmitted())) {
+          console.warn("[Term Coder] could not submit the task in", label,
+            "— the text is in the agent's input box; the user or orchestrator can press Enter.");
+        }
+      })();
     }
+    // Mark the task as sent so idle detection can tell "finished a turn" from
+    // "never started" (see markTaskSubmitted / wait_for_session).
+    try { if (rec && rec._markTaskSubmitted) rec._markTaskSubmitted(); } catch (_) {}
   };
 
   // Confirm the trust dialog by pressing Enter on the highlighted "Yes" option.
@@ -1139,7 +1250,13 @@ async function toolHandler(name, args) {
           return "Cancelled by user — do not start the session; ask the user how to proceed or stop.";
         }
         if (choice.session && choice.session.id) {
-          return "session " + choice.session.id + " started: " + choice.session.label + " in " + choice.session.cwd;
+          // Mark it as delegated so auto-follow wakes us when it finishes. A
+          // terminal the USER opened by hand is theirs and never triggers a turn.
+          const rec = sessions.get(choice.session.id);
+          if (rec) rec.fromOrchestrator = true;
+          return "session " + choice.session.id + " started: " + choice.session.label + " in " + choice.session.cwd +
+            ". The app types and submits your taskPrompt automatically once the agent is ready. " +
+            "Monitor it with wait_for_session (returns when its turn finishes) — do NOT wait for the process to exit; coding CLIs are REPLs and never do.";
         }
         return "Error: session did not start";
       }
@@ -1195,57 +1312,95 @@ async function toolHandler(name, args) {
         let s = args.sessionId ? sessions.get(args.sessionId) : null;
         if (!s && sessions.size) { s = [...sessions.values()].pop(); }
         if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
-        return await formatSessionStatusOutput(s);
+        return await formatSessionStatusOutput(s, null, { full: !!args.full, maxChars: args.maxChars });
       }
       case "list_sessions": {
         // Summarize every coding-agent session at a glance so the orchestrator
         // can coordinate parallel work without guessing from raw screen text.
         if (!sessions.size) return "No active sessions. Start one with start_cli_session first.";
         const recs = [...sessions.values()];
-        let running = 0, exited = 0;
+        const tally = { WORKING: 0, IDLE: 0, "NEEDS INPUT": 0, STARTING: 0, EXITED: 0 };
         const lines = recs.map((s) => {
-          let statusPart;
-          if (s.active === false) {
-            exited++;
+          const act = sessionActivity(s);
+          tally[act] = (tally[act] || 0) + 1;
+          let statusPart = act;
+          if (act === "EXITED") {
             const code = (s.exitCode !== undefined && s.exitCode !== null) ? s.exitCode : "killed";
             statusPart = "EXITED (code " + code + ")";
-          } else {
-            running++;
-            statusPart = "RUNNING";
+          } else if (act === "IDLE") {
+            statusPart = "IDLE — turn complete (still running; a REPL does not exit)";
           }
-          const needsInput = (s.active !== false && s.waitingForInput) ? " | NEEDS INPUT" : "";
           let q = "";
-          if (s.active !== false && s.waitingForInput && s.pendingQuestion && !/^\(agent appears idle/.test(s.pendingQuestion)) {
+          if (act === "NEEDS INPUT" && s.pendingQuestion && !/^\(agent appears idle/.test(s.pendingQuestion)) {
             q = " | Q: " + s.pendingQuestion.split("\n")[0].slice(0, 100);
           }
-          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + needsInput + q + " | " + (s.cwd || "(unknown)");
+          return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + q + " | " + (s.cwd || "(unknown)");
         });
-        return "SESSIONS (" + recs.length + " total, " + running + " running, " + exited + " exited):\n" + lines.join("\n");
+        const summary = Object.entries(tally).filter(([, n]) => n).map(([k, n]) => n + " " + k.toLowerCase()).join(", ");
+        return "SESSIONS (" + recs.length + " total: " + summary + "):\n" + lines.join("\n") +
+          "\n\nIDLE means the agent finished its turn and is waiting at its prompt — that is your signal to review its work and merge, NOT a reason to keep waiting.";
       }
       case "wait_for_session": {
-        // Block until the given session exits (or the timeout expires), then
-        // return its final status + last screen output. Replaces the wasteful
-        // read_session polling loop that left tool chips stuck "loading".
+        // Wait until the agent FINISHES ITS TURN — not until the process exits.
+        //
+        // This used to poll `s.active !== false`, i.e. it waited for the CLI to
+        // exit. Coding CLIs are REPLs: Claude Code and Codex sit at their prompt
+        // after finishing a task and never exit on their own. So this call always
+        // burned its entire timeout (2 minutes by default) and came back knowing
+        // nothing, which is what made monitoring feel dead for minutes at a time.
+        //
+        // It now returns as soon as ANY of these is true:
+        //   • the agent went quiet at its input prompt (turn complete)
+        //   • the agent is blocked needing input (a question, or a prompt the app
+        //     couldn't classify)
+        //   • the process really did exit
         let s = args.sessionId ? sessions.get(args.sessionId) : null;
         if (!s && sessions.size) { s = [...sessions.values()].pop(); }
         if (!s) return "Error: no such session.";
-        const timeout = args.timeoutMs || 120000;
-        // Already exited — return immediately.
-        if (s.active === false) return await formatSessionStatusOutput(s);
-        // Still running — poll every 2s up to the timeout.
+        const timeout = Math.max(1000, args.timeoutMs || 300000);
+        const waitFor = args.waitFor === "exit" ? "exit" : "idle";
         const deadline = Date.now() + timeout;
-        while (s.active !== false && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 2000));
+        // A session that never gets going is a FAILURE, not something to wait out.
+        // The classic cause is the task text landing in the agent's input box
+        // without being submitted: the agent then sits at its prompt producing
+        // nothing, and a naive wait burns its whole timeout in silence. Bail after
+        // 45s of no work so the orchestrator can report something actionable.
+        const stallDeadline = Date.now() + 45000;
+        const settledNow = () => {
+          if (s.active === false) return "EXITED";
+          if (waitFor === "exit") return null;
+          const act = sessionActivity(s);
+          if (act === "IDLE" || act === "NEEDS INPUT") return act;
+          if (act === "STARTING" && Date.now() > stallDeadline) return "STALLED";
+          return null;
+        };
+        // Poll at 500ms so we react promptly once the agent stops.
+        let reason = settledNow();
+        while (!reason && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 500));
+          reason = settledNow();
+        }
+        if (reason === "STALLED") {
+          return await formatSessionStatusOutput(
+            s,
+            "[SESSION: " + (s.label || s.id) + " | STATUS: STALLED — the agent has produced almost no output since it was launched]\n" +
+            "[LIKELY CAUSE: the task text is sitting in the agent's input box without having been submitted, or the CLI is still on a startup screen. Look at the output below: if you can see the task text next to the input prompt, call send_to_session({ sessionId: \"" + s.id + "\", text: \"\\r\" }) to press Enter. If the CLI is showing a menu or dialog, tell the user what it says instead of keystroking it.]"
+          );
         }
         if (s.active === false) return await formatSessionStatusOutput(s);
-        // Timed out while still running — reuse the shared formatter so the
-        // output fetch + ANSI stripping + trust-dialog masking stay uniform
-        // across read_session / wait_for_session (a session that times out
-        // while showing a "Do you trust this folder?" dialog would otherwise
-        // leak the raw trust text to the orchestrator).
+        if (reason === "IDLE") {
+          return await formatSessionStatusOutput(
+            s,
+            "[SESSION: " + (s.label || s.id) + " | STATUS: RUNNING | AGENT TURN COMPLETE — it has been idle at its input prompt for " +
+            Math.round((Date.now() - (s.lastOutputAt || Date.now())) / 1000) + "s]\n" +
+            "[NOTE: the CLI is still running (that is normal — it is a REPL and will not exit). Read the output below to confirm the subtask is done, then merge its worktree. To give it more work, use send_to_session.]"
+          );
+        }
+        if (reason === "NEEDS INPUT") return await formatSessionStatusOutput(s);
+        // Timed out while the agent was still actively working.
         return await formatSessionStatusOutput(
           s,
-          "[SESSION: " + (s.label || s.id) + " | STATUS: STILL RUNNING (timed out after " + timeout + "ms)]"
+          "[SESSION: " + (s.label || s.id) + " | STATUS: STILL WORKING (timed out after " + timeout + "ms without going idle)]"
         );
       }
       case "list_project_files": {
@@ -1572,6 +1727,7 @@ function openSettings() {
   renderDetectedList();
   applyModelSelectionModeToUi();
   applyTrustModeToUi();
+  if (el.autoFollow) el.autoFollow.checked = settings.autoFollow !== false;
   el.settingsPanel.classList.remove("hidden");
 }
 
@@ -1588,6 +1744,7 @@ function saveSettingsFromPanel() {
   // any uncommitted picker value is captured on Save.
   saveModelSelectionMode();
   saveTrustMode();
+  if (el.autoFollow) settings.autoFollow = !!el.autoFollow.checked;
   saveSettings();
   el.settingsPanel.classList.add("hidden");
 }
@@ -2928,6 +3085,17 @@ function createToolChip(name, args, opts) {
     resultLabel.textContent = "Error";
     resultLine.textContent = String(err || "error");
   };
+  // The turn ended while this tool was still in flight (aborted, or the engine
+  // never settled the call). Without this the chip kept its ticker running
+  // forever, showing "running 6m 05s" with an empty result — the single most
+  // "broken-looking" thing in the chat.
+  chip._setInterrupted = () => {
+    markDone('<span class="tool-chip-error">–</span>');
+    chip.classList.add("is-error");
+    badge.textContent = "interrupted";
+    resultLabel.textContent = "Interrupted";
+    resultLine.textContent = "The turn ended before this tool returned.";
+  };
   return chip;
 }
 
@@ -3010,12 +3178,13 @@ function renderMessage(m) {
     el.chatLog.appendChild(buildActivityRecord(m));
   }
   const row = document.createElement("div");
-  row.className = "msg " + role;
+  row.className = "msg " + role + (m.event ? " is-event" : "");
 
   // Role avatar — a small glyph label to the left of the bubble (Codex-style).
   const avatar = document.createElement("div");
   avatar.className = "msg-avatar";
-  if (role === "user") { avatar.textContent = "You"; avatar.classList.add("avatar-user"); }
+  if (m.event) { avatar.textContent = "⤳"; avatar.classList.add("avatar-event"); }
+  else if (role === "user") { avatar.textContent = "You"; avatar.classList.add("avatar-user"); }
   else if (role === "assistant") { avatar.textContent = "◆"; avatar.classList.add("avatar-assistant"); }
   else { avatar.textContent = "•"; avatar.classList.add("avatar-system"); }
 
@@ -3026,7 +3195,7 @@ function renderMessage(m) {
   if (role !== "system") {
     const lab = document.createElement("div");
     lab.className = "msg-role";
-    lab.textContent = role === "user" ? "You" : "Orchestrator";
+    lab.textContent = m.event ? "Agent event" : (role === "user" ? "You" : "Orchestrator");
     col.appendChild(lab);
   }
 
@@ -3153,10 +3322,17 @@ async function buildSystemPrompt() {
     "  • Spawn subtasks that share files SEQUENTIALLY — wait for the first agent to finish and merge before spawning the next one that touches the same files.",
     "  • Each start_cli_session returns a session id. SAVE every session id so you can monitor each agent independently.",
     "",
-    "STEP 4 — MONITOR each agent independently with read_session, list_sessions, and wait_for_session.",
-    "  • Use list_sessions({}) to see ALL agents at once — a summary of every session with its id, label, working directory, and whether it is RUNNING or EXITED (with exit code). This is the quickest way to check on parallel agents.",
-    "  • Use read_session({ sessionId: <id> }) to check on a specific agent. The result now starts with a STATUS HEADER like '[SESSION: <label> | STATUS: RUNNING | EXIT CODE: n/a]' or '[SESSION: <label> | STATUS: EXITED | EXIT CODE: 0]', followed by the working dir and the CLEAN terminal screen text (ANSI escapes stripped). Read the header first to know instantly whether the agent is still working or finished.",
-    "  • PREFER wait_for_session({ sessionId: <id>, timeoutMs: 120000 }) when you just want an agent to finish — it blocks until the session exits (or the timeout) and returns the same status header + output. This eliminates wasteful read_session polling loops that leave tool chips stuck 'loading' and hang the orchestrator. Call it once per agent instead of polling read_session in a loop.",
+    "STEP 4 — MONITOR each agent.",
+    "",
+    "  ⚠ THE ONE THING TO UNDERSTAND ABOUT MONITORING: a coding CLI is a REPL. Claude Code and Codex do NOT exit when they finish a task — they print their result and sit at their input prompt indefinitely. So 'the session is still running' tells you NOTHING about whether the agent is still working. NEVER wait for a session to EXIT; you would wait forever. The signal you want is IDLE = the agent went quiet at its prompt = its turn is complete.",
+    "",
+    "  • YOU ALREADY SEE EVERY TERMINAL. Your system context contains a LIVE SNAPSHOT of all sessions each turn: each one's status (WORKING / IDLE / NEEDS INPUT / EXITED) and the last lines on its screen. Read that FIRST. You usually do not need a tool call to know what is happening.",
+    "  • wait_for_session({ sessionId: <id>, timeoutMs: 600000 }) is the main monitoring call: it returns as soon as that agent finishes its turn, gets blocked, or exits. Use a generous timeout — it returns early, so a large value costs nothing. Call it once per agent rather than polling.",
+    "  • list_sessions({}) gives every agent's status in one line each — use it to pick up state at the start of a turn.",
+    "  • read_session({ sessionId: <id> }) returns the TAIL of a terminal (pass full:true for everything). Use it when you need more detail than the snapshot shows — not to check whether an agent is busy.",
+    "  • When an agent reaches IDLE, its subtask is done as far as it is concerned: review its output, then MERGE its worktree. Do not call wait_for_session on it again unless you have given it new work with send_to_session.",
+    "  • The app AUTO-SUBMITS the taskPrompt you passed to start_cli_session (it types the text and presses Enter once the agent is ready). Do not re-send the initial task.",
+    "  • If auto-follow is enabled, you will be woken automatically with a '[Term Coder] The agent … has FINISHED ITS TURN' message when an agent stops. Treat that as your cue to review, merge, and continue — you do not need to sit in a waiting loop.",
     "  • Report progress on ALL agents to the user — which are still working, which are done, which hit errors.",
     "  • Use send_to_session({ sessionId: <id>, text }) ONLY for follow-up instructions AFTER an agent's input box is accepting text — not for startup dialogs.",
     "  • Do NOT loop read_session rapidly. Prefer wait_for_session to block for completion, or list_sessions to check status without dumping output. Only call read_session when you need to read the actual terminal text.",
@@ -3173,9 +3349,9 @@ async function buildSystemPrompt() {
     "  • If read_session returns 'Error: no such terminal session' shortly after start, the session was killed. Do NOT immediately re-call start_cli_session with the same args — that creates a loop. Instead explain what happened (likely trust declined) and ask the user how to proceed.",
     "",
     "STEP 5 — MERGE each worktree back to the parent branch when its agent is done.",
-    "  • When an agent is done (read_session status header shows EXITED, or wait_for_session returns), call merge_worktree({ branchName: <branch from create_worktree> }) to merge that worktree's branch back into the parent branch (usually main) and clean up the worktree directory.",
+    "  • When an agent's status is IDLE (turn complete) and its output shows the subtask finished, call merge_worktree({ branchName: <branch from create_worktree> }) to merge that branch into the parent branch (usually main) and clean up the worktree.",
     "  • Merge agents ONE AT A TIME as they finish. Do not wait for ALL agents before merging — merge each as soon as it's done.",
-    "  • Before merging the LAST worktree, call list_sessions({}) to confirm that ALL agents have EXITED (none still RUNNING). If any agent is still running, wait for it with wait_for_session before doing the final merge.",
+    "  • Before the LAST merge, call list_sessions({}) and confirm no agent is still WORKING. Do NOT look for EXITED — these CLIs stay running by design. IDLE is the finished state.",
     "  • If merge_worktree reports CONFLICTS, the worktree is preserved. Tell the user which subtask conflicted and that manual resolution is needed, or spawn a follow-up agent in the worktree to resolve the conflicts.",
     "  • After all worktrees are merged, do a final read_session on the main project to verify the combined result, or inspect with list_project_files.",
     "",
@@ -3225,14 +3401,52 @@ async function buildSystemPrompt() {
     "LIVE APP STATE (regenerated every turn — trust this over your memory)",
     "═══════════════════════════════════════════════════════════════", "");
   if (sessions.size) {
-    sys.push("CURRENT SESSIONS (" + sessions.size + "):");
+    // LIVE TERMINAL SNAPSHOT. This is the orchestrator's actual view into the
+    // terminals: status plus the tail of what each one is showing right now,
+    // refreshed every turn with no tool call needed. Before this, the only way to
+    // see a terminal was to spend a tool call on read_session, so in practice the
+    // orchestrator was flying blind between explicit reads.
+    sys.push("CURRENT SESSIONS (" + sessions.size + ") — live snapshot, refreshed this turn:");
     for (const s of sessions.values()) {
-      const status = s.active === false
-        ? "EXITED (code " + ((s.exitCode !== undefined && s.exitCode !== null) ? s.exitCode : "killed") + ")"
-        : "RUNNING";
-      const needs = (s.active !== false && s.waitingForInput) ? " | NEEDS INPUT" : "";
-      sys.push("- [" + s.id + "] " + (s.label || s.id) + " | " + status + needs + " | cwd " + (s.cwd || "(unknown)"));
+      const act = sessionActivity(s);
+      let status = act;
+      if (act === "EXITED") {
+        status = "EXITED (code " + ((s.exitCode !== undefined && s.exitCode !== null) ? s.exitCode : "killed") + ")";
+      } else if (act === "IDLE") {
+        const quiet = Math.round((Date.now() - (s.lastOutputAt || Date.now())) / 1000);
+        status = "IDLE — finished its turn, quiet " + quiet + "s at its prompt";
+      }
+      sys.push("", "── [" + s.id + "] " + (s.label || s.id) + " | " + status + " | cwd " + (s.cwd || "(unknown)"));
+      if (act === "NEEDS INPUT" && s.pendingQuestion) {
+        sys.push("   BLOCKED, asking: " + s.pendingQuestion.split("\n")[0].slice(0, 200));
+      }
+      // Tail of the screen, kept short so several sessions stay affordable.
+      let tail = "";
+      try {
+        if (s.session && typeof s.session.getOutput === "function") {
+          const raw = await s.session.getOutput();
+          tail = raw ? stripAnsi(raw) : "";
+        }
+      } catch (e) { /* a dead session just gets no snapshot */ }
+      if ((s.trustState === "pending" || s.trustState === "asking") && s.trustMode !== "always" &&
+          /do\s*you\s*trust|trust\s*the\s*(files|contents|folder|directory)/i.test(tail)) {
+        sys.push("   (waiting for the user to approve 'trust this folder' in chat — do NOT send keystrokes)");
+      } else if (tail.trim()) {
+        const lines = tail.split("\n")
+          .map((l) => l.replace(/\s+$/, ""))
+          .filter((l) => l.trim())
+          // Drop the echo of our own task prompt. The agent's TUI keeps the
+          // submitted message in its transcript, so without this every snapshot
+          // of every session repeated ~600 characters of ORCHESTRATOR PROTOCOL
+          // boilerplate back at the model each turn.
+          .filter((l) => !/\[ORCHESTRATOR PROTOCOL\]/.test(l));
+        sys.push("   last screen lines:");
+        for (const l of lines.slice(-12)) sys.push("   | " + l.slice(0, 160));
+      } else {
+        sys.push("   (no output yet)");
+      }
     }
+    sys.push("", "Read the snapshot above BEFORE calling read_session — it usually already tells you what you need. IDLE means that agent's turn is finished: review its work and merge its worktree rather than waiting on it again.");
   } else {
     sys.push("CURRENT SESSIONS: (none running — nothing has been spawned yet, or all were closed)");
   }
@@ -3270,6 +3484,31 @@ async function buildSystemPrompt() {
 }
 
 // ---------- Send message ----------
+// No single tool call may hang the turn. `terminal.exec` never settles while an
+// unanswered permission prompt is up, and a monitoring call can outlive the
+// user's patience — either way the orchestrator used to sit there with chips
+// reading "running 6m 05s" and an empty result, unable to make progress. A raced
+// timeout guarantees the engine always gets a string back and the chip resolves.
+const TOOL_TIMEOUT_MS = 90 * 1000;
+const TOOL_TIMEOUT_OVERRIDES = { wait_for_session: 15 * 60 * 1000 };
+async function runToolWithTimeout(name, args) {
+  const limit = TOOL_TIMEOUT_OVERRIDES[name] || TOOL_TIMEOUT_MS;
+  let timer = null;
+  try {
+    return await Promise.race([
+      toolHandler(name, args),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(
+          "Error: the " + name + " tool did not return within " + Math.round(limit / 1000) +
+          "s and was abandoned. This usually means it is blocked on something outside the app — most often an unanswered terminal-permission prompt. Tell the user what you were trying to do and ask them to check for a pending approval, then continue with something else."
+        ), limit);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function setRunning(r) {
   running = r;
   el.sendBtn.classList.toggle("is-running", r);
@@ -3280,17 +3519,23 @@ function setRunning(r) {
   el.chatInput.disabled = r;
 }
 
-async function sendMessage() {
+// textOverride lets the app itself start a turn (see autoFollowTick). opts.event
+// marks the message as an app-generated event so it renders distinctly from
+// something the user actually typed.
+async function sendMessage(textOverride, opts) {
+  const o = opts || {};
   const c = activeConversation();
   if (!c) { setStatus("Select or create a conversation first."); return; }
   if (running) return;
-  const text = el.chatInput.value.trim();
+  const text = textOverride != null ? String(textOverride).trim() : el.chatInput.value.trim();
   if (!text) return;
-  el.chatInput.value = "";
+  if (textOverride == null) el.chatInput.value = "";
 
-  c.messages.push({ role: "user", content: text });
+  const userMsg = { role: "user", content: text };
+  if (o.event) userMsg.event = true;
+  c.messages.push(userMsg);
   saveState();
-  renderMessage({ role: "user", content: text });
+  renderMessage(userMsg);
   scrollChatBottom(false);
   updateChatEmpty();
 
@@ -3339,7 +3584,13 @@ async function sendMessage() {
   let accContent = "";
   let accThink = "";
   const liveToolCalls = [];
+  // Chip elements for this turn, so any still spinning when the turn ends can be
+  // resolved instead of ticking forever.
+  const liveChips = [];
   let firstTokenSeen = false;
+  // Set when a tool call lands, so the next text token starts a new paragraph
+  // instead of butting up against the previous segment's final word.
+  let segmentBreakPending = false;
 
   // Stable activity card — holds thinking + all tool chips at a fixed height so
   // the layout never grows/jumps while tools fire. Created lazily on the first
@@ -3387,6 +3638,14 @@ async function sendMessage() {
           typingRow.remove();
           liveRow.style.display = "";
         }
+        // The engine streams a separate text segment per tool round. Concatenating
+        // them raw ran sentences together across the boundary ("…improvements.Now
+        // I'll spawn…"), so start a new paragraph when a tool call interrupted
+        // the prose.
+        if (segmentBreakPending) {
+          segmentBreakPending = false;
+          if (accContent && !/\n\n$/.test(accContent)) accContent += "\n\n";
+        }
         accContent += t;
         scheduleFlush();
       },
@@ -3417,10 +3676,12 @@ async function sendMessage() {
         // Add a compact chip inside the stable activity card (fixed height,
         // internal scroll) so the layout never jumps as tools fire.
         const chip = createToolChip(name, args);
+        liveChips.push(chip);
         ensureActivityCard()._addChip(chip);
+        if (accContent) segmentBreakPending = true;
         maybeScrollChatBottom();
         try {
-          const res = await toolHandler(name, args);
+          const res = await runToolWithTimeout(name, args);
           entry.result = res;
           chip._setResult(res);
           return res; // string result feeds back into the engine's tool loop
@@ -3494,9 +3755,64 @@ async function sendMessage() {
     renderMessage({ role: "system", content: msg });
     maybeScrollChatBottom();
   } finally {
+    // Nothing may be left spinning. If the turn ended (normally, by error, or by
+    // abort) while a tool call was still outstanding, mark those chips
+    // interrupted so they stop their tickers and read honestly.
+    for (const ch of liveChips) {
+      if (ch.classList.contains("is-running") && typeof ch._setInterrupted === "function") ch._setInterrupted();
+    }
     setRunning(false);
     abortController = null;
   }
+}
+
+// ---------- Auto-follow: wake the orchestrator when an agent stops ----------
+// Coding CLIs are REPLs — they finish a task and sit at their prompt forever.
+// Nothing in the app used to react to that, so after spawning agents the
+// orchestrator went silent until the user typed something, which is what made
+// the whole loop feel like it had stalled. This watcher notices a delegated
+// session finishing its turn (or exiting, or getting blocked) and starts one
+// orchestrator turn so it can review, merge, and move the plan forward.
+let autoFollowTimer = null;
+let lastAutoFollowAt = 0;
+const AUTO_FOLLOW_COOLDOWN_MS = 8000;
+
+function autoFollowTick() {
+  if (settings.autoFollow === false) return;
+  if (running) return;                                  // orchestrator is already busy
+  if (Date.now() - lastAutoFollowAt < AUTO_FOLLOW_COOLDOWN_MS) return;
+  if (!activeConversation()) return;
+
+  for (const rec of sessions.values()) {
+    const act = sessionActivity(rec);
+    // Only report a CHANGE, and only the states that mean "your turn".
+    if (act === rec._lastReportedActivity) continue;
+    const wasReported = rec._lastReportedActivity;
+    rec._lastReportedActivity = act;
+    if (!rec.fromOrchestrator) continue;                // user-driven terminal: leave it alone
+    if (act !== "IDLE" && act !== "EXITED" && act !== "NEEDS INPUT") continue;
+    // Don't fire on the very first classification of a brand-new session.
+    if (wasReported === undefined) continue;
+
+    let note;
+    if (act === "EXITED") {
+      note = "[Term Coder] The agent \"" + (rec.label || rec.id) + "\" (session " + rec.id + ") has EXITED.";
+    } else if (act === "NEEDS INPUT") {
+      note = "[Term Coder] The agent \"" + (rec.label || rec.id) + "\" (session " + rec.id + ") is BLOCKED waiting for input" +
+        (rec.pendingQuestion ? ": " + rec.pendingQuestion.split("\n")[0].slice(0, 200) : ".");
+    } else {
+      note = "[Term Coder] The agent \"" + (rec.label || rec.id) + "\" (session " + rec.id + ") has FINISHED ITS TURN and is idle at its prompt.";
+    }
+    note += " Check the live snapshot in your context, then continue the plan: merge its worktree if the subtask is done, answer it if it asked something, or spawn the next subtask. Do not wait on this agent again unless you have given it new work.";
+    lastAutoFollowAt = Date.now();
+    sendMessage(note, { event: true });
+    return; // one wake-up per tick; the next tick picks up any others
+  }
+}
+
+function startAutoFollow() {
+  if (autoFollowTimer) return;
+  autoFollowTimer = setInterval(autoFollowTick, 2500);
 }
 
 // ---------- Right column: terminal grid ----------
@@ -3576,8 +3892,21 @@ async function registerSession(session, cmd, args, cwd, label) {
   // "pending" itself. A manually-spawned session with no prompt is driven by the
   // user in the terminal widget, and must not be treated as blocked on trust —
   // that would suppress its approval handling forever.
-  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "none", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false, pendingQuestion: "", _idleTimer: null, _busyTimer: null, _lastApprovalKey: "", _lastApprovalAt: 0, _approveCooldownUntil: 0, _sentinelKey: "" };
+  const rec = { id: session.id, session, cmd, args, cwd, label, active: true, exitCode: null, squareEl: square, mountEl, dispose: null, expanded: false, trustState: "none", trustMode: null, autoApproveBusy: false, autoApproveUnsub: null, waitingForInput: false, pendingQuestion: "", _idleTimer: null, _busyTimer: null, _lastApprovalKey: "", _lastApprovalAt: 0, _approveCooldownUntil: 0, _sentinelKey: "",
+    // Activity tracking — this is what lets the app tell "the agent is working"
+    // from "the agent finished its turn and is sitting at its prompt". A coding
+    // CLI is a REPL: it does NOT exit when the task is done, so process exit is
+    // useless as a completion signal (waiting for it was why monitoring felt
+    // dead for minutes at a time).
+    lastOutputAt: Date.now(), taskSubmittedAt: 0, bytesSinceTask: 0, tailAtPrompt: false };
   sessions.set(session.id, rec);
+
+  // autoDriveStartup calls this right after it sends the task, so idle detection
+  // can distinguish "finished a turn" from "never started".
+  rec._markTaskSubmitted = () => {
+    rec.taskSubmittedAt = Date.now();
+    rec.bytesSinceTask = 0;
+  };
 
   // Set autoApproveBusy WITH a watchdog. This flag gates the entire monitor, so
   // any path that sets it and fails to clear it (an approval picker the user
@@ -3676,15 +4005,27 @@ async function registerSession(session, cmd, args, cwd, label) {
   // Detect a generic idle prompt: a prompt cursor at the end of recent output
   // with no new activity. Returns true if the terminal looks idle/waiting.
   function isIdlePrompt(flat) {
-    // Prompt cursors used by various CLIs: ❯ › » $ >.
-    // We look for a cursor near the END of the output (last ~200 chars).
-    // The cursor must be at a word boundary — a bare /[>]$/ also matched any
-    // output that merely ENDED in '>' (e.g. an agent printing "</div>"), which
-    // flagged a busy agent as idle.
-    const tail = flat.slice(-200);
-    if (/(^|[\s│┃▌▎])[❯›»$>]\s*$/.test(tail)) return true;
-    // Claude/Codex "waiting for input" box or a bare cursor with options above.
-    if (/esc to cancel|tab to amend/.test(tail)) return true;
+    // Is an input prompt visible near the bottom of the screen?
+    //
+    // This must NOT require the prompt glyph to be the last thing in the output.
+    // Claude Code draws chrome BELOW its input box — a cursor line and a mode
+    // line like "⏸ manual mode on" — so the glyph is typically 2-4 lines from the
+    // end and an end-anchored test never matched. That made IDLE unreachable for
+    // Claude Code, so wait_for_session always ran to its full timeout and the
+    // orchestrator never learned that an agent had finished.
+    //
+    // Note this is only half the signal: sessionActivity() requires the terminal
+    // to ALSO have been quiet for TURN_IDLE_MS. These CLIs animate a spinner the
+    // whole time they work, so silence is what really distinguishes "finished"
+    // from "thinking" — this function just confirms we're parked at a prompt
+    // rather than mid-stream.
+    const lines = flat.split("\n").map((l) => l.replace(/[│┃▌▎]/g, " ").trim()).filter(Boolean);
+    for (const l of lines.slice(-6)) {
+      if (/^[❯›»>]/.test(l)) return true;              // an input prompt line
+      if (/[^<\/\w]\$\s*$/.test(l) || /^\$\s*$/.test(l)) return true; // plain shell prompt
+      // Persistent idle-state chrome from the common CLIs.
+      if (/esc to cancel|esc to interrupt|tab to amend|manual mode on|accept edits on|plan mode on|\? for shortcuts/.test(l)) return true;
+    }
     return false;
   }
 
@@ -3701,6 +4042,8 @@ async function registerSession(session, cmd, args, cwd, label) {
         if (!rec.active) return;
         monitorBuffer += chunk;
         lastOutputTime = Date.now();
+        rec.lastOutputAt = lastOutputTime;
+        if (rec.taskSubmittedAt) rec.bytesSinceTask += chunk.length;
         // Cap the buffer so a long session can't grow it unbounded — prompts
         // and markers are always near the tail, so keeping the last ~8KB is plenty.
         if (monitorBuffer.length > 8192) monitorBuffer = monitorBuffer.slice(-4096);
@@ -3802,6 +4145,9 @@ async function registerSession(session, cmd, args, cwd, label) {
         //    but the terminal is showing a prompt cursor, flag it so the
         //    orchestrator knows to check on it.
         const idle = isIdlePrompt(tailFlat);
+        // Cached for sessionActivity(), which is polled from wait_for_session and
+        // read by buildSystemPrompt without touching the PTY.
+        rec.tailAtPrompt = idle;
         if (!idle) {
           // Any non-idle output means the agent is working again. Clear a pending
           // timer AND an already-raised idle flag — the old code only did the
@@ -4419,6 +4765,9 @@ async function init() {
       for (const rec of sessions.values()) fitTerminal(rec);
     }, 120);
   });
+
+  // Wake the orchestrator when a delegated agent finishes its turn.
+  startAutoFollow();
 
   // initial render
   renderProjects();

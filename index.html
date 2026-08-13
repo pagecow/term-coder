@@ -263,6 +263,15 @@
           <label class="radio-row"><input type="radio" name="trust-mode" value="always" /><span class="radio-label">Always trust automatically</span><span class="radio-sub">Confirm the trust dialog without asking</span></label>
         </div>
 
+        <h3 class="settings-section-title">Agent monitoring</h3>
+        <div class="model-mode-radios">
+          <label class="radio-row">
+            <input type="checkbox" id="auto-follow" />
+            <span class="radio-label">Wake the orchestrator when an agent finishes</span>
+            <span class="radio-sub">Coding CLIs never exit, so without this you have to nudge the orchestrator yourself after each agent goes quiet</span>
+          </label>
+        </div>
+
         <h3 class="settings-section-title">Detected tools</h3>
         <div id="detected-list" class="detected-list">
           <div class="detected-scanning">Scanning…</div>
