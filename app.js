@@ -104,11 +104,44 @@ const TURN_IDLE_MS = 4000;
 // exists BEFORE the task is submitted would read as an instantly-completed turn.
 const MIN_WORK_BYTES = 200;
 
+// Recognisable failure text from a coding agent's provider or the CLI itself.
+// An agent hitting one of these is NOT going to finish on its own, and an agent
+// RETRYING one is the worst case: it keeps emitting output, so it looks busy
+// forever and every "wait for it to finish" call runs to its full timeout.
+const AGENT_ERROR_PATTERNS = [
+  /api error:?\s*\d{3}/i,
+  /does not support image input/i,
+  /rate limit|429 |too many requests/i,
+  /context (?:length|window) exceeded|too many tokens|prompt is too long/i,
+  /401 |unauthorized|authentication (?:failed|error)|invalid api key/i,
+  /5\d\d (?:error|internal)|overloaded|service unavailable/i,
+  /econnreset|etimedout|fetch failed|network error/i,
+];
+// How many times the same error must recur before we call it a loop.
+const ERROR_LOOP_THRESHOLD = 3;
+
+function detectAgentError(text) {
+  for (const re of AGENT_ERROR_PATTERNS) {
+    const m = text.match(re);
+    if (!m) continue;
+    // Return the whole line for context — the orchestrator needs to know WHAT
+    // failed to write a useful correction.
+    const line = (text.slice(0, m.index).split("\n").pop() || "") +
+      text.slice(m.index).split("\n")[0];
+    return line.trim().slice(0, 240);
+  }
+  return "";
+}
+
 // Classify what a session is doing right now, without touching the PTY.
-// Returns one of: "EXITED" | "NEEDS INPUT" | "WORKING" | "IDLE" | "STARTING".
+// Returns: "EXITED" | "ERROR LOOP" | "NEEDS INPUT" | "WORKING" | "IDLE" | "STARTING".
 function sessionActivity(s) {
   if (!s) return "EXITED";
   if (s.active === false) return "EXITED";
+  // Ranked above NEEDS INPUT: an agent stuck retrying a failing call needs
+  // intervention more urgently than one politely waiting, and it will never
+  // reach idle on its own.
+  if (s.errorLoop) return "ERROR LOOP";
   if (s.waitingForInput) return "NEEDS INPUT";
   const quietFor = Date.now() - (s.lastOutputAt || 0);
   if (!s.taskSubmittedAt) return quietFor >= TURN_IDLE_MS ? "IDLE" : "STARTING";
@@ -166,6 +199,10 @@ async function formatSessionStatusOutput(s, statusOverride, opts) {
         (act === "IDLE" ? " — turn complete, idle " + quiet + "s at its prompt (the CLI stays running; that is normal)" : "") +
         (act === "WORKING" ? " — actively producing output" : "") +
         (act === "STARTING" ? " — launched, task not yet under way" : "") + "]";
+      if (act === "ERROR LOOP") {
+        statusLine += "\n[ERROR (seen " + (s.errorCount || 0) + "x): " + (s.lastErrorText || "(see output)") + "]" +
+          "\n[Correct the RUNNING agent with send_to_session — do not replace it.]";
+      }
     }
     const dirLine = "[WORKING DIR: " + (s.cwd || "(unknown)") + "]";
     // Surface a blocked-on-prompt signal so the orchestrator knows the coding
@@ -508,12 +545,13 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "start_cli_session",
-      description: "Ask the user to start a new sub-agent CLI session (ollama launch claude / codex, etc.) in a working directory. The USER decides the CLI and model in a confirmation dialog — call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder.",
+      description: "Ask the user to start a new sub-agent CLI session (ollama launch claude / codex, etc.) in a working directory. The USER decides the CLI and model in a confirmation dialog — call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder. This REFUSES to start a second agent in a directory that already has a live session, because two agents in one working directory clobber each other's edits — correct or close the existing agent instead.",
       parameters: {
         type: "object",
         properties: {
           cwd: { type: "string", description: "Working directory for the session (a project path or a worktree path). Defaults to the active project folder." },
           taskPrompt: { type: "string", description: "Optional initial task to send to the CLI's stdin after it starts." },
+          force: { type: "boolean", description: "Override the refusal to start a second agent in a directory that already has a live session. Almost never correct — prefer send_to_session to correct the running agent, or close_session first." },
         },
       },
     },
@@ -585,6 +623,21 @@ const ORCHESTRATOR_TOOLS = [
       parameters: {
         type: "object",
         properties: { projectId: { type: "string", description: "Optional. Defaults to the active project." } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "close_session",
+      description: "Kill a terminal session and remove its square. This is a LAST RESORT for an agent that is genuinely unusable — it destroys the agent's context and any work it had not written to disk. Before using it, try correcting the agent with send_to_session (a plain-language instruction), and interrupting it with text \"\\x03\" (Ctrl+C) if it is mid-operation. Never close an agent merely because it hit one error.",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "The session to close." },
+          reason: { type: "string", description: "Briefly, why this agent could not be recovered. Shown to the user." },
+        },
+        required: ["sessionId"],
       },
     },
   },
@@ -701,16 +754,34 @@ function parseTerminalEscapes(s) {
 // output so the orchestrator reads readable text instead of escape noise.
 function stripAnsi(s) {
   if (typeof s !== "string") return s;
-  // CSI sequences: ESC [ ... <0x40-0x7E>. NOTE: do NOT consume spaces (0x20)
-  // after the sequence — the previous regex had [ -\/]* which ate the space
-  // between words in TUI output (e.g. "Do you trust the contents" became
-  // "Doyoutrustthecontents"), breaking all regex-based startup detection.
-  s = s.replace(/\x1b\[[0-9;?]*[@-~]/g, "");
-  // OSC sequences: ESC ] ... BEL  or  ESC ] ... ESC \
-  s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
-  // Other 2-char ESC sequences (ESC + one char): ESC ( B, ESC = , etc.
-  s = s.replace(/\x1b[@-_]/g, "");
-  // Remaining stray ESCs and other C0 control chars (except \n, \r, \t) -> drop
+  // Order matters: longest/most-specific sequence forms first, because the
+  // catch-alls at the end would otherwise eat an escape's introducer and leave
+  // its payload behind as literal text.
+  //
+  // 1) CSI: ESC [ params intermediates final. NOTE: do NOT let the intermediate
+  //    class consume the space AFTER a finished sequence — an earlier version's
+  //    [ -\/]* did exactly that and turned "Do you trust the contents" into
+  //    "Doyoutrustthecontents", breaking every startup regex.
+  s = s.replace(/\x1b\[[0-9;:?<>=]*[ -\/]*[@-~]/g, "");
+  // 2) String sequences (OSC / DCS / APC / PM), terminated by BEL or ST. Must run
+  //    before the single-char catch-all, or "ESC ]" gets eaten and the title
+  //    payload is left as visible text.
+  s = s.replace(/\x1b[\]P_^][\s\S]*?(?:\x07|\x1b\\)/g, "");
+  // 3) nF escapes that carry an INTERMEDIATE byte: ESC ( B, ESC ) 0, ESC # 8,
+  //    ESC % G. This class was missing, and it caused a nasty cascading failure:
+  //    ESC ( B (select ASCII charset) is emitted constantly by TUIs, and only its
+  //    ESC was being removed — leaving a literal "(B" in everything the
+  //    orchestrator read. A run of them shows up as "(B(B(B", which the
+  //    orchestrator reasonably read as junk keystrokes stuck in the agent's input
+  //    box. It then fought text that did not exist: sent Ctrl+U / Ctrl+C / Esc
+  //    into a perfectly healthy prompt, declared the session unrecoverable, and
+  //    spawned a SECOND agent into the same worktree. Phantom input, real damage.
+  s = s.replace(/\x1b[ -\/][0-~]/g, "");
+  // 4) Any remaining single-char escape: ESC 7 / ESC 8 (save/restore cursor),
+  //    ESC =, ESC >, ESC c (reset), ESC M. Previously only ESC @-_ was handled,
+  //    so ESC 7 left a stray "7" and ESC c a stray "c" in the text.
+  s = s.replace(/\x1b[0-~]/g, "");
+  // 5) Remaining stray ESCs and other C0 control chars (except \n, \r, \t) -> drop
   s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
   // Collapse runs of spaces that were separated by (now-removed) ANSI codes
   // down to a single space, so "Do  you  trust" -> "Do you trust", which is what
@@ -1226,6 +1297,16 @@ async function toolHandler(name, args) {
         saveWorktrees();
         return "Merged branch " + branch + " into " + parentBranch + " successfully. Worktree cleaned up.\n" + mergeOut;
       }
+      case "close_session": {
+        const s = args.sessionId ? sessions.get(args.sessionId) : null;
+        if (!s) return "Error: no such session " + (args.sessionId || "(none given)") + ". Call list_sessions to see what exists.";
+        const label = s.label || s.id;
+        const wasCwd = s.cwd || "(unknown)";
+        await closeSession(s.id);
+        return "Closed session " + args.sessionId + " (" + label + ") in " + wasCwd + "." +
+          (args.reason ? " Reason recorded: " + args.reason : "") +
+          " Its context and any unsaved work are gone. If that worktree still needs work, you may now start a fresh agent in it.";
+      }
       case "list_worktrees": {
         if (!worktreeMeta.size) return "No open worktrees. Create one with create_worktree before spawning a coding agent.";
         const lines = [...worktreeMeta.entries()].map(([branch, m]) =>
@@ -1240,6 +1321,31 @@ async function toolHandler(name, args) {
         if (!cwd) {
           const p = resolveProject(args);
           cwd = p ? p.folderPath : "";
+        }
+        // REFUSE a second agent in a directory that already has a live one.
+        // Worktree isolation exists so parallel agents can't edit the same files;
+        // two agents inside the SAME worktree defeats it entirely. This happened
+        // for real: an agent hit a provider error, the orchestrator judged it
+        // unrecoverable, and spawned a second agent into the same worktree
+        // alongside it — both then editing the same file.
+        if (cwd && !args.force) {
+          const norm = (p) => String(p || "").replace(/\/+$/, "");
+          const existing = [...sessions.values()].find(
+            (s) => s.active !== false && norm(s.cwd) === norm(cwd)
+          );
+          if (existing) {
+            const act = sessionActivity(existing);
+            return "Refused: session " + existing.id + " (" + (existing.label || existing.id) +
+              ") is ALREADY running in " + cwd + " — status " + act + ".\n\n" +
+              "Two agents in one working directory edit the same files and will clobber each other.\n" +
+              "Do this instead:\n" +
+              "  • To give that agent new or corrected instructions: send_to_session({ sessionId: \"" + existing.id + "\", text: \"<instruction>\\r\" }). This keeps its context and its work in progress.\n" +
+              "  • If it is stuck retrying an error, tell it plainly what to do differently" +
+              (existing.lastErrorText ? " — its last error was: " + existing.lastErrorText : "") + ".\n" +
+              "  • To interrupt a runaway operation first: send_to_session({ sessionId: \"" + existing.id + "\", text: \"\\x03\" }), then send your instruction.\n" +
+              "  • Only if the agent is genuinely unusable: close_session({ sessionId: \"" + existing.id + "\" }) and THEN start a replacement.\n" +
+              "  • For a genuinely separate subtask, create_worktree first and pass that new worktreePath as cwd.";
+          }
         }
         const choice = await openSpawnModal({
           source: "tool",
@@ -1291,6 +1397,13 @@ async function toolHandler(name, args) {
           // redraw, so re-arming the same key would re-flag the question we just
           // answered — an answer/flag loop. A genuinely NEW question has
           // different text and will still be detected.
+          // The orchestrator just intervened, so clear the error latch and give
+          // the correction a chance to take effect before we call it stuck again.
+          if (s.errorLoop) {
+            s.errorLoop = false;
+            s.errorCount = 0;
+            s.lastErrorText = "";
+          }
           if (s.waitingForInput || s.pendingQuestion) {
             s.waitingForInput = false;
             s.pendingQuestion = "";
@@ -1333,6 +1446,9 @@ async function toolHandler(name, args) {
           let q = "";
           if (act === "NEEDS INPUT" && s.pendingQuestion && !/^\(agent appears idle/.test(s.pendingQuestion)) {
             q = " | Q: " + s.pendingQuestion.split("\n")[0].slice(0, 100);
+          } else if (act === "ERROR LOOP") {
+            statusPart = "ERROR LOOP (" + (s.errorCount || 0) + "x) — correct it with send_to_session, do not replace it";
+            q = " | ERROR: " + String(s.lastErrorText || "").slice(0, 120);
           }
           return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + q + " | " + (s.cwd || "(unknown)");
         });
@@ -1370,6 +1486,10 @@ async function toolHandler(name, args) {
           if (s.active === false) return "EXITED";
           if (waitFor === "exit") return null;
           const act = sessionActivity(s);
+          // An error loop must break the wait. A retrying agent keeps producing
+          // output, so it reads as WORKING indefinitely and this call would
+          // otherwise run to its full timeout while nothing progressed.
+          if (act === "ERROR LOOP") return "ERROR LOOP";
           if (act === "IDLE" || act === "NEEDS INPUT") return act;
           if (act === "STARTING" && Date.now() > stallDeadline) return "STALLED";
           return null;
@@ -1394,6 +1514,14 @@ async function toolHandler(name, args) {
             "[SESSION: " + (s.label || s.id) + " | STATUS: RUNNING | AGENT TURN COMPLETE — it has been idle at its input prompt for " +
             Math.round((Date.now() - (s.lastOutputAt || Date.now())) / 1000) + "s]\n" +
             "[NOTE: the CLI is still running (that is normal — it is a REPL and will not exit). Read the output below to confirm the subtask is done, then merge its worktree. To give it more work, use send_to_session.]"
+          );
+        }
+        if (reason === "ERROR LOOP") {
+          return await formatSessionStatusOutput(
+            s,
+            "[SESSION: " + (s.label || s.id) + " | STATUS: STUCK ON A REPEATING ERROR (" + (s.errorCount || 0) + "x)]\n" +
+            "[ERROR: " + (s.lastErrorText || "(see output)") + "]\n" +
+            "[WHAT TO DO: this agent is retrying something that will keep failing. TALK TO IT — call send_to_session({ sessionId: \"" + s.id + "\", text: \"<a plain-language correction>\\r\" }) telling it what to do differently. For example, if the error is about image input, tell it that its model cannot read images and it should work from the code instead. Do NOT close this session and do NOT start a second agent in the same worktree — correcting the running agent keeps its context and its work.]"
           );
         }
         if (reason === "NEEDS INPUT") return await formatSessionStatusOutput(s);
@@ -3360,6 +3488,27 @@ async function buildSystemPrompt() {
     "  • Read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete (if a card exists for it).",
     "",
     "═══════════════════════════════════════════════════════════════",
+    "WHEN AN AGENT GETS STUCK — TALK TO IT, DON'T REPLACE IT",
+    "═══════════════════════════════════════════════════════════════",
+    "",
+    "A running agent holds context you cannot recover: everything it has read, the plan it made, and any edits it has not yet written to disk. Replacing it throws all of that away and starts from zero. So a stuck agent is a CONVERSATION problem first, not a lifecycle problem. Work down this ladder IN ORDER and do not skip steps:",
+    "",
+    "  1. UNDERSTAND the failure. Read its output. If the app reports STATUS: ERROR LOOP, the exact error text is in the header — that is what you must address.",
+    "  2. CORRECT IT IN PLAIN LANGUAGE with send_to_session({ sessionId, text: \"<instruction>\\r\" }). Tell it what to do differently, as you would tell a colleague. Examples:",
+    "       • 'API Error: this model does not support image input' → \"Your model cannot read images. Do not open or read any image files. Work from the source code and the text descriptions instead.\"",
+    "       • context/token limit → \"You are running out of context. Stop exploring, summarise what you have learned, and make the edits now.\"",
+    "       • rate limit / 429 / overloaded → \"Wait a few seconds and retry that request once, then continue.\"",
+    "       • it is looping on the same action → \"Stop repeating that step. It is failing and will keep failing. Skip it and continue with the rest of the task.\"",
+    "  3. INTERRUPT then correct, if it is mid-operation and not reading you: send_to_session({ sessionId, text: \"\\x03\" }) (Ctrl+C), wait a moment, THEN send the instruction from step 2.",
+    "  4. ONLY IF IT IS GENUINELY UNUSABLE after steps 2 and 3: close_session({ sessionId, reason }) and start a fresh agent in the SAME worktree (its committed and on-disk work is still there).",
+    "",
+    "Hard rules:",
+    "  • NEVER start a second agent in a worktree that already has a live session. Two agents in one directory edit the same files and clobber each other — that is exactly what worktree isolation exists to prevent. start_cli_session will refuse, and the refusal message tells you the session id to talk to instead.",
+    "  • One error is not a reason to replace an agent. Even several errors are not, if you have not yet told it what to do differently.",
+    "  • Do NOT try to 'clear junk' out of an agent's input box by sending arrow keys, Escape, or repeated control characters. If the screen looks garbled, send Ctrl+C once and then a clear instruction. Blind keystroking makes the real state worse.",
+    "  • If you cannot get an agent working after the ladder above, STOP and tell the user what the error was and what you tried. Do not keep spawning agents.",
+    "",
+    "═══════════════════════════════════════════════════════════════",
     "CONFLICT AWARENESS",
     "═══════════════════════════════════════════════════════════════",
     "",
@@ -3415,10 +3564,16 @@ async function buildSystemPrompt() {
       } else if (act === "IDLE") {
         const quiet = Math.round((Date.now() - (s.lastOutputAt || Date.now())) / 1000);
         status = "IDLE — finished its turn, quiet " + quiet + "s at its prompt";
+      } else if (act === "ERROR LOOP") {
+        status = "ERROR LOOP — retrying a failing call, needs a correction from you";
       }
       sys.push("", "── [" + s.id + "] " + (s.label || s.id) + " | " + status + " | cwd " + (s.cwd || "(unknown)"));
       if (act === "NEEDS INPUT" && s.pendingQuestion) {
         sys.push("   BLOCKED, asking: " + s.pendingQuestion.split("\n")[0].slice(0, 200));
+      }
+      if (act === "ERROR LOOP") {
+        sys.push("   STUCK RETRYING AN ERROR (" + (s.errorCount || 0) + "x): " + String(s.lastErrorText || "").slice(0, 200));
+        sys.push("   → Send this agent a plain-language correction with send_to_session. Do NOT close it and do NOT start another agent in its worktree.");
       }
       // Tail of the screen, kept short so several sessions stay affordable.
       let tail = "";
@@ -3898,7 +4053,8 @@ async function registerSession(session, cmd, args, cwd, label) {
     // CLI is a REPL: it does NOT exit when the task is done, so process exit is
     // useless as a completion signal (waiting for it was why monitoring felt
     // dead for minutes at a time).
-    lastOutputAt: Date.now(), taskSubmittedAt: 0, bytesSinceTask: 0, tailAtPrompt: false };
+    lastOutputAt: Date.now(), taskSubmittedAt: 0, bytesSinceTask: 0, tailAtPrompt: false,
+    lastErrorText: "", errorCount: 0, lastErrorAt: 0, errorLoop: false };
   sessions.set(session.id, rec);
 
   // autoDriveStartup calls this right after it sends the task, so idle detection
@@ -4062,6 +4218,40 @@ async function registerSession(session, cmd, args, cwd, label) {
         // keyboard until the user answers the trust picker.
         const trustPending = rec.trustMode !== "always" &&
           (rec.trustState === "pending" || rec.trustState === "asking");
+
+        // 0) Record agent/provider errors. Passive — this never touches the PTY,
+        //    it just makes the failure visible to the orchestrator as a state
+        //    instead of leaving it to notice error text in a screen dump.
+        const errLine = detectAgentError(tailText);
+        if (errLine) {
+          if (errLine === rec.lastErrorText) {
+            rec.errorCount = (rec.errorCount || 1) + 1;
+          } else {
+            rec.lastErrorText = errLine;
+            rec.errorCount = 1;
+          }
+          rec.lastErrorAt = now;
+          const looping = rec.errorCount >= ERROR_LOOP_THRESHOLD;
+          if (looping && !rec.errorLoop) {
+            rec.errorLoop = true;
+            renderTabs();
+            renderSessionInfo();
+            try {
+              window.chatoss.notifications.send({
+                title: "Agent stuck on an error",
+                body: (rec.label || "Agent") + ": " + errLine.slice(0, 120),
+              });
+            } catch (e) { /* non-fatal */ }
+          }
+        } else if (rec.errorLoop && now - (rec.lastErrorAt || 0) > 20000) {
+          // Twenty seconds of error-free output means it recovered (or was
+          // corrected) — stop reporting it as stuck.
+          rec.errorLoop = false;
+          rec.lastErrorText = "";
+          rec.errorCount = 0;
+          renderTabs();
+          renderSessionInfo();
+        }
 
         // 1) Orchestrator-input marker — the agent is asking us a question.
         //    Deduped by question text rather than by latching autoApproveBusy, so
