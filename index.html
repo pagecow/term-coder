@@ -120,11 +120,35 @@
         <div class="term-title-left">
           <span class="pane-label">Sessions</span>
           <span id="term-count" class="term-count">0</span>
+          <button id="new-session-btn-2" class="btn btn-ghost btn-small" type="button" title="Start a new session">+ New</button>
         </div>
-        <button id="new-session-btn-2" class="btn btn-ghost btn-small" type="button" title="Start a new session">+ New</button>
+        <div id="term-view-switcher" class="term-view-switcher" role="group" aria-label="Terminal sessions view mode">
+          <button class="term-view-btn active" type="button" data-view="squares" title="Squares view" aria-label="Squares view" aria-pressed="true">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/>
+              <rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/>
+              <rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/>
+              <rect x="9" y="9" width="5.5" height="5.5" rx="1"/>
+            </svg>
+          </button>
+          <button class="term-view-btn" type="button" data-view="columns" title="Columns view" aria-label="Columns view" aria-pressed="false">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="1.5" y="1.5" width="3.2" height="13" rx="1"/>
+              <rect x="6.4" y="1.5" width="3.2" height="13" rx="1"/>
+              <rect x="11.3" y="1.5" width="3.2" height="13" rx="1"/>
+            </svg>
+          </button>
+          <button class="term-view-btn" type="button" data-view="rows" title="Rows view" aria-label="Rows view" aria-pressed="false">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="1.5" y="1.5" width="13" height="3.2" rx="1"/>
+              <rect x="1.5" y="6.4" width="13" height="3.2" rx="1"/>
+              <rect x="1.5" y="11.3" width="13" height="3.2" rx="1"/>
+            </svg>
+          </button>
+        </div>
       </header>
 
-      <div id="term-grid" class="term-grid">
+      <div id="term-grid" class="term-grid view-squares">
         <div class="term-empty" id="term-empty">
           <div class="term-empty-glyph">❯</div>
           <p>No active sessions</p>

@@ -34,6 +34,7 @@ let state = {
   activeProjectId: null,
   activeConversationId: null,
   activeSessionId: null,
+  termView: "squares", // "squares" | "columns" | "rows" — layout of the sessions panel
 };
 let settings = {
   cliDefault: "ask",       // 'ask' | 'ollama' | 'codex' | 'claude'
@@ -527,6 +528,7 @@ const el = {
   termCount: $("term-count"),
   termGrid: $("term-grid"),
   termEmpty: $("term-empty"),
+  termViewSwitcher: $("term-view-switcher"),
   // spawn modal
   spawnModal: $("spawn-modal"),
   spawnCli: $("spawn-cli"),
@@ -4317,6 +4319,33 @@ function ensureEmptyHint() {
   if (el.termCount) el.termCount.textContent = String(total);
 }
 
+// Switch the terminal sessions panel between the three layout modes
+// ("squares" | "columns" | "rows"). This only changes the CONTAINER layout
+// (CSS class on the grid) — the live xterm mounts are NOT recreated, so their
+// content/state is preserved. Each mount's ResizeObserver refits the PTY to
+// its new box automatically after the relayout.
+function setTermView(view) {
+  if (view !== "squares" && view !== "columns" && view !== "rows") view = "squares";
+  state.termView = view;
+  saveState();
+  // Swap the grid's layout class.
+  el.termGrid.classList.remove("view-squares", "view-columns", "view-rows");
+  el.termGrid.classList.add("view-" + view);
+  // Update the active/aria-pressed state of the switcher buttons.
+  if (el.termViewSwitcher) {
+    for (const btn of el.termViewSwitcher.querySelectorAll(".term-view-btn")) {
+      const isActive = btn.dataset.view === view;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+    }
+  }
+  // The container dimensions changed — give the layout a frame to settle, then
+  // refit every live terminal to its new box. Dead (ended) cards have no PTY.
+  requestAnimationFrame(() => {
+    for (const rec of sessions.values()) fitTerminal(rec);
+  });
+}
+
 function renderTabs() {
   // Grid layout — no tab bar. Keep the active square visually marked and the
   // count badge in sync. (Name kept so existing call sites don't change.)
@@ -5113,7 +5142,7 @@ async function init() {
   // restore state + settings
   try {
     const saved = await window.chatoss.scopedData.get(STORE_KEY);
-    if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null }, saved);
+    if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null, termView: "squares" }, saved);
   } catch (e) { console.warn("restore state", e); }
   try {
     const savedSettings = await window.chatoss.scopedData.get(SETTINGS_KEY);
@@ -5257,6 +5286,17 @@ async function init() {
   el.newSessionBtn.addEventListener("click", openManualSpawn);
   if (el.newSessionBtn2) el.newSessionBtn2.addEventListener("click", openManualSpawn);
 
+  // right column — view-mode switcher (squares / columns / rows)
+  if (el.termViewSwitcher) {
+    el.termViewSwitcher.addEventListener("click", (e) => {
+      const btn = e.target.closest && e.target.closest(".term-view-btn");
+      if (!btn) return;
+      const view = btn.dataset.view;
+      if (!view || view === state.termView) return;
+      setTermView(view);
+    });
+  }
+
   // spawn modal
   el.spawnCli.addEventListener("change", syncSpawnModelRow);
   el.spawnStart.addEventListener("click", onSpawnStart);
@@ -5362,6 +5402,8 @@ async function init() {
     for (const snap of snaps) renderDeadSessionCard(snap);
   }
   ensureEmptyHint();
+  // Apply the saved view mode (defaults to "squares") to the grid + switcher.
+  setTermView(state.termView || "squares");
   renderTabs();
 
   // hide loading
