@@ -313,7 +313,6 @@ const el = {
   setCwd: $("set-cwd"),
   settingsSave: $("settings-save"),
   settingsCancel: $("settings-cancel"),
-  settingsCloseX: $("settings-close-x"),
   detectedList: $("detected-list"),
   rescanBtn: $("rescan-btn"),
   // model selection mode
@@ -4945,7 +4944,6 @@ async function init() {
   el.setCli.addEventListener("change", syncSettingsModelRow);
   el.settingsSave.addEventListener("click", saveSettingsFromPanel);
   el.settingsCancel.addEventListener("click", () => el.settingsPanel.classList.add("hidden"));
-  el.settingsCloseX.addEventListener("click", () => el.settingsPanel.classList.add("hidden"));
 
   // Model Selection Mode — radios toggle pickers live + persist immediately.
   el.modelModeRadios.addEventListener("change", (e) => {
