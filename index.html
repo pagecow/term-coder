@@ -235,7 +235,7 @@
         <button id="spawn-cancel-x" class="icon-button" type="button" title="Cancel" aria-label="Cancel">&times;</button>
       </header>
       <div class="modal-body">
-        <p class="modal-hint">Launch a coding agent in its own terminal. It picks its model after it starts.</p>
+        <p class="modal-hint">Launch a coding agent in its own terminal. After you click Start, pick a launch target — claude / codex directly, or an ollama model.</p>
         <label class="form-row">
           <span class="form-label">Agent</span>
           <select id="spawn-cli" class="form-input"></select>
@@ -312,20 +312,20 @@
           <input id="set-cwd" class="form-input" type="text" placeholder="Blank = ask" />
         </label>
         <h3 class="settings-section-title">Model Selection Mode</h3>
-        <p class="modal-hint">Choose how sub-agent sessions pick their model. Models are auto-detected from <code>ollama list</code>.</p>
+        <p class="modal-hint">Choose how sub-agent sessions pick their launch target. Options include the direct <code>claude</code> / <code>codex</code> CLIs (when installed) and ollama models from <code>ollama list</code>.</p>
         <div class="model-mode-radios" id="model-mode-radios">
-          <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the model each time a session starts</span></label>
-          <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific model</span><span class="radio-sub">Use one fixed model for every session</span></label>
-          <label class="radio-row"><input type="radio" name="model-mode" value="complexity" /><span class="radio-label">Select by complexity</span><span class="radio-sub">Assign a model to each level (low / medium / high)</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the target each time a session starts</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific target</span><span class="radio-sub">Use one fixed target for every session</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="complexity" /><span class="radio-label">Select by complexity</span><span class="radio-sub">Assign a target to each level (low / medium / high)</span></label>
         </div>
 
         <div class="model-mode-panel" id="model-mode-manual">
-          <p class="modal-hint">You'll be asked to pick a model each time a session starts.</p>
+          <p class="modal-hint">You'll be asked to pick a launch target (claude / codex direct, or an ollama model) each time a session starts.</p>
         </div>
 
         <div class="model-mode-panel hidden" id="model-mode-always">
           <label class="form-row">
-            <span class="form-label">Model</span>
+            <span class="form-label">Target</span>
             <select id="always-model" class="form-input"></select>
           </label>
         </div>
