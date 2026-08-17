@@ -3580,7 +3580,27 @@ function deleteProject(p) {
   renderChat();
   renderSessionInfo();
 }
+// Derive a short conversation name from the first user message: the first
+// ~40–60 characters, cut cleanly at a word boundary with a trailing "…" when
+// the message is longer than that. Returns fallback when text is empty, so a
+// brand-new conversation keeps its "Conversation N" placeholder until the user
+// actually sends something.
+function nameFromFirstMessage(text, fallback) {
+  const s = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+  if (!s) return fallback;
+  const MAX = 60, MIN = 40;
+  if (s.length <= MAX) return s;
+  let cut = s.slice(0, MAX);
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace >= MIN) cut = cut.slice(0, lastSpace);
+  else if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+  cut = cut.replace(/[\s.,;:!?"')\]]+$/, "");
+  return cut ? cut + "…" : fallback;
+}
+
 function newConversation(p) {
+  // Start with the "Conversation N" placeholder; the real name is filled in
+  // from the user's first message in sendMessage (see nameFromFirstMessage).
   const c = { id: uuid(), name: "Conversation " + (p.conversations.length + 1), messages: [], modelId: null, effort: null, boardId: null };
   p.conversations.push(c);
   state.activeProjectId = p.id;
@@ -4686,8 +4706,19 @@ async function sendMessage(textOverride, opts) {
 
   const userMsg = { role: "user", content: text };
   if (o.event) userMsg.event = true;
+  // Name the conversation from the user's first real (non-event) message,
+  // replacing the "Conversation N" placeholder — but only if the user hasn't
+  // already renamed it by hand. This covers every conversation regardless of
+  // how it was created, since all user messages enter through sendMessage.
+  const wasFirstUserMsg = !c.messages.some((m) => m.role === "user" && !m.event);
+  let renamedConv = false;
+  if (wasFirstUserMsg && !o.event && /^Conversation \d+$/.test(c.name)) {
+    c.name = nameFromFirstMessage(text, c.name);
+    renamedConv = true;
+  }
   c.messages.push(userMsg);
   saveState();
+  if (renamedConv) { renderProjects(); renderSessionInfo(); }
   renderMessage(userMsg);
   scrollChatBottom(false);
   updateChatEmpty();
