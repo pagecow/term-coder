@@ -260,18 +260,23 @@ function saveWorktrees() {
   try {
     const arr = [...worktreeMeta.entries()].map(([branch, m]) => Object.assign({ branch }, m));
     window.chatoss.scopedData.set(WORKTREES_KEY, arr).catch((e) => console.warn("saveWorktrees", e));
+    // Mirror into SQLite so worktrees survive even if scopedData is lost.
+    sqliteSyncWorktrees(arr);
   } catch (e) { console.warn("saveWorktrees", e); }
 }
 async function loadWorktrees() {
   try {
     const arr = await window.chatoss.scopedData.get(WORKTREES_KEY);
-    if (!Array.isArray(arr)) return;
-    for (const m of arr) {
-      if (m && m.branch) {
-        worktreeMeta.set(m.branch, { wtPath: m.wtPath, parentBranch: m.parentBranch, projectPath: m.projectPath });
+    if (Array.isArray(arr)) {
+      for (const m of arr) {
+        if (m && m.branch) {
+          worktreeMeta.set(m.branch, { wtPath: m.wtPath, parentBranch: m.parentBranch, projectPath: m.projectPath });
+        }
       }
     }
   } catch (e) { console.warn("loadWorktrees", e); }
+  // Merge in any worktrees recorded in SQLite but missing from scopedData.
+  await sqliteHydrateWorktrees();
 }
 
 // Derive the worktree branch a session's cwd belongs to. Worktrees created by
@@ -365,6 +370,9 @@ async function persistSessions() {
     const deadSnaps = [...deadSessions.values()];
     // Live ones first (most recent activity on top), then dead ones, newest first.
     const all = liveSnaps.concat(deadSnaps);
+    // Mirror into the SQLite metadata table (History browser) alongside the
+    // scopedData blob. The OS terminal store is the real durable record.
+    sqliteSyncTerminalSessions(all);
     await window.chatoss.scopedData.set(SESSIONS_KEY, all);
   } catch (e) { console.warn("persistSessions", e); }
 }
@@ -487,7 +495,681 @@ async function dismissDeadSession(id) {
   ensureEmptyHint();
   renderTabs();
   renderSessionInfo();
+  // Also delete the OS-persisted record + SQLite metadata row.
+  try { await window.chatoss.terminal.killSession(id); } catch (e) { /* non-fatal */ }
+  await sqliteDeleteTerminalSession(id);
   await persistSessions();
+}
+
+// ============================================================
+// === SQLite persistence layer ===
+// ============================================================
+// Conversation + terminal history used to live ONLY in scopedData, which was
+// lost when an orchestration session finished — the user had no way to check
+// on past work. This layer makes history durable the new way:
+//
+//   • Conversations, messages and tool calls are mirrored into the app's
+//     PRIVATE SQLite database (capability "sqlite" — no prompt, persists
+//     across restarts). saveState() schedules a debounced full sync, and
+//     hydrateFromSqlite() restores them at load, so history survives even if
+//     the scopedData blob is lost or reset.
+//   • Terminal sessions are persisted BY THE OS now (they survive window close
+//     and a full app restart). loadPlatformSessions() merges
+//     terminal.listSessions() into the Sessions column — reattaching still-live
+//     processes with reattachSession() and showing ended ones as read-only
+//     cards whose output comes from attachSession(). killSession() is the
+//     cleanup path.
+//   • The History browser (top-bar "History" button) lets the user reopen a
+//     past conversation or review/reconnect/delete a past terminal session.
+//
+// NOTE: this section is deliberately self-contained. Other code only calls
+// into it through the small hooks listed at the bottom of this comment block:
+//   saveState()            -> scheduleSqliteSync()
+//   persistSessions()      -> sqliteSyncTerminalSessions(all)
+//   saveWorktrees()        -> sqliteSyncWorktrees(arr)
+//   loadWorktrees()        -> sqliteHydrateWorktrees()
+//   dismissDeadSession()   -> sqliteDeleteTerminalSession(id) + killSession
+//   closeSession()         -> sqliteDeleteTerminalSession(id) + killSession
+//   deleteConversation()   -> sqliteDeleteConversation(c.id)
+//   deleteProject()        -> sqliteDeleteProject(p.id)
+//   sendMessage.onToolCall -> sqlitePersistToolCall(c.id, entry)
+//   init()                 -> hydrateFromSqlite(), loadPlatformSessions(),
+//                             initHistoryBrowser()
+
+const SQLITE_DB = "termcoder";
+let sqliteReady = false;
+let sqliteInitPromise = null;
+
+// Open the private DB and create the schema (idempotent). Returns true when
+// the DB is usable; every helper below gates on this.
+async function sqliteInit() {
+  if (sqliteReady) return true;
+  if (sqliteInitPromise) return sqliteInitPromise;
+  sqliteInitPromise = (async () => {
+    let step = "open";
+    try {
+      if (!window.chatoss || !window.chatoss.db) return false;
+      const name = await window.chatoss.db.open(SQLITE_DB);
+      if (!name) return false;
+      step = "schema";
+      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT, folder_path TEXT, created_at INTEGER)");
+      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, created_at INTEGER)");
+      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, thinking TEXT, tool_calls TEXT, seq INTEGER, created_at INTEGER)");
+      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS tool_calls (id TEXT PRIMARY KEY, conversation_id TEXT, tool TEXT, args TEXT, result TEXT, created_at INTEGER)");
+      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS terminal_sessions (id TEXT PRIMARY KEY, command TEXT, cwd TEXT, label TEXT, agent TEXT, worktree_branch TEXT, status TEXT, exit_code INTEGER, created_at INTEGER, last_active INTEGER, live INTEGER, merged INTEGER, output TEXT)");
+      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS worktrees (branch TEXT PRIMARY KEY, wt_path TEXT, parent_branch TEXT, project_path TEXT, created_at INTEGER)");
+      sqliteReady = true;
+      return true;
+    } catch (e) {
+      console.warn("sqliteInit failed at step", step, ":", e && e.message ? e.message : String(e));
+      return false;
+    }
+  })();
+  return sqliteInitPromise;
+}
+
+// ---------- Conversations / messages / tool calls ----------
+
+// Debounced full mirror of state.projects -> conversations -> messages into
+// SQLite. saveState() calls scheduleSqliteSync(), so every message push (user,
+// assistant, system) and every rename lands here within ~700ms. The sync is a
+// full rewrite per conversation (delete + reinsert messages) — simple and
+// correct; message ids are deterministic ("<convId>:<index>") so re-syncs are
+// stable. Tool calls are upserted by id and never bulk-deleted here, so a
+// mid-turn write (see sqlitePersistToolCall) survives a sync that runs before
+// the assistant message is stored.
+let _sqliteSyncTimer = null;
+function scheduleSqliteSync() {
+  if (_sqliteSyncTimer) return;
+  _sqliteSyncTimer = setTimeout(() => {
+    _sqliteSyncTimer = null;
+    syncConversationsToSqlite().catch((e) => console.warn("scheduleSqliteSync", e));
+  }, 700);
+}
+
+async function syncConversationsToSqlite() {
+  if (!(await sqliteInit())) return;
+  try {
+    const db = SQLITE_DB;
+    const projects = Array.isArray(state.projects) ? state.projects : [];
+    for (const p of projects) {
+      await window.chatoss.db.exec(db,
+        "INSERT OR REPLACE INTO projects (id, name, folder_path, created_at) VALUES (?, ?, ?, ?)",
+        [p.id, p.name || "", p.folderPath || "", p.createdAt || Date.now()]);
+      for (const c of (p.conversations || [])) {
+        await window.chatoss.db.exec(db,
+          "INSERT OR REPLACE INTO conversations (id, project_id, title, created_at) VALUES (?, ?, ?, ?)",
+          [c.id, p.id, c.name || c.id, c.createdAt || Date.now()]);
+        await window.chatoss.db.exec(db, "DELETE FROM messages WHERE conversation_id = ?", [c.id]);
+        const baseTs = c.createdAt || Date.now();
+        let idx = 0;
+        for (const m of (c.messages || [])) {
+          const mid = c.id + ":" + idx;
+          await window.chatoss.db.exec(db,
+            "INSERT INTO messages (id, conversation_id, role, content, thinking, tool_calls, seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [mid, c.id, m.role || "system", m.content || "",
+             m.thinking || null,
+             (m.toolCalls && m.toolCalls.length) ? JSON.stringify(m.toolCalls) : null,
+             idx, baseTs + idx]);
+          if (m.toolCalls && m.toolCalls.length) {
+            for (const tc of m.toolCalls) {
+              await window.chatoss.db.exec(db,
+                "INSERT OR REPLACE INTO tool_calls (id, conversation_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                [tc.id || uuid(), c.id, tc.name || "unknown",
+                 JSON.stringify(tc.args || {}),
+                 tc.error ? ("Error: " + tc.error) : (tc.result != null ? String(tc.result) : null),
+                 tc.createdAt || Date.now()]);
+            }
+          }
+          idx++;
+        }
+      }
+    }
+  } catch (e) { console.warn("syncConversationsToSqlite", e); }
+}
+
+// Write one tool call as it happens (mid-turn). Upsert by id so the result
+// update later in the same turn replaces the pending row.
+async function sqlitePersistToolCall(conversationId, tc) {
+  if (!(await sqliteInit())) return;
+  try {
+    await window.chatoss.db.exec(SQLITE_DB,
+      "INSERT OR REPLACE INTO tool_calls (id, conversation_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [tc.id || uuid(), conversationId, tc.name || "unknown",
+       JSON.stringify(tc.args || {}),
+       tc.error ? ("Error: " + tc.error) : (tc.result != null ? String(tc.result) : null),
+       tc.createdAt || Date.now()]);
+  } catch (e) { console.warn("sqlitePersistToolCall", e); }
+}
+
+async function sqliteDeleteConversation(cid) {
+  if (!(await sqliteInit())) return;
+  try {
+    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM messages WHERE conversation_id = ?", [cid]);
+    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM tool_calls WHERE conversation_id = ?", [cid]);
+    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM conversations WHERE id = ?", [cid]);
+  } catch (e) { console.warn("sqliteDeleteConversation", e); }
+}
+
+async function sqliteDeleteProject(pid) {
+  if (!(await sqliteInit())) return;
+  try {
+    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT id FROM conversations WHERE project_id = ?", [pid]);
+    for (const r of rows) await sqliteDeleteConversation(r.id);
+    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM projects WHERE id = ?", [pid]);
+  } catch (e) { console.warn("sqliteDeleteProject", e); }
+}
+
+// Restore projects/conversations/messages from SQLite at load. SQLite is the
+// authoritative history store: scopedData may be stale or lost after an
+// orchestration session. Merge rules:
+//   • Projects missing from state are recreated (folderPath comes from the
+//     projects table, so a lost scopedData blob still restores fully).
+//   • A conversation missing from state is recreated with its SQLite messages.
+//   • A conversation present in state keeps its (possibly newer) name, and its
+//     messages become the SQLite ones — plus any in-memory tail that has not
+//     been synced yet (state longer than SQLite).
+async function hydrateFromSqlite() {
+  if (!(await sqliteInit())) return;
+  try {
+    const db = SQLITE_DB;
+    const prows = await window.chatoss.db.query(db, "SELECT * FROM projects ORDER BY created_at ASC");
+    for (const pr of prows) {
+      if (!state.projects.some((p) => p.id === pr.id)) {
+        state.projects.push({
+          id: pr.id,
+          name: pr.name || basename(pr.folder_path),
+          folderPath: pr.folder_path || "",
+          conversations: [],
+        });
+      }
+    }
+    const crows = await window.chatoss.db.query(db, "SELECT * FROM conversations ORDER BY created_at ASC");
+    for (const cr of crows) {
+      const p = state.projects.find((x) => x.id === cr.project_id);
+      if (!p) continue; // orphaned (project deleted) — leave the rows alone
+      const mrows = await window.chatoss.db.query(db,
+        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq ASC", [cr.id]);
+      const sqliteMsgs = mrows.map((mr) => {
+        const m = { role: mr.role || "system", content: mr.content || "" };
+        if (mr.thinking) m.thinking = mr.thinking;
+        if (mr.tool_calls) { try { m.toolCalls = JSON.parse(mr.tool_calls); } catch (e) { /* ignore */ } }
+        return m;
+      });
+      const c = p.conversations.find((x) => x.id === cr.id);
+      if (c) {
+        if (sqliteMsgs.length >= c.messages.length) c.messages = sqliteMsgs;
+        else c.messages = sqliteMsgs.concat(c.messages.slice(sqliteMsgs.length));
+      } else {
+        p.conversations.push({
+          id: cr.id,
+          name: cr.title || ("Conversation " + (p.conversations.length + 1)),
+          messages: sqliteMsgs,
+          modelId: null, effort: null, boardId: null,
+        });
+      }
+    }
+  } catch (e) { console.warn("hydrateFromSqlite", e); }
+}
+
+// ---------- Terminal sessions (SQLite metadata mirror) ----------
+// The OS is the real store (terminal.listSessions / attachSession /
+// reattachSession / killSession). This table only mirrors the app's own
+// metadata (label, agent, worktree branch, merged flag, output tail) so the
+// History browser can show richer rows than the OS list alone.
+
+async function sqliteSyncTerminalSessions(snaps) {
+  if (!(await sqliteInit())) return;
+  try {
+    for (const s of (snaps || [])) {
+      if (!s || !s.id) continue;
+      const live = !(s.status === "exited" || s.status === "ended");
+      await window.chatoss.db.exec(SQLITE_DB,
+        "INSERT OR REPLACE INTO terminal_sessions (id, command, cwd, label, agent, worktree_branch, status, exit_code, created_at, last_active, live, merged, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [s.id, s.agent || s.label || "", s.cwd || "", s.label || s.id, s.agent || "",
+         s.worktreeBranch || null, s.status || "ended",
+         s.exitCode == null ? null : s.exitCode,
+         s.createdAt || Date.now(), s.endedAt || s.createdAt || Date.now(),
+         live ? 1 : 0, s.merged ? 1 : 0, s.output || ""]);
+    }
+  } catch (e) { console.warn("sqliteSyncTerminalSessions", e); }
+}
+
+async function sqliteDeleteTerminalSession(id) {
+  if (!(await sqliteInit())) return;
+  try {
+    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM terminal_sessions WHERE id = ?", [id]);
+  } catch (e) { console.warn("sqliteDeleteTerminalSession", e); }
+}
+
+async function sqliteGetTerminalMeta(id) {
+  if (!(await sqliteInit())) return null;
+  try {
+    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT * FROM terminal_sessions WHERE id = ?", [id]);
+    return rows.length ? rows[0] : null;
+  } catch (e) { return null; }
+}
+
+// Decode the base64 output history attachSession() returns.
+function decodeBase64(b64) {
+  try { return atob(String(b64 || "")); } catch (e) { return ""; }
+}
+
+// Merge the OS-persisted terminal sessions into the app at load. Called from
+// init() AFTER loadPersistedSessions() so scopedData snapshots (which carry
+// the richer label/agent metadata) win for ids they already know.
+//   • live:true  -> reattachSession() and register it as a live square again.
+//   • live:false -> read-only "ended" card with the saved output tail.
+async function loadPlatformSessions() {
+  try {
+    if (!window.chatoss || !window.chatoss.terminal || typeof window.chatoss.terminal.listSessions !== "function") return;
+    const list = await window.chatoss.terminal.listSessions();
+    if (!Array.isArray(list)) return;
+    for (const s of list) {
+      if (!s || !s.id) continue;
+      if (sessions.has(s.id)) continue; // already live this run
+      const prior = deadSessions.get(s.id);
+      if (s.live) {
+        // The process survived the window close — reconnect to it.
+        try {
+          const handle = await window.chatoss.terminal.reattachSession(s.id);
+          if (handle) {
+            const label = (prior && prior.label) || s.command || "session";
+            const cwd = (prior && prior.cwd) || s.cwd || "";
+            await registerSession(handle, s.command || "", [], cwd, label);
+            // The reattached session is live again — drop the stale dead card.
+            if (prior) {
+              deadSessions.delete(s.id);
+              const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(s.id) + '"]');
+              if (card) card.remove();
+            }
+            continue;
+          }
+        } catch (e) { console.warn("loadPlatformSessions reattach", s.id, e); }
+        // Reattach failed (denied or already gone) — leave it to the History
+        // browser, which shows it as LIVE with a Reattach button.
+        continue;
+      }
+      if (deadSessions.has(s.id)) continue;
+      // Ended session — fetch its persisted output for the read-only card.
+      let output = "";
+      try {
+        const attached = await window.chatoss.terminal.attachSession(s.id);
+        if (attached && attached.output) {
+          output = stripAnsi(decodeBase64(attached.output));
+          if (output.length > 6000) output = "…(earlier output trimmed)…\n" + output.slice(-6000);
+        }
+      } catch (e) { /* no output available */ }
+      deadSessions.set(s.id, {
+        id: s.id,
+        label: (prior && prior.label) || s.command || s.id,
+        cwd: (prior && prior.cwd) || s.cwd || "",
+        agent: (prior && prior.agent) || s.command || s.id,
+        worktreeBranch: (prior && prior.worktreeBranch) || worktreeBranchForCwd(s.cwd),
+        status: "ended",
+        exitCode: null,
+        createdAt: s.createdAt || Date.now(),
+        endedAt: s.lastActiveAt || Date.now(),
+        output,
+        merged: !!(prior && prior.merged),
+      });
+    }
+  } catch (e) { console.warn("loadPlatformSessions", e); }
+}
+
+// ---------- Worktrees (SQLite mirror) ----------
+
+async function sqliteSyncWorktrees(arr) {
+  if (!(await sqliteInit())) return;
+  try {
+    const seen = new Set();
+    for (const m of (arr || [])) {
+      if (!m || !m.branch) continue;
+      seen.add(m.branch);
+      await window.chatoss.db.exec(SQLITE_DB,
+        "INSERT OR REPLACE INTO worktrees (branch, wt_path, parent_branch, project_path, created_at) VALUES (?, ?, ?, ?, ?)",
+        [m.branch, m.wtPath || null, m.parentBranch || null, m.projectPath || null, m.createdAt || Date.now()]);
+    }
+    // Mirror worktreeMeta exactly: merged worktrees are deleted from the map
+    // before saveWorktrees() runs, so drop any row that is no longer present.
+    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT branch FROM worktrees");
+    for (const r of rows) {
+      if (!seen.has(r.branch)) await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM worktrees WHERE branch = ?", [r.branch]);
+    }
+  } catch (e) { console.warn("sqliteSyncWorktrees", e); }
+}
+
+async function sqliteHydrateWorktrees() {
+  if (!(await sqliteInit())) return;
+  try {
+    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT * FROM worktrees");
+    for (const r of rows) {
+      if (!r.branch || worktreeMeta.has(r.branch)) continue;
+      worktreeMeta.set(r.branch, { wtPath: r.wt_path, parentBranch: r.parent_branch, projectPath: r.project_path });
+    }
+  } catch (e) { console.warn("sqliteHydrateWorktrees", e); }
+}
+
+// ---------- History browser ----------
+// Top-bar "History" button -> modal with two tabs. Conversations come from the
+// SQLite mirror; terminals come from the OS-persisted session list merged with
+// the app's metadata table and in-memory maps.
+
+let historyTab = "conversations";
+
+function fmtTime(ts) {
+  if (!ts) return "unknown time";
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return "unknown time";
+  const diff = Date.now() - ts;
+  if (diff < 60 * 1000) return "just now";
+  if (diff < 3600 * 1000) return Math.floor(diff / 60000) + "m ago";
+  if (diff < 24 * 3600 * 1000) return Math.floor(diff / 3600000) + "h ago";
+  return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function openHistoryBrowser() {
+  if (!el.historyModal) return;
+  el.historyModal.classList.remove("hidden");
+  renderHistoryBrowser();
+}
+function closeHistoryBrowser() {
+  if (el.historyModal) el.historyModal.classList.add("hidden");
+}
+
+async function renderHistoryBrowser() {
+  const list = el.historyList;
+  if (!list || !el.historyTabs) return;
+  list.innerHTML = "";
+  for (const btn of el.historyTabs.querySelectorAll(".history-tab")) {
+    const active = btn.dataset.tab === historyTab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  }
+  if (historyTab === "conversations") await renderHistoryConversations(list);
+  else await renderHistoryTerminals(list);
+}
+
+async function renderHistoryConversations(list) {
+  if (!(await sqliteInit())) {
+    list.innerHTML = '<div class="history-empty">SQLite storage is unavailable — history cannot be shown.</div>';
+    return;
+  }
+  let rows = [];
+  try {
+    rows = await window.chatoss.db.query(SQLITE_DB,
+      "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count FROM conversations c ORDER BY c.created_at DESC");
+  } catch (e) { console.warn("renderHistoryConversations", e); }
+  if (!rows.length) {
+    list.innerHTML = '<div class="history-empty">No past conversations yet. Chat with the orchestrator and it will be saved here.</div>';
+    return;
+  }
+  for (const r of rows) {
+    const p = state.projects.find((x) => x.id === r.project_id);
+    const item = document.createElement("div");
+    item.className = "history-item";
+    const info = document.createElement("div");
+    info.className = "history-item-info";
+    const title = document.createElement("div");
+    title.className = "history-item-title";
+    title.textContent = r.title || r.id;
+    title.title = r.title || r.id;
+    const meta = document.createElement("div");
+    meta.className = "history-item-meta";
+    meta.textContent = (p ? p.name : "(project removed)") + " · " + (r.msg_count || 0) + " messages · " + fmtTime(r.created_at);
+    info.appendChild(title);
+    info.appendChild(meta);
+    const acts = document.createElement("div");
+    acts.className = "history-item-actions";
+    const openBtn = document.createElement("button");
+    openBtn.className = "btn btn-primary btn-small";
+    openBtn.type = "button";
+    openBtn.textContent = "Open";
+    openBtn.disabled = !p;
+    openBtn.title = p ? "Reopen this conversation in the chat" : "The project for this conversation no longer exists";
+    openBtn.onclick = () => historyReopenConversation(r.id);
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn btn-ghost btn-small";
+    delBtn.type = "button";
+    delBtn.textContent = "Delete";
+    delBtn.title = "Delete this conversation and its messages";
+    delBtn.onclick = () => historyDeleteConversation(r.id);
+    acts.appendChild(openBtn);
+    acts.appendChild(delBtn);
+    item.appendChild(info);
+    item.appendChild(acts);
+    list.appendChild(item);
+  }
+}
+
+function historyReopenConversation(cid) {
+  for (const p of state.projects) {
+    const c = p.conversations.find((x) => x.id === cid);
+    if (c) {
+      state.activeProjectId = p.id;
+      state.activeConversationId = c.id;
+      collapsedProjects.delete(p.id);
+      saveState();
+      closeHistoryBrowser();
+      renderProjects();
+      renderChat();
+      renderSessionInfo();
+      return;
+    }
+  }
+  setStatus("That conversation's project no longer exists.");
+}
+
+async function historyDeleteConversation(cid) {
+  for (const p of state.projects) {
+    const c = p.conversations.find((x) => x.id === cid);
+    if (c) { deleteConversation(p, c); break; }
+  }
+  await sqliteDeleteConversation(cid);
+  renderHistoryBrowser();
+}
+
+async function renderHistoryTerminals(list) {
+  let osSessions = [];
+  try {
+    if (window.chatoss && window.chatoss.terminal && typeof window.chatoss.terminal.listSessions === "function") {
+      const l = await window.chatoss.terminal.listSessions();
+      if (Array.isArray(l)) osSessions = l;
+    }
+  } catch (e) { console.warn("renderHistoryTerminals listSessions", e); }
+  const meta = new Map();
+  if (await sqliteInit()) {
+    try {
+      const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT * FROM terminal_sessions ORDER BY last_active DESC");
+      for (const r of rows) meta.set(r.id, r);
+    } catch (e) { /* ignore */ }
+  }
+  const entries = [];
+  const seen = new Set();
+  for (const s of osSessions) {
+    if (!s || !s.id) continue;
+    seen.add(s.id);
+    const m = meta.get(s.id) || {};
+    entries.push({
+      id: s.id,
+      command: s.command || m.command || "",
+      cwd: s.cwd || m.cwd || "",
+      label: m.label || s.command || s.id,
+      agent: m.agent || s.command || "",
+      worktreeBranch: m.worktree_branch || null,
+      merged: !!m.merged,
+      createdAt: s.createdAt || m.created_at || Date.now(),
+      lastActiveAt: s.lastActiveAt || m.last_active || Date.now(),
+      live: !!s.live,
+    });
+  }
+  // In-memory live sessions not (yet) in the OS list.
+  for (const rec of sessions.values()) {
+    if (seen.has(rec.id)) continue;
+    seen.add(rec.id);
+    entries.push({
+      id: rec.id, command: rec.cmd || "", cwd: rec.cwd || "",
+      label: rec.label || rec.id, agent: rec.agent || "",
+      worktreeBranch: rec.worktreeBranch || null, merged: !!rec.merged,
+      createdAt: rec.createdAt || Date.now(), lastActiveAt: Date.now(), live: true,
+    });
+  }
+  // Dead cards from this run.
+  for (const snap of deadSessions.values()) {
+    if (seen.has(snap.id)) continue;
+    seen.add(snap.id);
+    entries.push({
+      id: snap.id, command: snap.agent || "", cwd: snap.cwd || "",
+      label: snap.label || snap.id, agent: snap.agent || "",
+      worktreeBranch: snap.worktreeBranch || null, merged: !!snap.merged,
+      createdAt: snap.createdAt || Date.now(), lastActiveAt: snap.endedAt || Date.now(), live: false,
+    });
+  }
+  entries.sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+  if (!entries.length) {
+    list.innerHTML = '<div class="history-empty">No terminal sessions yet. Start a session and its history will be kept here.</div>';
+    return;
+  }
+  for (const e of entries) {
+    const item = document.createElement("div");
+    item.className = "history-item";
+    const info = document.createElement("div");
+    info.className = "history-item-info";
+    const title = document.createElement("div");
+    title.className = "history-item-title";
+    title.textContent = e.label;
+    title.title = e.label;
+    const meta = document.createElement("div");
+    meta.className = "history-item-meta";
+    meta.textContent = (e.command ? e.command + " · " : "") +
+      (e.cwd ? basename(e.cwd) : "(no cwd)") + " · " + fmtTime(e.createdAt) +
+      (e.worktreeBranch ? " · branch " + e.worktreeBranch : "") +
+      (e.merged ? " · merged" : "");
+    info.appendChild(title);
+    info.appendChild(meta);
+    const acts = document.createElement("div");
+    acts.className = "history-item-actions";
+    if (e.live) {
+      const liveBadge = document.createElement("span");
+      liveBadge.className = "history-badge history-badge-live";
+      liveBadge.textContent = "LIVE";
+      acts.appendChild(liveBadge);
+      const reBtn = document.createElement("button");
+      reBtn.className = "btn btn-primary btn-small";
+      reBtn.type = "button";
+      reBtn.textContent = "Reattach";
+      reBtn.title = "Reconnect to this still-running session";
+      reBtn.onclick = () => historyReattachTerminal(e.id);
+      acts.appendChild(reBtn);
+    } else {
+      const endedBadge = document.createElement("span");
+      endedBadge.className = "history-badge";
+      endedBadge.textContent = "ended";
+      acts.appendChild(endedBadge);
+    }
+    const viewBtn = document.createElement("button");
+    viewBtn.className = "btn btn-ghost btn-small";
+    viewBtn.type = "button";
+    viewBtn.textContent = "Output";
+    viewBtn.title = "Show the saved terminal output";
+    viewBtn.onclick = () => historyViewTerminal(e.id, item);
+    acts.appendChild(viewBtn);
+    const killBtn = document.createElement("button");
+    killBtn.className = "btn btn-ghost btn-small";
+    killBtn.type = "button";
+    killBtn.textContent = "Delete";
+    killBtn.title = "Kill the process (if live) and delete the saved record";
+    killBtn.onclick = () => historyKillTerminal(e.id);
+    acts.appendChild(killBtn);
+    item.appendChild(info);
+    item.appendChild(acts);
+    list.appendChild(item);
+  }
+}
+
+async function historyViewTerminal(id, item) {
+  const existing = item.querySelector(".history-output");
+  if (existing) { existing.remove(); return; }
+  const out = document.createElement("pre");
+  out.className = "history-output";
+  out.textContent = "Loading saved output…";
+  item.appendChild(out);
+  try {
+    const attached = await window.chatoss.terminal.attachSession(id);
+    if (attached && attached.output) {
+      out.textContent = stripAnsi(decodeBase64(attached.output)) || "(no output)";
+    } else {
+      out.textContent = "(no saved output)";
+    }
+  } catch (e) {
+    out.textContent = "Could not read saved output: " + (e && e.message ? e.message : String(e));
+  }
+}
+
+async function historyReattachTerminal(id) {
+  try {
+    const handle = await window.chatoss.terminal.reattachSession(id);
+    if (!handle) {
+      setStatus("Could not reattach session " + id + " (it may have exited).");
+      renderHistoryBrowser();
+      return;
+    }
+    if (deadSessions.has(id)) {
+      deadSessions.delete(id);
+      const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
+      if (card) card.remove();
+    }
+    const meta = await sqliteGetTerminalMeta(id);
+    const label = (meta && meta.label) || "session";
+    const cwd = (meta && meta.cwd) || "";
+    await registerSession(handle, (meta && meta.command) || "", [], cwd, label);
+    persistSessions().catch(() => { /* non-fatal */ });
+    ensureEmptyHint();
+    renderTabs();
+    renderSessionInfo();
+    closeHistoryBrowser();
+  } catch (e) {
+    setStatus("Reattach failed: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function historyKillTerminal(id) {
+  try {
+    if (window.chatoss && window.chatoss.terminal && typeof window.chatoss.terminal.killSession === "function") {
+      await window.chatoss.terminal.killSession(id);
+    }
+  } catch (e) { console.warn("historyKillTerminal killSession", id, e); }
+  if (sessions.has(id)) { await closeSession(id); }
+  if (deadSessions.has(id)) {
+    deadSessions.delete(id);
+    const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
+    if (card) card.remove();
+    if (state.activeSessionId === id) state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
+    saveState();
+    ensureEmptyHint();
+    renderTabs();
+    renderSessionInfo();
+  }
+  await sqliteDeleteTerminalSession(id);
+  persistSessions().catch(() => { /* non-fatal */ });
+  renderHistoryBrowser();
+}
+
+// Wire the top-bar button, tabs, refresh and close controls. Called once from
+// init(); the modal itself is also added to the shared backdrop/Esc handling.
+function initHistoryBrowser() {
+  if (!el.historyBtn || !el.historyModal) return;
+  el.historyBtn.addEventListener("click", openHistoryBrowser);
+  if (el.historyCloseX) el.historyCloseX.addEventListener("click", closeHistoryBrowser);
+  if (el.historyRefresh) el.historyRefresh.addEventListener("click", () => renderHistoryBrowser());
+  if (el.historyTabs) {
+    el.historyTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest && e.target.closest(".history-tab");
+      if (!btn) return;
+      historyTab = btn.dataset.tab || "conversations";
+      renderHistoryBrowser();
+    });
+  }
 }
 
 // Promise + resolver for the spawn modal wait (set while the modal is open).
@@ -580,6 +1262,13 @@ const el = {
   boardPicker: $("board-picker"),
   boardPickerList: $("board-picker-list"),
   boardPickerX: $("board-picker-x"),
+  // history browser (modal)
+  historyBtn: $("history-btn"),
+  historyModal: $("history-modal"),
+  historyCloseX: $("history-close-x"),
+  historyRefresh: $("history-refresh"),
+  historyTabs: $("history-tabs"),
+  historyList: $("history-list"),
   // user terminal (bottom drawer) — entirely user-driven, separate from the
   // orchestrator's right-side AI sessions. Toggled by sidebar icon / Cmd+J.
   userTermBtn: $("user-term-btn"),
@@ -611,6 +1300,9 @@ function uuid() {
 function saveState() {
   try { window.chatoss.scopedData.set(STORE_KEY, state).catch((e) => console.warn("saveState", e)); }
   catch (e) { console.warn("saveState", e); }
+  // Mirror conversations/messages into the private SQLite DB (debounced) so
+  // history survives even if the scopedData blob is lost after a session.
+  scheduleSqliteSync();
 }
 function saveSettings() {
   try { window.chatoss.scopedData.set(SETTINGS_KEY, settings).catch((e) => console.warn("saveSettings", e)); }
@@ -3380,6 +4072,9 @@ async function newProject() {
 }
 function deleteProject(p) {
   state.projects = state.projects.filter((x) => x.id !== p.id);
+  // Remove the project + its conversations from the SQLite history store so
+  // they don't resurrect on the next hydrateFromSqlite().
+  sqliteDeleteProject(p.id);
   if (state.activeProjectId === p.id) {
     state.activeProjectId = state.projects.length ? state.projects[0].id : null;
     const np = getProject(state.activeProjectId);
@@ -3403,6 +4098,8 @@ function newConversation(p) {
 }
 function deleteConversation(p, c) {
   p.conversations = p.conversations.filter((x) => x.id !== c.id);
+  // Remove it from the SQLite history store too (messages + tool calls).
+  sqliteDeleteConversation(c.id);
   if (state.activeConversationId === c.id) {
     state.activeConversationId = p.conversations.length ? p.conversations[0].id : null;
   }
@@ -4629,8 +5326,11 @@ async function sendMessage(textOverride, opts) {
       },
       onToolCall: async (call) => {
         const { name, args } = normalizeToolCall(call);
-        const entry = { name, args, result: undefined, error: undefined };
+        const entry = { id: uuid(), name, args, result: undefined, error: undefined };
         liveToolCalls.push(entry);
+        // Persist the tool call to SQLite as it happens (result updated below),
+        // so tool history survives even if the app dies mid-turn.
+        sqlitePersistToolCall(c.id, entry);
         if (!firstTokenSeen) {
           firstTokenSeen = true;
           typingRow.remove();
@@ -4646,11 +5346,13 @@ async function sendMessage(textOverride, opts) {
         try {
           const res = await runToolWithTimeout(name, args);
           entry.result = res;
+          sqlitePersistToolCall(c.id, entry);
           chip._setResult(res);
           return res; // string result feeds back into the engine's tool loop
         } catch (e) {
           const err = "Error: " + (e && e.message ? e.message : String(e));
           entry.error = err;
+          sqlitePersistToolCall(c.id, entry);
           chip._setError(err);
           return err;
         }
@@ -5316,12 +6018,17 @@ async function closeSession(id) {
   if (rec.autoApproveUnsub) { try { rec.autoApproveUnsub(); } catch (e) { /* non-fatal */ } }
   if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
   try { if (rec.session && rec.session.kill) await rec.session.kill(); } catch (e) { /* non-fatal */ }
+  // Terminal sessions now survive window close in the OS store, so a closed
+  // session must be removed from the OS-persisted record too (killSession
+  // kills the process if any and deletes the persisted metadata/output).
+  try { await window.chatoss.terminal.killSession(id); } catch (e) { /* non-fatal */ }
   if (rec.dispose) { try { rec.dispose(); } catch (e) { /* non-fatal */ } }
   if (rec.ro) { try { rec.ro.disconnect(); } catch (e) { /* non-fatal */ } }
   rec.squareEl.remove();
   sessions.delete(id);
   // A closed session should NOT come back as a dead card on the next reopen,
   // so drop it from the persisted snapshot list too.
+  sqliteDeleteTerminalSession(id);
   persistSessions().catch((e) => console.warn("persistSessions closeSession", e));
   if (state.activeSessionId === id) {
     state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
@@ -6045,6 +6752,10 @@ async function init() {
     const saved = await window.chatoss.scopedData.get(STORE_KEY);
     if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null, termView: "squares", convShown: {} }, saved);
   } catch (e) { console.warn("restore state", e); }
+  // Hydrate conversations + messages from the private SQLite DB (the durable
+  // history store). scopedData may be stale or lost after an orchestration
+  // session; SQLite is authoritative for conversation history.
+  await hydrateFromSqlite();
   try {
     const savedSettings = await window.chatoss.scopedData.get(SETTINGS_KEY);
     if (savedSettings) settings = Object.assign(settings, savedSettings);
@@ -6089,6 +6800,11 @@ async function init() {
   // though the live PTY processes are gone. (Must run AFTER loadWorktrees so
   // worktreeBranchForCwd can match against the restored worktreeMeta.)
   await loadPersistedSessions();
+  // Merge in the OS-persisted terminal sessions (terminal.listSessions): the
+  // OS now keeps sessions across window close AND app restart, so reattach
+  // still-live ones and show ended ones as read-only cards with their saved
+  // output. This is the durable store — it survives even if scopedData is lost.
+  await loadPlatformSessions();
   detection = {
     codex: !!(settings.detected && settings.detected.codex),
     claude: !!(settings.detected && settings.detected.claude),
@@ -6236,11 +6952,15 @@ async function init() {
   // board picker
   el.boardPickerX.addEventListener("click", () => el.boardPicker.classList.add("hidden"));
 
+  // history browser (past conversations + terminal sessions)
+  initHistoryBrowser();
+
   // backdrop click closes modals
   for (const [modal, closer] of [
     [el.spawnModal, onSpawnCancel],
     [el.settingsPanel, () => el.settingsPanel.classList.add("hidden")],
     [el.boardPicker, () => el.boardPicker.classList.add("hidden")],
+    [el.historyModal, closeHistoryBrowser],
   ]) {
     modal.addEventListener("click", (e) => {
       if (e.target === modal || (e.target.classList && e.target.classList.contains("modal-backdrop"))) closer();
@@ -6253,6 +6973,7 @@ async function init() {
     if (!el.spawnModal.classList.contains("hidden")) onSpawnCancel();
     else if (!el.settingsPanel.classList.contains("hidden")) el.settingsPanel.classList.add("hidden");
     else if (!el.boardPicker.classList.contains("hidden")) el.boardPicker.classList.add("hidden");
+    else if (!el.historyModal.classList.contains("hidden")) closeHistoryBrowser();
   });
 
   // column resizers (restores any saved layout)
@@ -6309,6 +7030,11 @@ async function init() {
     if (_persistSessionsTimer) { clearTimeout(_persistSessionsTimer); _persistSessionsTimer = null; }
     persistSessions().catch((e) => console.warn("flushSessions", e));
     userTermPersist();
+    // Also flush the SQLite conversation mirror immediately (cancel the
+    // debounce) so the very last message of a session is not lost to the
+    // 700ms timer when the window closes right after it.
+    if (_sqliteSyncTimer) { clearTimeout(_sqliteSyncTimer); _sqliteSyncTimer = null; }
+    syncConversationsToSqlite().catch((e) => console.warn("flushSqliteSync", e));
   };
   // Kill the user's shell ONLY on a real app close — NOT on visibilitychange.
   // On macOS, swiping to another Space fires visibilitychange("hidden"); if we

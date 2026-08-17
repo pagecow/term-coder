@@ -35,6 +35,7 @@
         <strong>Term Coder</strong>
       </div>
       <div class="topbar-actions">
+        <button id="history-btn" class="btn btn-ghost btn-small" type="button" title="Browse past conversations and terminal sessions">History</button>
         <button id="new-session-btn" class="btn btn-primary btn-small" type="button" title="Start a new sub-agent session">+ Session</button>
         <button id="settings-btn" class="icon-button" type="button" title="Settings" aria-label="Settings">⚙</button>
       </div>
@@ -367,6 +368,30 @@
         </div>
         <button id="rescan-btn" class="btn btn-ghost btn-small" type="button">Re-scan</button>
         <p class="modal-hint">Detection runs <code>which</code> / <code>ollama list</code> via the terminal API.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- HISTORY BROWSER — review past conversations and terminal sessions.
+       Conversations/messages live in the app's private SQLite DB (capability
+       "sqlite"); terminal sessions are persisted by the OS and read back via
+       terminal.listSessions / attachSession / reattachSession / killSession. -->
+  <div id="history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
+    <div class="modal-backdrop" data-close="history"></div>
+    <div class="modal-card">
+      <header class="modal-header">
+        <strong id="history-title">History</strong>
+        <div class="modal-header-actions">
+          <button id="history-refresh" class="btn btn-ghost btn-small" type="button" title="Refresh the list">Refresh</button>
+          <button id="history-close-x" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button>
+        </div>
+      </header>
+      <div class="modal-body">
+        <div id="history-tabs" class="history-tabs" role="tablist" aria-label="History sections">
+          <button class="history-tab active" type="button" data-tab="conversations" role="tab" aria-selected="true">Conversations</button>
+          <button class="history-tab" type="button" data-tab="terminals" role="tab" aria-selected="false">Terminals</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
       </div>
     </div>
   </div>

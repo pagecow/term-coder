@@ -2401,6 +2401,115 @@ textarea.form-input { resize: vertical; }
 .detected-scanning { color: var(--muted); font-style: italic; }
 .board-pick-btn { margin-bottom: 6px; justify-content: flex-start; width: 100%; }
 
+/* ---------- History browser (modal) ----------
+   Lists past conversations (from the app's private SQLite DB) and past
+   terminal sessions (from the OS-persisted terminal store). Reuses the shared
+   modal chrome; the card is wider than the default 460px so rows have room
+   for title + meta + action buttons. */
+#history-modal .modal-card { width: 720px; }
+@media (max-width: 800px) { #history-modal .modal-card { width: 100%; } }
+.history-tabs {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.history-tab {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.history-tab:hover { border-color: var(--border-strong); color: var(--text); }
+.history-tab.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.history-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 18px 4px;
+  text-align: center;
+}
+.history-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+.history-item-info { min-width: 0; flex: 1 1 240px; }
+.history-item-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-item-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+.history-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 7px;
+}
+.history-badge-live {
+  color: #16a34a;
+  border-color: rgba(22, 163, 74, .4);
+  background: rgba(22, 163, 74, .08);
+}
+.history-output {
+  flex-basis: 100%;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--term-bg);
+  border: 1px solid var(--term-border);
+  border-radius: 8px;
+  color: #c9d1d9;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ============================================================
    Loading overlay
    ============================================================ */
