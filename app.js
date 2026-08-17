@@ -22,6 +22,20 @@ const OLLAMA_LAUNCH_TOOLS = ["claude", "codex", "chatgpt", "hermes", "openclaw",
 let ollamaPath = null;
 const OLLAMA_GUESSES = ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/usr/bin/ollama", "/bin/ollama", "/snap/bin/ollama"];
 
+// ── Direct-CLI launch targets (claude / codex) ──
+// Resolved absolute paths to the real coding-CLI binaries, found at detect
+// time. When the user picks "claude" or "codex" as a launch target we spawn
+// THESE directly via the terminal capability — NOT through `ollama launch`.
+// This is for users who have a direct account and don't want to go through
+// ollama. Like ollamaPath, the absolute path survives the sandbox's minimal
+// PATH. Stays null when the binary isn't installed.
+let claudePath = null;
+let codexPath = null;
+// Well-known locations to fall back to when `which` fails under the minimal
+// sandbox PATH (same rationale as OLLAMA_GUESSES).
+const CLAUDE_GUESSES = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude", "/usr/bin/claude", "/bin/claude"];
+const CODEX_GUESSES = ["/usr/local/bin/codex", "/opt/homebrew/bin/codex", "/usr/bin/codex", "/bin/codex"];
+
 // Wrap a command so it runs in a login shell (full user PATH) when possible.
 // Falls back to the bare command if we can't build a wrapper.
 function loginShell(command) {
@@ -76,8 +90,12 @@ let defaultModelId = null;
 let running = false;
 let abortController = null;
 
-// Auto-detection cache (refreshed every ~60s)
-let detection = { codex: false, claude: false, ollama: false, models: [], scannedAt: 0, denied: false };
+// Auto-detection cache (refreshed every ~60s).
+//   claudePath / codexPath: resolved absolute path to the direct CLI binary
+//   (mirrors ollamaPath). The sandboxed terminal runs a non-login shell with a
+//   minimal PATH, so storing the absolute path lets us launch the real CLI
+//   directly even when bare "claude"/"codex" wouldn't resolve.
+let detection = { codex: false, claude: false, ollama: false, models: [], scannedAt: 0, denied: false, claudePath: null, codexPath: null };
 
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
@@ -690,7 +708,7 @@ async function detectTools(force = false) {
   if (!force && detection.scannedAt && now - detection.scannedAt < DETECT_TTL_MS) {
     return detection;
   }
-  const fresh = { codex: false, claude: false, ollama: false, models: [], scannedAt: now, denied: false };
+  const fresh = { codex: false, claude: false, ollama: false, models: [], scannedAt: now, denied: false, claudePath: null, codexPath: null };
   const cwd = defaultCwd();
 
   const probe = async (cmd) => {
@@ -704,10 +722,39 @@ async function detectTools(force = false) {
     }
   };
 
-  const codexR = await probe("which codex");
-  if (codexR !== null) fresh.codex = codexR.exitCode === 0 && String(codexR.output || "").trim().length > 0;
-  const claudeR = await probe("which claude");
-  if (claudeR !== null) fresh.claude = claudeR.exitCode === 0 && String(claudeR.output || "").trim().length > 0;
+  // Helper: resolve a CLI binary's absolute path the same way ollamaPath is
+  // resolved — `which` first, then a login shell `which`, then well-known
+  // locations. Returns the path string or null. Also sets the boolean flag
+  // on `fresh` so callers know the binary is available.
+  const resolveCliPath = async (name, guesses) => {
+    let path = null;
+    const wr = await probe("which " + name);
+    if (wr !== null && wr.exitCode === 0 && String(wr.output || "").trim()) {
+      path = String(wr.output).trim().split("\n")[0].trim();
+    }
+    if (!path) {
+      const lr = await probe(loginShell("which " + name));
+      if (lr !== null && lr.exitCode === 0 && String(lr.output || "").trim()) {
+        path = String(lr.output).trim().split("\n")[0].trim();
+      }
+    }
+    if (!path) {
+      for (const g of guesses) {
+        const tr = await probe("test -x " + JSON.stringify(g) + " && echo ok");
+        if (tr !== null && tr.exitCode === 0 && /ok/.test(String(tr.output))) { path = g; break; }
+      }
+    }
+    return path;
+  };
+
+  // Resolve the direct claude / codex binaries (for launching them WITHOUT
+  // going through ollama). The boolean flags stay in lockstep with the path.
+  codexPath = await resolveCliPath("codex", CODEX_GUESSES);
+  fresh.codex = !!codexPath;
+  fresh.codexPath = codexPath;
+  claudePath = await resolveCliPath("claude", CLAUDE_GUESSES);
+  fresh.claude = !!claudePath;
+  fresh.claudePath = claudePath;
 
   // Resolve ollama's absolute path — the sandbox shell has a minimal PATH, so
   // "which ollama" may fail even though ollama is installed. Try `which`, then
@@ -746,6 +793,8 @@ async function detectTools(force = false) {
     ollama: detection.ollama,
     models: detection.models.slice(),
     denied: detection.denied,
+    claudePath: detection.claudePath || null,
+    codexPath: detection.codexPath || null,
   };
   saveSettings();
   renderDetectedList();
@@ -803,7 +852,7 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "start_cli_session",
-      description: "Ask the user to start a new sub-agent CLI session (ollama launch claude / codex, etc.) in a working directory. The USER decides the CLI and model in a confirmation dialog — call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder. This REFUSES to start a second agent in a directory that already has a live session, because two agents in one working directory clobber each other's edits — correct or close the existing agent instead.",
+      description: "Ask the user to start a new sub-agent CLI session in a working directory. The USER decides the launch target in a confirmation dialog — they can run the real claude or codex CLI directly (if they have a direct account), or launch through ollama with a chosen model. Call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder. This REFUSES to start a second agent in a directory that already has a live session, because two agents in one working directory clobber each other's edits — correct or close the existing agent instead.",
       parameters: {
         type: "object",
         properties: {
@@ -1957,8 +2006,13 @@ async function toolHandler(name, args) {
 }
 
 // ---------- Spawn modal (the heart: ask the user every time) ----------
-// "ollama launch <tool>" starts an agent CLI (claude, codex, …) and opens its
-// OWN interactive model picker inside the terminal — so we don't pass a model.
+// The dropdown here selects the OLLAMA LAUNCH TOOL (the agent ollama starts).
+// The actual launch TARGET — including the option to run claude/codex DIRECTLY
+// without ollama — is chosen in the model picker (resolveSessionModel) that
+// appears after Start. So this dropdown matters only when the user picks an
+// ollama model from that picker; picking "claude"/"codex" there launches the
+// real binary directly regardless of this dropdown. The raw:<bin> entries
+// below are a manual fallback for direct launching from the dropdown itself.
 function buildCliOptions() {
   const opts = [];
   const push = (value, label, detected) => {
@@ -1970,7 +2024,9 @@ function buildCliOptions() {
   push("hermes", "ollama launch hermes  (Hermes Agent)", detection.ollama);
   push("opencode", "ollama launch opencode  (OpenCode)", detection.ollama);
   push("copilot", "ollama launch copilot  (Copilot CLI)", detection.ollama);
-  // Raw binaries, only if actually installed on PATH.
+  // Direct binaries (launch the real CLI without ollama), only if installed.
+  // These are a manual fallback; the model picker also offers claude/codex
+  // directly as launch targets.
   if (detection.claude) push("raw:claude", "claude  (direct binary)", true);
   if (detection.codex) push("raw:codex", "codex  (direct binary)", true);
   return opts;
@@ -2077,13 +2133,15 @@ async function onSpawnStart() {
   // askChoice, so hide the spawn modal while the choice is pending so the pills
   // are visible and clickable.
   el.spawnModal.classList.add("hidden");
-  let model = null;
+  let target = null;
   try {
-    model = await window.termCoder.resolveSessionModel(prompt);
+    // resolveSessionModel returns a LAUNCH TARGET id — a direct CLI name
+    // ("claude"/"codex") or an ollama model name. spawnChosen routes on it.
+    target = await window.termCoder.resolveSessionModel(prompt);
   } catch (e) {
     console.warn("resolveSessionModel", e);
   }
-  if (!model) {
+  if (!target) {
     // Dismissed / cancelled / unavailable — do NOT start the session.
     closeSpawnModal(null);
     return;
@@ -2099,7 +2157,7 @@ async function onSpawnStart() {
   el.spawnStatus.textContent = "Starting…";
   el.spawnModal.classList.remove("hidden");
   try {
-    const session = await spawnChosen({ cli, cwd, prompt, model });
+    const session = await spawnChosen({ cli, cwd, prompt, target });
     if (!session) {
       el.spawnStatus.textContent = "Terminal permission denied. Approve it in the system prompt and try again, or cancel.";
       el.spawnStart.disabled = false;
@@ -2122,24 +2180,45 @@ function onSpawnCancel() {
 }
 
 async function spawnChosen(choice) {
-  // choice.cli is either a launch tool ("claude"|"codex"|…) or "raw:<bin>".
+  // choice.target is the launch-target id from resolveSessionModel — either a
+  // direct CLI name ("claude"/"codex") or an ollama model name. choice.cli is
+  // the ollama launch tool from the spawn-modal dropdown (used only for the
+  // ollama path) or a "raw:<bin>" manual override.
+  //
   // ALWAYS spawn through a login shell so `ollama` (and any user-installed CLI)
   // resolves on the full PATH — the sandboxed default shell has a minimal PATH,
   // which is exactly what caused "Unable to spawn ollama … not found in PATH".
   let inner, label;
-  if (choice.cli.startsWith("raw:")) {
+  // Manual raw-binary override from the dropdown (kept for backward compat and
+  // for CLIs not yet covered by the launch-target picker).
+  if (choice.cli && choice.cli.startsWith("raw:")) {
     const bin = choice.cli.slice(4);
     inner = "exec " + bin;
     label = bin + " · " + basename(choice.cwd);
   } else {
-    const bin = ollamaPath || "ollama";
-    inner = "exec " + JSON.stringify(bin) + " launch " + choice.cli;
-    // Apply the resolved model (from Model Selection Mode) as a CLI flag so
-    // the launched agent uses it instead of opening its own model picker.
-    if (choice.model) {
-      inner += " --model " + JSON.stringify(choice.model);
+    // Route by the chosen launch target.
+    const target = findLaunchTarget(choice.target);
+    if (target && target.kind === "direct") {
+      // ── Direct CLI launch ── run the REAL binary via the terminal capability,
+      // NOT through ollama. Uses the resolved absolute path (claudePath /
+      // codexPath) so it survives the sandbox's minimal PATH.
+      inner = "exec " + JSON.stringify(target.bin);
+      label = target.id + " · " + basename(choice.cwd);
+    } else {
+      // ── Ollama launch path (existing) ── the dropdown's tool selects the
+      // agent; the target id (an ollama model name) is passed as --model.
+      const bin = ollamaPath || "ollama";
+      const tool = choice.cli || "claude";
+      inner = "exec " + JSON.stringify(bin) + " launch " + tool;
+      // Apply the resolved model as a CLI flag so the launched agent uses it
+      // instead of opening its own model picker. choice.model is kept as a
+      // back-compat fallback for any caller still passing the old field.
+      const model = target ? target.model : choice.model;
+      if (model) {
+        inner += " --model " + JSON.stringify(model);
+      }
+      label = tool + " · " + basename(choice.cwd);
     }
-    label = choice.cli + " · " + basename(choice.cwd);
   }
 
   let session = null;
@@ -2186,6 +2265,20 @@ function renderDetectedList() {
   row("codex", !!d.codex);
   row("claude", !!d.claude);
   row("ollama", !!d.ollama);
+  // Show the resolved direct-CLI paths so the user can confirm the real
+  // binaries were found (these are what "claude"/"codex" launch targets use).
+  if (d.claude && d.claudePath) {
+    const div = document.createElement("div");
+    div.className = "detected-item";
+    div.textContent = "  claude direct: " + d.claudePath;
+    el.detectedList.appendChild(div);
+  }
+  if (d.codex && d.codexPath) {
+    const div = document.createElement("div");
+    div.className = "detected-item";
+    div.textContent = "  codex direct: " + d.codexPath;
+    el.detectedList.appendChild(div);
+  }
   if (d.ollama) {
     const div = document.createElement("div");
     div.className = "detected-item";
@@ -2237,30 +2330,106 @@ function availableOllamaModels() {
   return m.slice();
 }
 
-// Populate a <select> with the detected ollama models and select `selected`
-// (if present in the list). Renders an empty placeholder option when no
-// models are available so the picker is never silently blank.
+// ── Direct-CLI + ollama launch targets ──
+// A single unified list of everything the user can launch as a sub-agent
+// session. Each entry is a "target" the model picker (resolveSessionModel) and
+// the spawn logic (spawnChosen) both understand:
+//
+//   { kind: "direct", id, label, bin }   — run the real claude/codex binary
+//                                          directly via the terminal capability
+//                                          (NOT through ollama).
+//   { kind: "ollama", id, label, model } — launch through `ollama launch
+//                                          <tool> --model <model>` (existing path).
+//
+// `id` is the stable value stored in settings (alwaysModel / complexityModel*).
+// Direct CLIs use ids "claude" and "codex"; ollama models use their model name.
+// kind is derived from the id with targetKind() so a bare id round-trips.
+function availableLaunchTargets() {
+  const out = [];
+  // Direct CLIs first — these are the "I have a direct account" options and
+  // are the most distinct from the ollama path, so they read as the headline
+  // choices. Only listed when the binary is actually installed.
+  if (detection.claude && detection.claudePath) {
+    out.push({ kind: "direct", id: "claude", label: "claude  (Claude Code, direct)", bin: detection.claudePath });
+  }
+  if (detection.codex && detection.codexPath) {
+    out.push({ kind: "direct", id: "codex", label: "codex  (Codex, direct)", bin: detection.codexPath });
+  }
+  // Ollama models — the existing launch path. Each becomes its own target so
+  // picking one launches through ollama with that model.
+  for (const model of availableOllamaModels()) {
+    out.push({ kind: "ollama", id: model, label: model + "  (ollama)", model });
+  }
+  return out;
+}
+
+// Look up a launch target by its stable id. Returns the target object or null.
+function findLaunchTarget(id) {
+  if (!id) return null;
+  return availableLaunchTargets().find((t) => t.id === id) || null;
+}
+
+// Given a target id, return its kind ("direct" | "ollama") or null when not
+// found / not a known target. Used to route the spawn command without needing
+// the full target object.
+function targetKind(id) {
+  const t = findLaunchTarget(id);
+  return t ? t.kind : null;
+}
+
+// Build the list of { label, value } options for the pill/rect askChoice picker
+// and for any <select> that should offer the same choices. value is the stable
+// target id so the picker result maps straight back to a launch target.
+function launchTargetChoiceOptions() {
+  return availableLaunchTargets().map((t) => ({ label: t.label, value: t.id }));
+}
+
+// Populate a <select> with the available launch targets (direct CLIs +
+// ollama models) and select `selected` (if present in the list). Renders an
+// empty placeholder option when nothing is available so the picker is never
+// silently blank. Direct CLIs are grouped under an optgroup so they read as a
+// distinct choice from the ollama models.
 function populateModelSelect(selectEl, selected) {
   if (!selectEl) return;
-  const models = availableOllamaModels();
+  const targets = availableLaunchTargets();
   selectEl.innerHTML = "";
-  if (!models.length) {
+  if (!targets.length) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "(no models detected — run Re-scan)";
+    opt.textContent = "(nothing detected — run Re-scan)";
     selectEl.appendChild(opt);
     selectEl.value = "";
     return;
   }
-  for (const id of models) {
-    const opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = id;
-    selectEl.appendChild(opt);
+  const ids = targets.map((t) => t.id);
+  // Direct CLIs first (if any), under a labeled group.
+  const direct = targets.filter((t) => t.kind === "direct");
+  const ollama = targets.filter((t) => t.kind === "ollama");
+  if (direct.length) {
+    const grp = document.createElement("optgroup");
+    grp.label = "Direct CLI (no ollama)";
+    for (const t of direct) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.id + "  (direct)";
+      grp.appendChild(opt);
+    }
+    selectEl.appendChild(grp);
   }
-  // restore the saved selection if it's still available, else first model.
-  if (selected && models.includes(selected)) selectEl.value = selected;
-  else selectEl.value = models[0];
+  if (ollama.length) {
+    const grp = document.createElement("optgroup");
+    grp.label = "Ollama models";
+    for (const t of ollama) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.id;
+      grp.appendChild(opt);
+    }
+    selectEl.appendChild(grp);
+  }
+  // Restore the saved selection if it's still available, else first target.
+  if (selected && ids.includes(selected)) selectEl.value = selected;
+  else selectEl.value = ids[0];
 }
 
 // Show only the picker panel matching the active radio mode.
@@ -2394,23 +2563,35 @@ window.termCoder.getModelSelectionConfig = function () {
     complexityModelMedium: modelSelection.complexityModelMedium || "",
     complexityModelHigh: modelSelection.complexityModelHigh || "",
     availableModels: availableOllamaModels(),
+    // Unified launch targets: direct CLIs (claude/codex) + ollama models. The
+    // session-startup integration can read these to know everything launchable.
+    availableTargets: availableLaunchTargets(),
   };
 };
 
 // ---------- Session model resolution (Model Selection Mode) ----------
 // Encapsulates all three Model Selection Modes so the session-startup code
-// calls a single helper and gets back the model to use (or null to cancel).
+// calls a single helper and gets back the launch target to use (or null to
+// cancel).
 //
 //   window.termCoder.resolveSessionModel(taskPrompt) -> Promise<string|null>
 //
-//   - "manual"     -> prompt via askChoice (pill style), wait, return chosen
-//                     model (or null if dismissed — caller cancels the session).
-//   - "always"     -> return cfg.alwaysModel automatically; if it's unset/empty,
-//                     fall back to askChoice so the user can still pick one.
+// The returned string is a LAUNCH TARGET id — either a direct CLI ("claude" /
+// "codex", launched directly via the terminal capability) or an ollama model
+// name (launched through `ollama launch`). spawnChosen reads the id back with
+// findLaunchTarget()/targetKind() to build the right spawn command, so this
+// function stays pure and knows nothing about how the binary is launched.
+//
+//   - "manual"     -> prompt via askChoice (pill style) offering every launch
+//                     target (claude, codex, ollama models), wait, return the
+//                     chosen target id (or null if dismissed — caller cancels).
+//   - "always"     -> return cfg.alwaysModel automatically (now also accepts a
+//                     direct-CLI id); if it's unset/empty, fall back to the
+//                     pill picker so the user can still pick a target.
 //   - "complexity" -> assess the task prompt's complexity (low/medium/high),
-//                     return the corresponding configured model automatically
+//                     return the corresponding configured target automatically
 //                     (no prompt). Falls back through the other levels, then to
-//                     the first available model if the assessed level is unset.
+//                     the first available target if the assessed level is unset.
 //
 // Keep this pure — it knows nothing about the spawn modal. The caller decides
 // whether/how to hide the modal while the pill picker is on screen.
@@ -2473,20 +2654,29 @@ function assessComplexity(taskPrompt) {
 }
 
 // Single helper that routes through the configured Model Selection Mode.
-// Returns a model string to apply, or null to cancel the session.
+// Returns a launch-target id to apply (direct CLI name or ollama model), or
+// null to cancel the session.
 window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPrompt) {
   const cfg = window.termCoder.getModelSelectionConfig();
-  const models = Array.isArray(cfg.availableModels) ? cfg.availableModels : [];
+  // Unified launch targets (direct CLIs + ollama models) — supersedes the
+  // ollama-only `availableModels` list so the picker can offer claude/codex
+  // directly alongside ollama models.
+  const targets = Array.isArray(cfg.availableTargets) && cfg.availableTargets.length
+    ? cfg.availableTargets
+    : (Array.isArray(cfg.availableModels) ? cfg.availableModels.map((m) => ({ kind: "ollama", id: m, label: m, model: m })) : []);
+  // Bare id list for membership checks and "always"/"complexity" validation.
+  const ids = targets.map((t) => t.id);
+  const opts = targets.map((t) => ({ label: t.label, value: t.id }));
 
-  // ---- Always: use the configured fixed model, no prompt. ----
+  // ---- Always: use the configured fixed target, no prompt. ----
   if (cfg.mode === "always") {
     if (cfg.alwaysModel) return cfg.alwaysModel;
-    // No always-model configured yet — fall back to a pill picker so the
+    // No always-target configured yet — fall back to a pill picker so the
     // session can still start, and hint that Settings has the real config.
-    if (models.length) {
+    if (opts.length) {
       return await window.termCoder.askChoice({
-        prompt: "No \"always\" model is configured yet — pick one for this session (or set it in Settings):",
-        options: models.map((m) => ({ label: m, value: m })),
+        prompt: "No \"always\" target is configured yet — pick one for this session (or set it in Settings):",
+        options: opts,
         style: "pill",
       });
     }
@@ -2502,17 +2692,17 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
       high: cfg.complexityModelHigh,
     };
     // Use the assessed level; cascade to a sensible fallback if it's unset.
-    const model = map[level] || map.medium || map.low || map.high;
-    if (model) return model;
-    if (models.length) return models[0]; // last-resort default
+    const target = map[level] || map.medium || map.low || map.high;
+    if (target) return target;
+    if (ids.length) return ids[0]; // last-resort default
     return null;
   }
 
   // ---- Manual (default): prompt via pills and wait for the pick. ----
-  if (!models.length) return null;
+  if (!opts.length) return null;
   return await window.termCoder.askChoice({
-    prompt: "Select a model for this session:",
-    options: models.map((m) => ({ label: m, value: m })),
+    prompt: "Select a launch target for this session:",
+    options: opts,
     style: "pill",
   });
 };
@@ -4214,7 +4404,7 @@ async function buildSystemPrompt() {
     "",
     "IMPORTANT — tool arguments: most tools work with NO arguments because they default to the active project and the attached board. Do NOT invent ids. If you are unsure, call the tool with {} and it will use the current context.",
     "",
-    "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the CLI and model — you just supply the working directory and a task prompt, then wait for the returned session id.",
+    "IMPORTANT: every sub-agent session requires the USER's approval. When you call start_cli_session, a confirmation dialog appears and the user chooses the launch target — the real claude or codex CLI directly (if they have a direct account), or an ollama model. You just supply the working directory and a task prompt, then wait for the returned session id.",
     "",
     "═══════════════════════════════════════════════════════════════",
     "STATE DOES NOT SURVIVE YOUR TURN — RECORD IT OR RECOVER IT",
@@ -4274,7 +4464,7 @@ async function buildSystemPrompt() {
     "  • Do NOT loop read_session rapidly. Prefer wait_for_session to block for completion, or list_sessions to check status without dumping output. Only call read_session when you need to read the actual terminal text.",
     "  • send_to_session takes CONTENT in `text` and a KEYPRESS in `key` — e.g. { text: \"do X instead\", key: \"enter\" }. Never put escape codes in `text`; they would be typed as visible characters. Use key:\"ctrl+c\" to interrupt, key:\"enter\" to submit.",
     "  • NEVER try to confirm or send keystrokes to the agent's 'trust this folder?' dialog yourself. That dialog is handled by the app's settings and/or a chat pill picker. If the session keeps showing the trust dialog, you may say in chat that the agent is waiting for trust approval — but do NOT send Enter or arrow keys to it.",
-    "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the model when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the model in Settings or in the spawn dialog.",
+    "  • NEVER try to select a model by sending arrow keys to an interactive model menu. The user already chooses the launch target (claude / codex direct, or an ollama model) when they approve the session spawn (or via Model Selection Mode in Settings). If read_session still shows a model picker, STOP and ask the user to pick the target in Settings or in the spawn dialog.",
     "  • The session auto-handles startup: trust confirmation (or asking you in chat) and typing/submitting the taskPrompt once the agent is ready. You just call start_cli_session, then wait and use read_session / wait_for_session to watch. Do not re-send the initial task.",
     "  • The session ALSO auto-handles command approvals: when ANY coding agent (Codex, Claude Code, or any CLI) asks for permission to run a command or make an edit, the app auto-approves safe edits/commands and only asks the user in chat for destructive ones (rm -rf, delete, drop, force push, etc.). You do NOT need to send Enter or Escape to these approval prompts yourself — the app does it for you. Just keep monitoring with read_session / list_sessions.",
     "  • A session showing NEEDS INPUT means the coding agent is blocked. There are two cases:",
@@ -6096,6 +6286,11 @@ async function init() {
     models: (settings.detected && settings.detected.models) || [],
     scannedAt: 0, // force a fresh scan at startup
     denied: !!(settings.detected && settings.detected.denied),
+    // Restore the resolved direct-CLI paths so the launch-target picker can
+    // list claude/codex immediately on a cold start, before the fresh scan
+    // finishes. detectTools refreshes these with live values shortly after.
+    claudePath: (settings.detected && settings.detected.claudePath) || null,
+    codexPath: (settings.detected && settings.detected.codexPath) || null,
   };
 
   // load models
