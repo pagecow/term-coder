@@ -14,7 +14,19 @@ const SESSIONS_KEY = "term-coder.sessions";
 const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
 const DETECT_TTL_MS = 60 * 1000;
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
-const OLLAMA_LAUNCH_TOOLS = ["claude", "codex", "chatgpt", "hermes", "openclaw", "opencode", "copilot", "droid"];
+// This is the SINGLE source of truth for the ollama-launch entries offered in
+// the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
+// dropdown from it means the constant and the UI can never drift apart (D2).
+// Only the tools below are offered; "openclaw"/"droid" were previously listed
+// but never actually wired into the dropdown, so they were removed.
+const OLLAMA_LAUNCH_TOOLS = [
+  { id: "claude", label: "ollama launch claude  (Claude Code)" },
+  { id: "codex", label: "ollama launch codex  (Codex)" },
+  { id: "chatgpt", label: "ollama launch chatgpt  (ChatGPT)" },
+  { id: "hermes", label: "ollama launch hermes  (Hermes Agent)" },
+  { id: "opencode", label: "ollama launch opencode  (OpenCode)" },
+  { id: "copilot", label: "ollama launch copilot  (Copilot CLI)" },
+];
 
 // Resolved absolute path to the ollama binary (found at detect time). The
 // sandboxed terminal runs a NON-login shell, so PATH is minimal and "ollama"
@@ -1496,15 +1508,6 @@ async function detectTools(force = false) {
     applyModelSelectionModeToUi();
   }
 
-  // ── live bridge probe: log exactly which terminal methods exist at runtime ──
-  const t = window.chatoss.terminal;
-  const bridgeMethods = t ? Object.keys(t) : [];
-  console.log("[Term Coder] window.chatoss.terminal keys:", bridgeMethods);
-  const checks = ["exec", "spawn", "mount", "onData", "onExit", "write", "resize", "kill"];
-  for (const m of checks) {
-    console.log(`[Term Coder] terminal.${m}:`, typeof t && t[m]);
-  }
-  detection.bridge = bridgeMethods; // stash for the Settings panel too
   return detection;
 }
 
@@ -1960,6 +1963,27 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   let modelLoading = false;
   let modelLoaded = false;
 
+  // R2: hoist `rec` and `unsub` ABOVE `finish()` so the closure never reads
+  // them before their declaration line. Previously `finish` (an arrow closure)
+  // referenced `rec` and `unsub` even though both were declared with const/let
+  // AFTER `finish` in the source. That is safe only because `finish` is never
+  // called synchronously before those lines run (it fires from the onData
+  // callback or the 12s timeout, both async) — but it's a TDZ footgun for any
+  // future refactor that calls finish() earlier. Hoisting removes it.
+  //
+  // `rec` is a read from the already-populated sessions map (registerSession ran
+  // before autoDriveStartup), and setting trustState="pending" up front actually
+  // reinforces B1's idle-detector guard from the very first chunk. `unsub` is
+  // assigned later inside the onData try-block; only its DECLARATION moves here.
+  // Update the session registry so read_session can mask the trust dialog from
+  // the orchestrator and avoid tempting it to send bypass keystrokes.
+  const rec = sessions.get(session.id);
+  if (rec) {
+    rec.trustState = "pending";
+    rec.trustMode = trustMode;
+  }
+  let unsub = null;
+
   const finish = async () => {
     if (settled) return;
     // NEVER auto-send the prompt while a trust dialog was seen but not yet
@@ -2057,19 +2081,17 @@ async function autoDriveStartup(session, prompt, label, cwd) {
   // fully completes guarantees the watcher stays paused, so finish() can only
   // run on a LATER chunk (the post-trust welcome/input-prompt output) — exactly
   // the ordering we want.
-  // Update the session registry so read_session can mask the trust dialog from
-  // the orchestrator and avoid tempting it to send bypass keystrokes.
-  const rec = sessions.get(session.id);
-  if (rec) {
-    rec.trustState = "pending";
-    rec.trustMode = trustMode;
-  }
 
   const handleTrust = async () => {
     trustBusy = true;
     if (rec) rec.trustState = "asking";
     try { await loadTrustMode(); } catch (_) {}
-    if (trustMode === "always") {
+    // R3: capture the just-loaded mode into a LOCAL so the ask/always branch
+    // below can't observe a concurrent change of the shared `trustMode`
+    // variable between this await and the check (e.g. the user toggling it in
+    // Settings while a second trust dialog is in flight). Behavior unchanged.
+    const mode = trustMode;
+    if (mode === "always") {
       if (rec) rec.trustMode = "always";
       await confirmTrust();
       if (rec) rec.trustState = "confirmed";
@@ -2077,7 +2099,7 @@ async function autoDriveStartup(session, prompt, label, cwd) {
       return;
     }
     if (rec) rec.trustMode = "ask";
-    // trustMode === "ask" — ask in chat, wait for the answer.
+    // mode === "ask" — ask in chat, wait for the answer.
     const ok = await askTrustInChat(folderLabel);
     if (settled) { trustBusy = false; return; } // safety timeout fired while waiting
     if (ok) {
@@ -2090,7 +2112,10 @@ async function autoDriveStartup(session, prompt, label, cwd) {
     trustBusy = false; // only now — after the trust \r / kill is fully written
   };
 
-  let unsub = null;
+  // R2: `unsub` is declared above `finish()` now (hoisted). Assign it here when
+  // the onData subscription is actually set up. Kept as an explicit reset for
+  // readability — it is already null at this point.
+  unsub = null;
   try {
     if (typeof session.onData === "function") {
       unsub = session.onData((chunk) => {
@@ -2213,6 +2238,14 @@ async function toolHandler(name, args) {
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
         const base = p.folderPath.replace(/\/+$/, "");
         const branch = args.branchName || "worktree-" + Date.now();
+        // B2: branchName comes from the orchestrator model (untrusted input). Bare
+        // double-quotes in the git command below don't protect against $, backticks,
+        // or " — validate it against a git-ref-safe charset before use so a quirky
+        // value can't inject shell tokens. The default ("worktree-<timestamp>") is
+        // always safe.
+        if (!/^[A-Za-z0-9._\/-]+$/.test(branch)) {
+          return "Error: invalid branchName \"" + branch + "\". Use only letters, digits, dot, underscore, slash, or hyphen.";
+        }
         const wtPath = base + "/.chatoss/worktrees/" + branch;
 
         // Ensure the project is a git repo. `git worktree add` fails with
@@ -2251,7 +2284,7 @@ async function toolHandler(name, args) {
         const mainBranch = (branchR && branchR.output || "").trim() || "main";
 
         const r = await window.chatoss.terminal.exec(
-          loginShell(`git worktree add "${wtPath}" -b "${branch}" "${mainBranch}"`),
+          loginShell("git worktree add " + JSON.stringify(wtPath) + " -b " + JSON.stringify(branch) + " " + JSON.stringify(mainBranch)),
           { cwd: base }
         );
         if (r === null) return "Error: terminal permission denied (approve git to continue)";
@@ -2470,11 +2503,24 @@ async function toolHandler(name, args) {
         // and the user chose "Ask each time", ignore any keystrokes from the
         // orchestrator that could bypass the chat pill picker (Enter, arrows, Esc).
         // The only legitimate way through is for the user to click yes/no.
-        let outputCheck = "";
-        if (s.session && typeof s.session.getOutput === "function" && s.trustMode !== "always") {
-          try { outputCheck = stripAnsi(await s.session.getOutput() || ""); } catch (_) {}
+        //
+        // B4: the universal monitor + autoDriveStartup already maintain
+        // rec.trustState ("pending"/"asking" while a trust dialog is up), so gate
+        // on that directly and AVOID re-reading the ENTIRE scrollback via
+        // getOutput() on every call (O(scrollback) per tool call, duplicating the
+        // monitor's work). Only when trustState is unexpectedly unset (null/
+        // undefined — e.g. a session registered before the state was wired) do we
+        // fall back to scanning the output as a safety net.
+        const trustPending = s.trustState === "pending" || s.trustState === "asking";
+        let trustFromOutput = false;
+        if (!trustPending && (s.trustState === null || s.trustState === undefined) &&
+            s.session && typeof s.session.getOutput === "function" && s.trustMode !== "always") {
+          try {
+            const outputCheck = stripAnsi(await s.session.getOutput() || "");
+            trustFromOutput = /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust|press\s*enter\s*to\s*continue/i.test(outputCheck);
+          } catch (_) {}
         }
-        if ((s.trustState === "asking" || /trust\s*the\s*(files|contents|folder|directory)|trust\s*this\s*folder|do\s*you\s*trust|press\s*enter\s*to\s*continue/i.test(outputCheck)) && s.trustMode !== "always") {
+        if ((trustPending || trustFromOutput) && s.trustMode !== "always") {
           return "Blocked: this session is waiting for the user to approve 'trust this folder' in chat. Keystrokes cannot bypass the approval. Wait for the user to respond.";
         }
         try {
@@ -2749,12 +2795,13 @@ function buildCliOptions() {
   const push = (value, label, detected) => {
     opts.push({ value, label: detected ? label : label + " (not detected)" });
   };
-  push("claude", "ollama launch claude  (Claude Code)", detection.ollama);
-  push("codex", "ollama launch codex  (Codex)", detection.ollama);
-  push("chatgpt", "ollama launch chatgpt  (ChatGPT)", detection.ollama);
-  push("hermes", "ollama launch hermes  (Hermes Agent)", detection.ollama);
-  push("opencode", "ollama launch opencode  (OpenCode)", detection.ollama);
-  push("copilot", "ollama launch copilot  (Copilot CLI)", detection.ollama);
+  // D2: the ollama-launch entries come from OLLAMA_LAUNCH_TOOLS (the single
+  // source of truth) so the constant and the dropdown can never drift apart.
+  // `detected` here reflects whether ollama itself is available (these all
+  // launch THROUGH ollama), matching the previous per-line behavior.
+  for (const tool of OLLAMA_LAUNCH_TOOLS) {
+    push(tool.id, tool.label, detection.ollama);
+  }
   // Direct binaries (launch the real CLI without ollama), only if installed.
   // These are a manual fallback; the model picker also offers claude/codex
   // directly as launch targets.
@@ -2865,16 +2912,35 @@ async function onSpawnStart() {
   // are visible and clickable.
   el.spawnModal.classList.add("hidden");
   let target = null;
+  let noModels = false;
   try {
     // resolveSessionModel returns a LAUNCH TARGET id — a direct CLI name
     // ("claude"/"codex") or an ollama model name. spawnChosen routes on it.
     target = await window.termCoder.resolveSessionModel(prompt);
   } catch (e) {
     console.warn("resolveSessionModel", e);
+    // B3: when there are NO detected models/targets at all (Manual/Always/
+    // Complexity), resolveSessionModel throws an error with code "NO_MODELS"
+    // instead of returning null (which would silently cancel). Show an
+    // actionable message and keep the spawn modal open so the user can
+    // cancel/retry, rather than auto-dismissing it with no explanation.
+    if (e && e.code === "NO_MODELS") {
+      noModels = true;
+      target = null;
+    }
   }
   if (!target) {
-    // Dismissed / cancelled / unavailable — do NOT start the session.
-    closeSpawnModal(null);
+    if (noModels) {
+      // Re-show the modal (it was hidden to make room for the pill picker) with
+      // an actionable status message. Do NOT dismiss — let the user cancel or
+      // go run Re-scan in Settings.
+      el.spawnModal.classList.remove("hidden");
+      el.spawnStatus.textContent = "No models detected — run Re-scan in Settings, or switch Model Selection Mode.";
+      el.spawnStart.disabled = false;
+    } else {
+      // Dismissed / cancelled by the user — close silently.
+      closeSpawnModal(null);
+    }
     return;
   }
 
@@ -3417,7 +3483,12 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
         style: "pill",
       });
     }
-    return null;
+    // B3: no models/targets detected at all — distinguish from a user cancel
+    // (null) so the caller can show an actionable message instead of silently
+    // dismissing the spawn modal. Throw a recognizable error.
+    const e = new Error("No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.");
+    e.code = "NO_MODELS";
+    throw e;
   }
 
   // ---- Complexity: assess + map, no prompt. ----
@@ -3432,11 +3503,17 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
     const target = map[level] || map.medium || map.low || map.high;
     if (target) return target;
     if (ids.length) return ids[0]; // last-resort default
-    return null;
+    const e = new Error("No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.");
+    e.code = "NO_MODELS";
+    throw e;
   }
 
   // ---- Manual (default): prompt via pills and wait for the pick. ----
-  if (!opts.length) return null;
+  if (!opts.length) {
+    const e = new Error("No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.");
+    e.code = "NO_MODELS";
+    throw e;
+  }
   return await window.termCoder.askChoice({
     prompt: "Select a launch target for this session:",
     options: opts,
@@ -5712,6 +5789,7 @@ async function sendMessage(textOverride, opts) {
 // session finishing its turn (or exiting, or getting blocked) and starts one
 // orchestrator turn so it can review, merge, and move the plan forward.
 let autoFollowTimer = null;
+let statusRefreshTimer = null; // D3: handle for the sidebar status-refresh interval, cleared together with autoFollowTimer
 let lastAutoFollowAt = 0;
 const AUTO_FOLLOW_COOLDOWN_MS = 8000;
 
@@ -5736,6 +5814,12 @@ function autoFollowTick() {
     if (act !== "IDLE" && act !== "EXITED" && act !== "NEEDS INPUT") continue;
     // Don't fire on the very first classification of a brand-new session.
     if (wasReported === undefined) continue;
+    // B1 (belt-and-suspenders): a session whose task was NEVER submitted
+    // (taskSubmittedAt === 0) cannot have "finished its turn" or be genuinely
+    // blocked on input — it's still in the trust / pre-submission window. Skip
+    // the IDLE / NEEDS INPUT wake for it so the orchestrator isn't spuriously
+    // fired while the user is approving trust. EXITED is still reported.
+    if (!rec.taskSubmittedAt && act !== "EXITED") continue;
 
     let note;
     if (act === "EXITED") {
@@ -5759,9 +5843,21 @@ function startAutoFollow() {
   // Lightweight status refresh: bump activity markers + count in the sidebar
   // Sessions section and update the Projects column without rebuilding the
   // file tree. No PTY reads — purely the in-memory activity classification.
-  setInterval(() => {
+  // D3: store the handle at module scope (statusRefreshTimer) so a future
+  // teardown path can clear it alongside autoFollowTimer. Previously the
+  // handle was discarded, so this interval could never be stopped.
+  if (statusRefreshTimer) clearInterval(statusRefreshTimer);
+  statusRefreshTimer = setInterval(() => {
     if (el.projSessionsBody && el.projSessionsBody.isConnected) paintProjSessions();
   }, 2000);
+}
+
+// D3: tear down both auto-follow intervals. Called if/when auto-follow is ever
+// disabled (e.g. a future "disable auto-follow" setting). Safe to call even
+// when nothing is running.
+function stopAutoFollow() {
+  if (autoFollowTimer) { clearInterval(autoFollowTimer); autoFollowTimer = null; }
+  if (statusRefreshTimer) { clearInterval(statusRefreshTimer); statusRefreshTimer = null; }
 }
 
 // ---------- Right column: terminal grid ----------
@@ -6199,12 +6295,18 @@ async function registerSession(session, cmd, args, cwd, label) {
             renderTabs();
             renderSessionInfo();
           }
-        } else if (!rec.autoApproveBusy && !rec.waitingForInput && !rec._idleTimer) {
+        } else if (!rec.autoApproveBusy && !rec.waitingForInput && !rec._idleTimer && rec.trustState !== "pending" && rec.trustState !== "asking") {
           // Only flag after a quiet period — an agent that is actually thinking
           // keeps emitting spinner frames, which refresh lastOutputTime.
+          // The trustState guard (B1) prevents arming during the quiet trust /
+          // pre-submission window: while a "trust this folder?" pill picker is
+          // pending ("pending"/"asking"), the terminal shows a prompt cursor with
+          // no spinner, so without this guard the 5s timer would falsely flag the
+          // agent as idle before its task was ever submitted.
           rec._idleTimer = setTimeout(() => {
             rec._idleTimer = null;
             if (!rec.active || rec.autoApproveBusy || rec.waitingForInput) return;
+            if (rec.trustState === "pending" || rec.trustState === "asking") return;
             if (Date.now() - lastOutputTime >= 5000) {
               rec.waitingForInput = true;
               rec.pendingQuestion = "(agent appears idle — terminal is showing a prompt cursor with no recent activity. Check on it with read_session to see what it needs.)";
