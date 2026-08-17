@@ -1714,6 +1714,51 @@ body.is-resizing .term-mount { pointer-events: none; }
   max-width: 720px;
 }
 
+/* ---------- Pending permission/choice prompt: freeze thinking indicators ----------
+   While an askChoice prompt is awaiting the user (a permission/approval
+   question can land mid-turn, e.g. merge_worktree fires askChoice inside
+   onToolCall), the live "thinking" indicators would keep animating on top of
+   / around the permission content. The JS toggles .chat-prompt-pending on
+   .col-chat for the lifetime of the prompt. Here we PAUSE those animations —
+   we do NOT remove is-streaming or finalize the turn, so a still-running
+   orchestrator turn never looks finished; the spinners just stop while the
+   user decides and resume the instant the class is removed. We also make the
+   overlay opaque so no streaming UI behind it shows through around the
+   prompt bubble. */
+.chat-prompt-pending .chat-overlay {
+  /* Occlude the chat log behind the prompt stack so streaming content (the
+     in-progress assistant row, the thinking widget) can't show through the
+     transparent gaps of the overlay while the user is deciding. Matches the
+     chat surface so it reads as a clean backdrop, not a foreign panel. */
+  background: var(--surface);
+}
+.chat-prompt-pending .typing-dot {
+  animation: none !important;
+  opacity: 0.35;
+}
+.chat-prompt-pending .md-stream-cursor {
+  display: none !important;
+}
+.chat-prompt-pending .tool-chip-spinner {
+  animation: none !important;
+  opacity: 0.4;
+}
+/* Drop the accent "actively thinking" ring on the streaming thinking widget so
+   it stops reading as live/animating while the prompt is up. The label still
+   says "Thinking…" — we don't claim it's finished. */
+.chat-prompt-pending .msg-thinking-collapsible.is-streaming {
+  border-color: var(--chat-think-border);
+  box-shadow: none;
+}
+.chat-prompt-pending .msg-thinking-collapsible.is-streaming .think-label {
+  color: var(--text-2);
+}
+/* Pause the status-line pulse dot ("Generating…") while a prompt is up. */
+.chat-prompt-pending .chat-status .pulse {
+  animation: none !important;
+  opacity: 0.4;
+}
+
 /* ---------- Reusable multiple-choice chat component ---------- */
 /* Rendered inside the chat stream as a message bubble by
    window.termCoder.askChoice({ prompt, options, style }). */

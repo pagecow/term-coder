@@ -1852,6 +1852,45 @@ function stripAnsi(s) {
   return s;
 }
 
+// Strip the live CLI spinner glyphs and one-line status frames ("✻ Baking…",
+// "still thinking", "Cooking…", "Wrangling…") that bleed into approval-prompt
+// text. stripAnsi() above only removes ANSI escape codes — but TUIs redraw
+// their spinner as PLAIN unicode every animation frame, so those glyphs
+// survive stripAnsi and show up garbled in the askChoice overlay's question
+// text (spinner dingbats, "Baking…", repeated "still thinking" lines mixed
+// into the command). We drop the decoration glyphs and discard any line that
+// is *only* a status frame, keeping the real command line intact.
+function cleanApprovalText(text) {
+  if (typeof text !== "string") return text;
+  // Unicode ranges TUIs paint as plain (non-ANSI) spinner / box / braille
+  // glyphs every frame: Box Drawing, Block Elements, Braille Patterns,
+  // Dingbats (✢ ✳ ✶ ✻ ✽ ✲ ✱ ✹ ✸ ✺ ✼ ✾ ✿ …), Arrows (↻ ↺), and Misc Symbols
+  // & Arrows. These never belong in a real command, so removing the whole
+  // range is safe — a real command line is ASCII + a few punctuation marks.
+  const GLYPH_RE = /[\u2500-\u257F\u2580-\u259F\u2800-\u28FF\u2700-\u27BF\u2190-\u21FF\u2B00-\u2BFF]/g;
+  // A line that — after the glyphs are gone — is just a CLI status phrase,
+  // optionally ending in an ellipsis or trailing dots. Covers Claude Code's
+  // cooking verbs ("Baking…", "Tending…", "Wrangling…"), "still thinking",
+  // and the common "<verb>…" shape other agents use.
+  const STATUS_LINE_RE = /^(still thinking|baking|cooking|wrangling|tending|simmering|pondering|musing|reflecting|remembering|dreaming|waking|brewing|stewing|marinating|fermenting|kneading|resting|sifting|grinding|churning|toiling|hammering|carving|sculpting|painting|drawing|sketching|drafting|editing|rewriting|reading|writing|analyzing|researching|investigating|exploring|searching|scanning|parsing|compiling|building|running|executing|loading|downloading|uploading|installing|configuring|starting|stopping|initializing|thinking|working|waiting)\s*[.….\u2026]{0,6}\s*$/i;
+  // A bare status frame the explicit list missed: a short, letters-and-spaces-
+  // only phrase ending in an ellipsis. Real shell commands don't end in "…",
+  // so this catches unknown verbs ("Whipping…", "Juicing…") without touching a
+  // real command (which always carries flags/paths/quotes/symbols).
+  const BARE_ELLIPSIS_RE = /^[a-z][a-z\s]{0,24}\s*[.….\u2026]{1,6}\s*$/i;
+  const lines = text.split("\n");
+  const kept = [];
+  for (const raw of lines) {
+    // Remove the decoration glyphs first, then assess what remains.
+    let stripped = raw.replace(GLYPH_RE, "").replace(/\s{2,}/g, " ").trim();
+    if (!stripped) continue;                       // line was glyphs / whitespace only
+    if (STATUS_LINE_RE.test(stripped)) continue;   // "Baking…", "still thinking"
+    if (BARE_ELLIPSIS_RE.test(stripped)) continue; // "Pondering…", "Whipping…"
+    kept.push(stripped);
+  }
+  return kept.join("\n").trim();
+}
+
 // Auto-drive a freshly spawned CLI through its startup dialogs and into the
 // point where it will accept the task prompt, then send the prompt.
 // Claude Code / Codex / OpenCode show a "trust this folder?" prompt and then a
@@ -3208,7 +3247,13 @@ function saveTrustMode() {
 // for "approve", false for "deny". Used by the persistent auto-approve watcher.
 async function askCommandApproval(rec, commandText) {
   try {
-    const short = commandText.length > 200 ? commandText.slice(0, 200) + "…" : commandText;
+    // Clean again here as a belt-and-suspenders measure: classifyApprovalPrompt
+    // already cleaned verdict.command, but this is the final gate before the
+    // text reaches the overlay, so any stray spinner glyph / status frame that
+    // slipped through another path is stripped here too. Fall back to a short
+    // generic label if cleaning left nothing usable.
+    const cleaned = cleanApprovalText(commandText) || "(command text unavailable)";
+    const short = cleaned.length > 200 ? cleaned.slice(0, 200) + "…" : cleaned;
     const v = await window.termCoder.askChoice({
       prompt: "A coding agent wants to run a command that looks potentially destructive:\n\n" + short,
       options: [
@@ -5397,6 +5442,13 @@ async function sendMessage(textOverride, opts) {
   const c = activeConversation();
   if (!c) { setStatus("Select or create a conversation first."); return; }
   if (running) return;
+  // An app-generated/event turn (e.g. an auto-follow wake) must NOT start
+  // while a permission/choice prompt is awaiting the user — it would create a
+  // fresh streaming UI on top of the active prompt. Drop it; the next
+  // autoFollowTick retries once the prompt is answered. This guard only
+  // applies to event (automatic) sends, so a user who deliberately types
+  // while a prompt is up can still send.
+  if (o.event && pendingChoices > 0) return;
   const text = textOverride != null ? String(textOverride).trim() : el.chatInput.value.trim();
   if (!text) return;
   if (textOverride == null) el.chatInput.value = "";
@@ -5666,6 +5718,11 @@ const AUTO_FOLLOW_COOLDOWN_MS = 8000;
 function autoFollowTick() {
   if (settings.autoFollow === false) return;
   if (running) return;                                  // orchestrator is already busy
+  // Don't start a new orchestrator turn while a permission/choice prompt is
+  // awaiting the user — a fresh streaming turn would spin up a whole new set
+  // of "still thinking" indicators on top of the active prompt. Wait for the
+  // user to answer first; the next tick (2.5s) picks up once it's cleared.
+  if (pendingChoices > 0) return;
   if (Date.now() - lastAutoFollowAt < AUTO_FOLLOW_COOLDOWN_MS) return;
   if (!activeConversation()) return;
 
@@ -5931,6 +5988,12 @@ async function registerSession(session, cmd, args, cwd, label) {
       const beforeYn = cleanText.split(/\(y\/n\)|\[y\/n\]|\(yes\/no\)|\[yes\/no\]/i)[0];
       commandText = (beforeYn.trim().split("\n").pop() || "").trim();
     }
+
+    // The terminal tail carries live CLI spinner glyphs ("✻") and status
+    // frames ("Baking…", "still thinking") that stripAnsi() can't remove —
+    // they're plain unicode redrawn every frame. Clean them out so the
+    // approval overlay shows the real command, not garbled decoration.
+    commandText = cleanApprovalText(commandText);
 
     // Dangerous command patterns — always ask the user before approving.
     const dangerous = /\brm\s+-rf?\b|\bdelete\b|\bdrop\s+(table|database)\b|\bformat\b|\btruncate\b|\bsudo\s+rm\b|\bgit\s+push\s+.*--force\b|\bchmod\s+777\b|\bkill\s+-9\b/i.test(commandText);
@@ -6290,6 +6353,33 @@ function renderSessionInfo() {
 // style "pill" -> pill buttons in a wrapping row (flex-wrap), horizontal, wrap.
 window.termCoder = window.termCoder || {};
 
+// Count of askChoice prompts currently awaiting the user. A permission/approval
+// question can land WHILE an orchestrator turn is still streaming (e.g. a
+// merge_worktree tool call fires askChoice inside onToolCall), so the live
+// "thinking" indicators — typing dots, the streaming caret, spinning tool
+// chips, the status pulse — would keep animating on top of / around the
+// permission content. While a prompt is up we pause those animations (via the
+// .chat-prompt-pending class below) and block new auto-follow turns from
+// starting a fresh streaming UI on top of it. The underlying turn keeps
+// running; only the visual spinners pause, and they resume the instant the
+// last pending prompt is answered.
+let pendingChoices = 0;
+
+// Toggle the "a choice is pending" state on the chat column. The CSS rules
+// scoped to .chat-prompt-pending freeze the thinking-indicator animations and
+// make the overlay opaque so no streaming content shows through around the
+// prompt. Idempotent: adding when already on / removing when already off is a
+// no-op. Robust to the document.body fallback host (no .col-chat ancestor).
+function setPromptPending(on) {
+  let target = null;
+  if (typeof el !== "undefined" && el && el.chatOverlay) {
+    target = el.chatOverlay.closest ? el.chatOverlay.closest(".col-chat") : null;
+  }
+  if (!target) target = document.querySelector(".col-chat") || document.body;
+  if (on) target.classList.add("chat-prompt-pending");
+  else target.classList.remove("chat-prompt-pending");
+}
+
 window.termCoder.askChoice = function askChoice(config) {
   return new Promise((resolve) => {
     const cfg = config || {};
@@ -6347,6 +6437,12 @@ window.termCoder.askChoice = function askChoice(config) {
         b.disabled = true;
         if (b !== clickedBtn) b.classList.add("choice-dimmed");
       }
+      // One fewer prompt awaiting the user. When the last one is answered,
+      // release the "prompt pending" state so the paused thinking-indicator
+      // animations resume (the orchestrator turn may still be streaming) and
+      // auto-follow turns may fire again.
+      pendingChoices = Math.max(0, pendingChoices - 1);
+      if (pendingChoices === 0) setPromptPending(false);
       resolve(value);
       // Auto-dismiss the popup after a brief moment so the user sees their
       // selection confirmed, then it fades away instead of blocking the input.
@@ -6393,6 +6489,16 @@ window.termCoder.askChoice = function askChoice(config) {
     }
     document.addEventListener("keydown", onKey, true);
 
+    // Mark a prompt as pending: pause the live thinking-indicator animations
+    // (typing dots / streaming caret / spinning tool chips / status pulse) so
+    // they don't keep animating on top of / around the permission content, and
+    // make the overlay opaque so streaming UI behind it is occluded. Only do
+    // this for a real prompt (>=1 option) — the no-options path resolves
+    // immediately and never actually awaits the user.
+    if (btns.length) {
+      pendingChoices++;
+      setPromptPending(true);
+    }
     host.appendChild(row);
     if (typeof scrollChatBottom === "function") scrollChatBottom();
   });
