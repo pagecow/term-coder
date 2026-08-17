@@ -5,3 +5,7 @@ Then drag and drop the term-coder-main.zip file into ChatOSS Apps to install and
 Term Coder only runs on the ChatOSS desktop app.
 
 You can download the ChatOSS desktop app here: https://chatoss.ai
+
+You can also git clone the project to open the app in the ChatOSS Create app to have the ability to update the app if you want any additional features.
+
+Term Coder is open source. PRs are welcome.
