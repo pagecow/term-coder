@@ -113,6 +113,13 @@
           <select id="model-picker" class="pill-select" aria-label="Model" title="Chat model"></select>
           <select id="effort-picker" class="pill-select hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
           <span class="chat-controls-spacer"></span>
+          <button id="copy-conv-btn" class="btn btn-ghost btn-small copy-conv-btn" type="button" title="Copy the full conversation to the clipboard" disabled>
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>
+              <path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/>
+            </svg>
+            <span class="copy-conv-label">Copy</span>
+          </button>
           <button id="attach-board-btn" class="btn btn-ghost btn-small" type="button" title="Attach a Kanban board">▦ Board</button>
         </div>
       </header>
