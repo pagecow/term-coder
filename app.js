@@ -3066,7 +3066,17 @@ async function onSpawnStart() {
   }
 
   if (remember) {
-    settings.cliDefault = cli;
+    // Remember the CHOSEN LAUNCH TARGET, not merely the spawn-modal dropdown
+    // tool. The launch target id (from resolveSessionModel) is what the next
+    // session applies automatically — for a direct-CLI launch that's "claude" /
+    // "codex" / "opencode", persisted as the set-cli-style "raw:<id>" value so
+    // it round-trips through the Settings "Default agent" picker (the two
+    // controls share the cliDefault value space and must agree). Ollama launches
+    // (target is an ollama model) have no self-contained set-cli value, so fall
+    // back to the dropdown's ollama-tool id — consistent with the picker, and
+    // auto-applied only when it maps to a concrete target.
+    const tgt = findLaunchTarget(target);
+    settings.cliDefault = (tgt && tgt.kind === "direct") ? ("raw:" + tgt.id) : cli;
     settings.cwdDefault = cwd;
     saveSettings();
   }
@@ -3426,6 +3436,40 @@ function targetKind(id) {
   return t ? t.kind : null;
 }
 
+// Map a persisted "default launch" value — the shared value space of the
+// Settings "Default agent" picker (#set-cli) and the spawn-modal "Remember as
+// default" checkbox — to a launch-target id, or null when it must NOT be
+// auto-applied on session start.
+//
+//   "raw:claude" | "raw:codex" | "raw:opencode" -> the matching direct-CLI
+//       target id ("claude" / "codex" / "opencode"). These are the only values
+//       that name a SELF-CONTAINED launch target (a direct binary needs no extra
+//       model choice), so they are the values that can short-circuit the
+//       launch-target picker.
+//   "ask" | "" | null | undefined -> null. The user asked to be prompted every
+//       time, so the caller falls through to the Model Selection Mode logic.
+//   anything else (the bare ollama-tool names "claude" / "codex" / "chatgpt" /
+//       "hermes" / "opencode" / "copilot", or a stray legacy value) -> null.
+//       These are launch TOOLS, not self-contained launch targets — they still
+//       need an ollama model (chosen in the pill picker / Model Selection Mode),
+//       so they cannot be applied as a single target. Returning null makes the
+//       caller fall through to the normal Model Selection Mode logic, which
+//       preserves the pre-existing behavior for those values.
+//
+// resolveSessionModel consults this BEFORE its mode branches so a saved default
+// is applied on session start instead of re-asking every time (the launch-pick
+// bug): the orchestrator kept showing the pill picker even after the user pinned
+// a default agent.
+function cliDefaultToTargetId(value) {
+  if (!value || value === "ask") return null;
+  if (typeof value !== "string") return null;
+  if (value.indexOf("raw:") === 0) {
+    const id = value.slice(4);
+    return id || null;
+  }
+  return null;
+}
+
 // Build the list of { label, value } options for the pill/rect askChoice picker
 // and for any <select> that should offer the same choices. value is the stable
 // target id so the picker result maps straight back to a launch target.
@@ -3630,6 +3674,10 @@ window.termCoder.getModelSelectionConfig = function () {
     // models. The session-startup integration can read these to know everything
     // launchable.
     availableTargets: availableLaunchTargets(),
+    // The persisted "default launch" (Settings "Default agent" / spawn-modal
+    // "Remember as default"). resolveSessionModel applies it automatically on
+    // session start so the orchestrator does not re-ask every time.
+    cliDefault: settings.cliDefault || "ask",
   };
 };
 
@@ -3731,6 +3779,19 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
   // Bare id list for membership checks and "always"/"complexity" validation.
   const ids = targets.map((t) => t.id);
   const opts = targets.map((t) => ({ label: t.label, value: t.id }));
+
+  // ---- Saved default launch takes priority over the mode branches. ----
+  // The "Default agent" Settings picker and the spawn-modal "Remember as
+  // default" checkbox both persist into settings.cliDefault (exposed here as
+  // cfg.cliDefault). When the user pinned a default that maps to a CURRENTLY
+  // AVAILABLE launch target, apply it automatically and skip the pill picker —
+  // this is the fix for the orchestrator re-asking which launch to use on every
+  // session even after a default was set. "Ask me every time" (and values that
+  // don't map to a concrete target, e.g. the bare ollama-tool names that still
+  // need a model) resolve to null here and fall through to the Model Selection
+  // Mode logic below, so the picker still appears exactly when it should.
+  const defId = cliDefaultToTargetId(cfg.cliDefault);
+  if (defId && ids.includes(defId)) return defId;
 
   // ---- Always: use the configured fixed target, no prompt. ----
   if (cfg.mode === "always") {
