@@ -3277,6 +3277,7 @@ function saveSettingsFromPanel() {
 // releases page for the user to install. APP_VERSION (top of file) must stay
 // in sync with app.json's "version".
 const UPDATES_APP_JSON_URL = "https://raw.githubusercontent.com/pagecow/term-coder/main/app.json";
+const UPDATES_CONTENTS_API_URL = "https://api.github.com/repos/pagecow/term-coder/contents/app.json";
 const UPDATES_RELEASES_API_URL = "https://api.github.com/repos/pagecow/term-coder/releases/latest";
 const UPDATES_RELEASES_PAGE_URL = "https://github.com/pagecow/term-coder/releases";
 
@@ -3312,10 +3313,33 @@ async function fetchLatestVersion() {
     const m = text.match(/"(?:version|tag_name)"\s*:\s*"([^"]+)"/);
     return m ? { version: m[1], tag_name: m[1] } : null;
   };
+  // The GitHub contents API returns JSON whose "content" field is base64-
+  // encoded (and may contain embedded newlines). Strip whitespace, atob it,
+  // then JSON.parse — with the same regex fallback for wrapped/trimmed
+  // payloads. Returns a { version } object, or null.
+  const readContentsApi = async (url) => {
+    const json = await readJson(url);
+    if (!json || !json.content) return null;
+    try {
+      const decoded = atob(String(json.content).replace(/\s+/g, ""));
+      try { return JSON.parse(decoded); } catch (e) { /* fall through to regex */ }
+      const m = decoded.match(/"version"\s*:\s*"([^"]+)"/);
+      return m ? { version: m[1] } : null;
+    } catch (e) { console.warn("readContentsApi decode", e); return null; }
+  };
+  // 1) Primary: the repo's app.json on main. The "?t=" cache-buster forces a
+  //    Fastly CDN cache miss so we always see origin's latest version instead
+  //    of a stale cached copy (raw.githubusercontent.com ignores the param).
   try {
-    const json = await readJson(UPDATES_APP_JSON_URL);
+    const json = await readJson(UPDATES_APP_JSON_URL + "?t=" + Date.now());
     if (json && json.version) return String(json.version);
   } catch (e) { console.warn("fetchLatestVersion app.json", e); }
+  // 2) Fallback: the GitHub contents API — base64-decode its "content" field.
+  try {
+    const json = await readContentsApi(UPDATES_CONTENTS_API_URL);
+    if (json && json.version) return String(json.version);
+  } catch (e) { console.warn("fetchLatestVersion contents", e); }
+  // 3) Last resort: the latest release tag_name.
   try {
     const json = await readJson(UPDATES_RELEASES_API_URL);
     if (json && json.tag_name) return String(json.tag_name);

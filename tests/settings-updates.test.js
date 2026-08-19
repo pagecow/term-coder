@@ -106,6 +106,90 @@ test("T1: checkForUpdates wires the GitHub sources, statuses, and the releases l
   assert(/openReleasesBtn\.addEventListener\("click", openReleasesPage\)/.test(SRC), "Get-update button not wired");
 });
 
+test("T1: raw app.json fetch is cache-busted (forces a CDN cache miss)", () => {
+  // The raw.githubusercontent.com CDN (Fastly) serves a stale cached copy, so
+  // the fetch MUST append a unique query param to force a cache miss. The
+  // constant itself stays unchanged (a prior test asserts its exact value);
+  // only the call site is cache-busted.
+  assert(/UPDATES_APP_JSON_URL \+ "\?t=" \+ Date\.now\(\)/.test(SRC),
+    "raw fetch must append a cache-busting query param (UPDATES_APP_JSON_URL + \"?t=\" + Date.now())");
+  // The constant must still be the bare URL with no query string baked in.
+  assert(/UPDATES_APP_JSON_URL = "https:\/\/raw\.githubusercontent\.com\/pagecow\/term-coder\/main\/app\.json";/.test(SRC),
+    "UPDATES_APP_JSON_URL constant must stay the bare URL (cache-bust is at the call site)");
+});
+
+test("T1: contents-API fallback exists and decodes base64 content", () => {
+  // A reliable second source: the GitHub contents API returns JSON whose
+  // "content" field is base64-encoded (and may contain embedded newlines).
+  const URL = "https://api.github.com/repos/pagecow/term-coder/contents/app.json";
+  assert(SRC.indexOf('UPDATES_CONTENTS_API_URL = "' + URL + '"') !== -1,
+    "UPDATES_CONTENTS_API_URL constant must be the GitHub contents API URL");
+  // The path must decode the base64 "content" field with atob.
+  assert(/atob\(/.test(SRC), "contents-API path must decode base64 with atob");
+  assert(/\.replace\(\/\\s\+\/g, ""\)/.test(SRC),
+    "contents-API path must strip whitespace/newlines from the content before atob");
+  // It must read the version from the decoded payload.
+  assert(/readContentsApi/.test(SRC), "a dedicated contents-API reader must be wired");
+  assert(/readContentsApi\(UPDATES_CONTENTS_API_URL\)/.test(SRC),
+    "readContentsApi must be called with UPDATES_CONTENTS_API_URL");
+});
+
+// Verbatim from app.js (readContentsApi, ~L3320): the decode half of the
+// contents-API path — given the parsed contents-API JSON, strip whitespace/
+// newlines from the base64 "content", atob it, JSON.parse, then regex fallback.
+function readContentsApiDecode(json) {
+  if (!json || !json.content) return null;
+  try {
+    const decoded = atob(String(json.content).replace(/\s+/g, ""));
+    try { return JSON.parse(decoded); } catch (e) { /* fall through to regex */ }
+    const m = decoded.match(/"version"\s*:\s*"([^"]+)"/);
+    return m ? { version: m[1] } : null;
+  } catch (e) { return null; }
+}
+
+test("T1: readContentsApiDecode extracts version from a base64 contents payload", () => {
+  // A real contents-API response: "content" is base64 of the app.json body.
+  // GitHub chunk-splits long content with embedded newlines every 76 chars.
+  const appJsonBody = JSON.stringify({ id: "com.thetjmccarty.termcoder", name: "Term Coder", version: "1.18.1" });
+  const b64clean = Buffer.from(appJsonBody, "utf8").toString("base64");
+  // Simulate the 76-char line wrapping GitHub inserts into the content field.
+  const wrapped = b64clean.match(/.{1,76}/g).join("\n");
+  const out = readContentsApiDecode({ content: wrapped, encoding: "base64" });
+  assert(out && out.version === "1.18.1",
+    "must strip newlines, atob, JSON.parse and read version, got: " + JSON.stringify(out));
+});
+
+test("T1: readContentsApiDecode handles malformed/wrapped decoded payloads via regex", () => {
+  // If the decoded text is not valid JSON (e.g. the fetcher wrapped/trimmed it),
+  // the regex fallback must still recover the version field.
+  const decodedText = 'some leading garbage ... "version": "1.19.0" ... trailing junk';
+  // Pre-encode so atob reproduces the decodedText; inject as the content field.
+  const payload = { content: Buffer.from(decodedText, "utf8").toString("base64") };
+  const out = readContentsApiDecode(payload);
+  assert(out && out.version === "1.19.0",
+    "regex fallback must recover version from a non-JSON decoded payload, got: " + JSON.stringify(out));
+});
+
+test("T1: readContentsApiDecode returns null for missing/bad content", () => {
+  assert.strictEqual(readContentsApiDecode(null), null, "null json -> null");
+  assert.strictEqual(readContentsApiDecode({}), null, "no content field -> null");
+  assert.strictEqual(readContentsApiDecode({ content: "!!!not-base64!!!" }), null,
+    "undecodable base64 -> null (caught, no throw)");
+});
+
+test("T1: fallback chain order is raw first, contents second, releases last", () => {
+  // Locate the three fetch attempts inside fetchLatestVersion by their
+  // distinctive call sites, then assert they appear in source order.
+  const rawIdx = SRC.indexOf('UPDATES_APP_JSON_URL + "?t=" + Date.now()');
+  const contentsIdx = SRC.indexOf("readContentsApi(UPDATES_CONTENTS_API_URL)");
+  const releasesIdx = SRC.indexOf("readJson(UPDATES_RELEASES_API_URL)");
+  assert(rawIdx !== -1, "cache-busted raw fetch not found");
+  assert(contentsIdx !== -1, "contents-API fallback not found");
+  assert(releasesIdx !== -1, "releases fallback not found");
+  assert(rawIdx < contentsIdx, "raw fetch must come before the contents-API fallback");
+  assert(contentsIdx < releasesIdx, "contents-API fallback must come before the releases fallback");
+});
+
 // ---------------------------------------------------------------------------
 // T2 — Settings accuracy fixes
 // ---------------------------------------------------------------------------
