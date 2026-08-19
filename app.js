@@ -5618,12 +5618,25 @@ async function buildSystemPrompt() {
 // timeout guarantees the engine always gets a string back and the chip resolves.
 const TOOL_TIMEOUT_MS = 90 * 1000;
 const TOOL_TIMEOUT_OVERRIDES = { wait_for_session: 15 * 60 * 1000 };
-async function runToolWithTimeout(name, args) {
+async function runToolWithTimeout(name, args, signal) {
   const limit = TOOL_TIMEOUT_OVERRIDES[name] || TOOL_TIMEOUT_MS;
   let timer = null;
+  let onAbort = null;
+  // Race the tool against the turn's abort signal too, so an interrupt (Stop or
+  // interruptAndSend) ends the turn promptly instead of waiting out a long tool
+  // call (wait_for_session can run 15 minutes). The abandoned toolHandler keeps
+  // running in the background — its side effects (a spawned session, a merge)
+  // still complete and the next turn sees them via list_sessions.
+  const abortPromise = new Promise((resolve) => {
+    if (!signal) return;
+    onAbort = () => resolve("Error: interrupted by the user.");
+    if (signal.aborted) { onAbort(); return; }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
   try {
     return await Promise.race([
       toolHandler(name, args),
+      abortPromise,
       new Promise((resolve) => {
         timer = setTimeout(() => resolve(
           "Error: the " + name + " tool did not return within " + Math.round(limit / 1000) +
@@ -5633,17 +5646,34 @@ async function runToolWithTimeout(name, args) {
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener("abort", onAbort);
   }
 }
 
 function setRunning(r) {
   running = r;
-  el.sendBtn.classList.toggle("is-running", r);
-  el.sendBtn.title = r ? "Stop" : "Send";
-  el.sendBtn.setAttribute("aria-label", r ? "Stop" : "Send");
-  if (el.sendIcon) el.sendIcon.classList.toggle("hidden", r);
-  if (el.stopIcon) el.stopIcon.classList.toggle("hidden", !r);
-  el.chatInput.disabled = r;
+  syncSendButton();
+  // The composer stays ENABLED while a turn runs so the user can interrupt the
+  // orchestrator with a new message (see interruptAndSend). Only the placeholder
+  // changes to advertise that.
+  if (r) {
+    el.chatInput.placeholder = "Type to interrupt the orchestrator…";
+  } else {
+    el.chatInput.placeholder = activeConversation() ? "Ask the orchestrator to build something…" : "Select or create a conversation…";
+  }
+}
+
+// The send button doubles as Stop while a turn runs. When the user has typed a
+// message, the button flips back to Send — submitting it interrupts the current
+// turn and delivers the message (see interruptAndSend).
+function syncSendButton() {
+  const hasText = !!(el.chatInput && el.chatInput.value && el.chatInput.value.trim());
+  const isStop = running && !hasText;
+  el.sendBtn.classList.toggle("is-running", isStop);
+  el.sendBtn.title = isStop ? "Stop" : "Send";
+  el.sendBtn.setAttribute("aria-label", isStop ? "Stop" : "Send");
+  if (el.sendIcon) el.sendIcon.classList.toggle("hidden", isStop);
+  if (el.stopIcon) el.stopIcon.classList.toggle("hidden", !isStop);
 }
 
 // textOverride lets the app itself start a turn (see autoFollowTick). opts.event
@@ -5684,6 +5714,14 @@ async function sendMessage(textOverride, opts) {
   scrollChatBottom(false);
   updateChatEmpty();
 
+  await runOrchestratorTurn(c);
+}
+
+// Runs ONE orchestrator turn for the given conversation: streams the reply,
+// executes tool calls, and persists the assistant message. Extracted from
+// sendMessage so interruptAndSend can start a fresh turn after aborting an
+// in-flight one. Callers must have already pushed the user message.
+async function runOrchestratorTurn(c) {
   setRunning(true);
   setStatus("Generating…");
   abortController = new AbortController();
@@ -5829,7 +5867,7 @@ async function sendMessage(textOverride, opts) {
         if (accContent) segmentBreakPending = true;
         maybeScrollChatBottom();
         try {
-          const res = await runToolWithTimeout(name, args);
+          const res = await runToolWithTimeout(name, args, abortController);
           entry.result = res;
           sqlitePersistToolCall(c.id, entry);
           chip._setResult(res);
@@ -5856,7 +5894,7 @@ async function sendMessage(textOverride, opts) {
     const thinking = result && result.thinking ? result.thinking : accThink;
 
     if (result && result.aborted) {
-      setStatus("Stopped");
+      setStatus(interruptDeliveryActive ? "Interrupted — continuing…" : "Stopped");
     } else {
       setStatus("");
     }
@@ -5883,15 +5921,21 @@ async function sendMessage(textOverride, opts) {
         return { name: tc.name, args: tc.args, result: live.result, error: live.error };
       });
     }
-    c.messages.push({
-      role: "assistant",
-      content: content || "(no response)",
-      thinking: thinking || undefined,
-      toolCalls: storedToolCalls,
-    });
-    saveState();
-    renderMessage(c.messages[c.messages.length - 1]);
-    maybeScrollChatBottom();
+    // When this abort was an interrupt-and-continue delivery (interruptAndSend),
+    // the user's new message is ALREADY in history and a fresh turn starts the
+    // moment this one unwinds. Don't save a partial assistant reply — it would
+    // sit AFTER the user's new message in history and confuse the next turn.
+    if (!(result && result.aborted && interruptDeliveryActive)) {
+      c.messages.push({
+        role: "assistant",
+        content: content || "(no response)",
+        thinking: thinking || undefined,
+        toolCalls: storedToolCalls,
+      });
+      saveState();
+      renderMessage(c.messages[c.messages.length - 1]);
+      maybeScrollChatBottom();
+    }
   } catch (e) {
     typingRow.remove();
     liveRow.remove();
@@ -5899,11 +5943,17 @@ async function sendMessage(textOverride, opts) {
     // KEEP the live card (collapsed) — it's the only record of what ran.
     if (activityCard) activityCard._finish();
     setStatus("");
-    const msg = "Error: " + (e && e.message ? e.message : String(e));
-    c.messages.push({ role: "system", content: msg });
-    saveState();
-    renderMessage({ role: "system", content: msg });
-    maybeScrollChatBottom();
+    if (interruptDeliveryActive) {
+      // The abort was an interrupt-and-continue delivery: the user's new message
+      // is already in history and a fresh turn starts right after this unwinds.
+      // Don't record a spurious error/system message for the interrupted turn.
+    } else {
+      const msg = "Error: " + (e && e.message ? e.message : String(e));
+      c.messages.push({ role: "system", content: msg });
+      saveState();
+      renderMessage({ role: "system", content: msg });
+      maybeScrollChatBottom();
+    }
   } finally {
     // Nothing may be left spinning. If the turn ended (normally, by error, or by
     // abort) while a tool call was still outstanding, mark those chips
@@ -5913,6 +5963,105 @@ async function sendMessage(textOverride, opts) {
     }
     setRunning(false);
     abortController = null;
+  }
+}
+
+// ---------- Mid-run delivery: message the orchestrator while it works ----------
+// While a turn is running the composer stays enabled. Sending a message then
+// INTERRUPTS the in-flight turn and the orchestrator CONTINUES with the new
+// message: the message is shown in the chat immediately, the current turn is
+// aborted, and once it has fully unwound a fresh turn starts with the message
+// in history (the same streaming path as a normal send).
+//
+// The orchestrator here is the chat model (chatApi.runTurn), not a CLI session,
+// so "deliver to the orchestrator" = abort the in-flight runTurn and start the
+// next one. (Sub-agent CLI sessions are driven by the orchestrator's own
+// send_to_session tool, which already uses paste() + key('enter').)
+let midRunDeliveryInFlight = false;   // double-submission guard
+let interruptDeliveryActive = false;   // set while aborting for a delivery, so the
+                                      // interrupted turn skips saving a partial reply
+
+// Resolves when the in-flight orchestrator turn has fully unwound (its finally
+// clears `running`). The abort signal makes the engine end the turn promptly;
+// the timeout is a safety net so a stuck turn can never wedge the composer.
+function waitForTurnEnd(timeoutMs) {
+  const limit = timeoutMs || 30000;
+  return new Promise((resolve) => {
+    if (!running) { resolve(); return; }
+    const started = Date.now();
+    const iv = setInterval(() => {
+      if (!running || Date.now() - started >= limit) {
+        clearInterval(iv);
+        resolve();
+      }
+    }, 100);
+  });
+}
+
+async function interruptAndSend(text) {
+  if (midRunDeliveryInFlight) {
+    setStatus("Already delivering your previous message — one moment…");
+    return;
+  }
+  const c = activeConversation();
+  if (!c) { setStatus("Select or create a conversation first."); return; }
+  midRunDeliveryInFlight = true;
+  try {
+    // 1. Show the user message immediately (same naming logic as sendMessage).
+    const userMsg = { role: "user", content: text };
+    const wasFirstUserMsg = !c.messages.some((m) => m.role === "user" && !m.event);
+    let renamedConv = false;
+    if (wasFirstUserMsg && /^Conversation \d+$/.test(c.name)) {
+      c.name = nameFromFirstMessage(text, c.name);
+      renamedConv = true;
+    }
+    c.messages.push(userMsg);
+    saveState();
+    if (renamedConv) { renderProjects(); renderSessionInfo(); }
+    const userRow = renderMessage(userMsg);
+    scrollChatBottom(false);
+    updateChatEmpty();
+    el.chatInput.value = "";
+    el.chatInput.style.height = "auto"; // reset the auto-resized composer
+    syncSendButton();                   // empty composer + running → back to Stop
+
+    // 2. Interrupt the in-flight turn.
+    interruptDeliveryActive = true;
+    if (abortController) abortController.abort();
+
+    // 3. Wait for the old turn to fully unwind (its finally clears `running`).
+    await waitForTurnEnd();
+    if (running) {
+      // Safety net: the turn ignored the abort (shouldn't happen — tool calls
+      // race the abort signal). Leave the message in history; the user can
+      // retry once the turn ends.
+      interruptDeliveryActive = false;
+      midRunDeliveryInFlight = false;
+      setStatus("The current step is still finishing — try again in a moment.");
+      return;
+    }
+
+    // 4. If the old turn finished on its own (not aborted) while we waited, it
+    //    pushed its assistant reply AFTER our user message. Move our message to
+    //    the end so history order stays user → assistant, and mirror the move in
+    //    the DOM.
+    const idx = c.messages.indexOf(userMsg);
+    if (idx !== -1 && idx < c.messages.length - 1) {
+      c.messages.splice(idx, 1);
+      c.messages.push(userMsg);
+      saveState();
+      if (userRow && userRow.parentNode === el.chatLog) el.chatLog.appendChild(userRow);
+    }
+
+    // 5. Continue with the new message. Clear the delivery markers FIRST so this
+    //    new turn can itself be interrupted the same way.
+    interruptDeliveryActive = false;
+    midRunDeliveryInFlight = false;
+    await runOrchestratorTurn(c);
+  } catch (e) {
+    interruptDeliveryActive = false;
+    midRunDeliveryInFlight = false;
+    setStatus("Interrupt failed: " + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -7409,7 +7558,17 @@ async function init() {
   if (el.detachBoardBtn) el.detachBoardBtn.addEventListener("click", detachBoard);
   el.chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
-    if (running) { if (abortController) abortController.abort(); return; }
+    const text = el.chatInput.value.trim();
+    if (running) {
+      if (text) {
+        // Mid-run message: interrupt the current orchestrator turn and continue
+        // with the new message (delivered as a fresh turn, not a plain stop).
+        interruptAndSend(text);
+      } else if (abortController) {
+        abortController.abort(); // plain stop — no new message
+      }
+      return;
+    }
     sendMessage();
   });
   // Enter sends, Shift+Enter newline
@@ -7426,7 +7585,12 @@ async function init() {
     // Keep the askChoice overlay above the now-taller composer.
     syncOverlayOffset();
   };
-  el.chatInput.addEventListener("input", autoResizeInput);
+  el.chatInput.addEventListener("input", () => {
+    autoResizeInput();
+    // While a turn runs the send button doubles as Stop; typing flips it back
+    // to Send so the user can see their message will be delivered.
+    syncSendButton();
+  });
 
   // Empty-state example prompts — clicking fills the composer and sends.
   if (el.chatEmpty) {
