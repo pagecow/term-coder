@@ -16,7 +16,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.18.2";
+const APP_VERSION = "1.18.3";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -1828,6 +1828,38 @@ const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     function: {
+      name: "create_card",
+      description: "Create a new Kanban card on the attached board (boardId defaults to the attached board). Returns the new card id.",
+      parameters: {
+        type: "object",
+        properties: {
+          boardId: { type: "string", description: "Optional. Defaults to the attached board." },
+          title: { type: "string", description: "The card title (required)." },
+          description: { type: "string", description: "Optional longer description." },
+          columnId: { type: "string", description: "The column to add the card to — must be one of the column ids from get_board. Defaults to the first column." },
+        },
+        required: ["title"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_column",
+      description: "Create a new column on the attached Kanban board (boardId defaults to the attached board). Returns the new column id.",
+      parameters: {
+        type: "object",
+        properties: {
+          boardId: { type: "string", description: "Optional. Defaults to the attached board." },
+          name: { type: "string", description: "The column name (required)." },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "get_current_git_branch",
       description: "Return the current git branch name of the project (active project unless projectId is given).",
       parameters: {
@@ -2887,6 +2919,31 @@ async function toolHandler(name, args) {
           try { await window.chatoss.notifications.send({ title: "Task complete", body }); } catch (e) { /* non-fatal */ }
         }
         return "ok";
+      }
+      case "create_card": {
+        const bid = resolveBoardId(args);
+        if (!bid) return "Error: no board attached to this conversation.";
+        if (!args.title) return "Error: title is required.";
+        try {
+          const payload = { title: args.title };
+          if (args.description !== undefined && args.description !== null) payload.description = args.description;
+          if (args.columnId !== undefined && args.columnId !== null) payload.columnId = args.columnId;
+          const id = await window.chatoss.boards.createCard(bid, payload);
+          return "created card " + id;
+        } catch (e) {
+          return "Error: " + (e && e.message ? e.message : String(e));
+        }
+      }
+      case "create_column": {
+        const bid = resolveBoardId(args);
+        if (!bid) return "Error: no board attached to this conversation.";
+        if (!args.name) return "Error: name is required.";
+        try {
+          const id = await window.chatoss.boards.createColumn(bid, { name: args.name });
+          return "created column " + id;
+        } catch (e) {
+          return "Error: " + (e && e.message ? e.message : String(e));
+        }
       }
       case "get_current_git_branch": {
         const p = resolveProject(args);
@@ -5920,6 +5977,7 @@ async function buildSystemPrompt() {
           sys.push("- cardId " + card.id + " [" + (col ? col.name : "?") + "]" + (card.done ? " (done)" : "") + " " + card.title +
             (card.description ? " — " + card.description : ""));
         }
+        sys.push("You can create new cards with create_card({ title, description?, columnId }) and new columns with create_column({ name }) — columnId must be one of the column ids listed above.");
       }
     } catch (e) {
       sys.push("(Could not read attached board: " + (e && e.message ? e.message : String(e)) + ")");
