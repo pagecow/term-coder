@@ -4106,7 +4106,10 @@ function paintProjSessions() {
   if (el.projSessionsCount) el.projSessionsCount.textContent = String(total);
 
   body.innerHTML = "";
-  const recs = [...sessions.values()].sort((a, b) => (b.lastOutputAt || 0) - (a.lastOutputAt || 0));
+  // Newest session first (by createdAt, which is immutable — unlike lastOutputAt,
+  // so the list order stays stable as agents emit output). Live sessions render
+  // above the ended ones.
+  const recs = [...sessions.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const deads = [...deadSessions.values()].sort((a, b) => (b.endedAt || b.createdAt || 0) - (a.endedAt || a.createdAt || 0));
   if (!recs.length && !deads.length) {
     const note = document.createElement("div");
@@ -6433,9 +6436,10 @@ async function registerSession(session, cmd, args, cwd, label) {
 
   square.appendChild(header);
   square.appendChild(mountEl);
-  // insert before the empty-state card so the grid stays clean
-  if (el.termEmpty && el.termEmpty.parentNode === el.termGrid) el.termGrid.insertBefore(square, el.termEmpty);
-  else el.termGrid.appendChild(square);
+  // Newest session first: prepend the square to the TOP of the grid so
+  // currently-running terminals sit above ended (dead) cards and stay visible
+  // without scrolling. The empty-state hint (termEmpty) remains the last child.
+  el.termGrid.insertBefore(square, el.termGrid.firstChild);
 
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
