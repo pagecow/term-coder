@@ -1340,6 +1340,7 @@ const el = {
   // middle
   modelPicker: $("model-picker"),
   effortPicker: $("effort-picker"),
+  copyConvBtn: $("copy-conv-btn"),
   attachBoardBtn: $("attach-board-btn"),
   attachedBoardName: $("attached-board-name"),
   boardChip: $("board-chip"),
@@ -5442,6 +5443,7 @@ function updateChatEmpty() {
 function renderChat() {
   const c = activeConversation();
   el.chatLog.innerHTML = "";
+  syncCopyConvBtn();
   if (!c) {
     el.chatTitle.textContent = "Ask the agent";
     el.chatInput.placeholder = "Select or create a conversation…";
@@ -5556,6 +5558,73 @@ function selectedModel() { return el.modelPicker.value; }
 function selectedEffort() {
   if (el.effortPicker.classList.contains("hidden")) return null;
   return el.effortPicker.value || null;
+}
+
+// ---------- Copy conversation ----------
+// Serialize a conversation's full message history (user + assistant + system,
+// including thinking and tool-call activity) into readable plain text.
+function conversationToText(c) {
+  if (!c || !c.messages || !c.messages.length) return "";
+  const parts = [];
+  for (const m of c.messages) {
+    const role = m.role || "system";
+    const label = m.event ? "Event" : (role === "user" ? "You" : role === "assistant" ? "Assistant" : "System");
+    let block = label + ":\n" + (m.content || "");
+    if (m.thinking) block += "\n\nThinking:\n" + m.thinking;
+    if (m.toolCalls && m.toolCalls.length) {
+      const lines = m.toolCalls.map((t) => {
+        let s = "• " + t.name + "(" + (t.args ? JSON.stringify(t.args) : "") + ")";
+        if (t.result !== undefined) s += "\n  " + (typeof t.result === "string" ? t.result : JSON.stringify(t.result));
+        if (t.error) s += "\n  " + t.error;
+        return s;
+      });
+      block += "\n\nTools:\n" + lines.join("\n");
+    }
+    parts.push(block);
+  }
+  return parts.join("\n\n");
+}
+
+let copyConvTimer = null;
+// Enable/disable the toolbar button to match whether a conversation is loaded.
+function syncCopyConvBtn() {
+  const btn = el.copyConvBtn;
+  if (!btn) return;
+  const c = activeConversation();
+  const hasContent = !!(c && c.messages && c.messages.length);
+  btn.disabled = !hasContent;
+  if (!hasContent) {
+    btn.classList.remove("copied");
+    const lab = btn.querySelector(".copy-conv-label");
+    if (lab) lab.textContent = "Copy";
+  }
+}
+// Copy the ENTIRE active conversation to the clipboard, with a brief
+// "Copied!" confirmation on the button. No-op when no conversation is loaded.
+async function copyConversation() {
+  const c = activeConversation();
+  if (!c || !c.messages || !c.messages.length) return; // no conversation → no-op
+  const text = conversationToText(c);
+  if (!text) return;
+  try {
+    await window.chatoss.clipboard.writeText(text);
+  } catch (e) {
+    console.warn("clipboard write", e);
+    setStatus("Clipboard unavailable — enable it in Permissions.");
+    return;
+  }
+  const btn = el.copyConvBtn;
+  if (!btn) return;
+  const lab = btn.querySelector(".copy-conv-label");
+  if (lab) lab.textContent = "Copied!";
+  btn.classList.add("copied");
+  btn.disabled = true;
+  clearTimeout(copyConvTimer);
+  copyConvTimer = setTimeout(() => {
+    btn.classList.remove("copied");
+    if (lab) lab.textContent = "Copy";
+    syncCopyConvBtn();
+  }, 1600);
 }
 
 // ---------- Build system prompt ----------
@@ -7747,6 +7816,7 @@ async function init() {
   el.newProjectBtn.addEventListener("click", newProject);
 
   // middle column
+  el.copyConvBtn.addEventListener("click", copyConversation);
   el.attachBoardBtn.addEventListener("click", openBoardPicker);
   if (el.detachBoardBtn) el.detachBoardBtn.addEventListener("click", detachBoard);
   el.chatForm.addEventListener("submit", (e) => {

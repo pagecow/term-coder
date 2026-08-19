@@ -840,6 +840,27 @@ body.is-resizing .term-mount { pointer-events: none; }
 }
 .chat-controls-spacer { flex: 1; }
 
+/* Copy-conversation toolbar button (clipboard icon + label; "Copied!" flash). */
+.copy-conv-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.copy-conv-btn:disabled {
+  opacity: .45;
+  cursor: default;
+}
+.copy-conv-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-2);
+}
+.copy-conv-btn.copied {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+.copy-conv-btn.copied:hover { background: var(--accent-tint); }
+
 .pill-select {
   border: 1px solid var(--border-strong);
   border-radius: 999px;
