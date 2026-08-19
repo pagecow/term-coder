@@ -16,7 +16,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.16.1";
+const APP_VERSION = "1.18.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -5927,7 +5927,7 @@ async function runToolWithTimeout(name, args, signal) {
     if (!signal) return;
     onAbort = () => resolve("Error: interrupted by the user.");
     if (signal.aborted) { onAbort(); return; }
-    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
     return await Promise.race([
@@ -5942,7 +5942,7 @@ async function runToolWithTimeout(name, args, signal) {
     ]);
   } finally {
     if (timer) clearTimeout(timer);
-    if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+    if (onAbort && signal && typeof signal.removeEventListener === "function") signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -6163,7 +6163,7 @@ async function runOrchestratorTurn(c) {
         if (accContent) segmentBreakPending = true;
         maybeScrollChatBottom();
         try {
-          const res = await runToolWithTimeout(name, args, abortController);
+          const res = await runToolWithTimeout(name, args, abortController.signal);
           entry.result = res;
           sqlitePersistToolCall(c.id, entry);
           chip._setResult(res);
