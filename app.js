@@ -38,19 +38,21 @@ const OLLAMA_LAUNCH_TOOLS = [
 let ollamaPath = null;
 const OLLAMA_GUESSES = ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/usr/bin/ollama", "/bin/ollama", "/snap/bin/ollama"];
 
-// ── Direct-CLI launch targets (claude / codex) ──
+// ── Direct-CLI launch targets (claude / codex / opencode) ──
 // Resolved absolute paths to the real coding-CLI binaries, found at detect
-// time. When the user picks "claude" or "codex" as a launch target we spawn
-// THESE directly via the terminal capability — NOT through `ollama launch`.
-// This is for users who have a direct account and don't want to go through
-// ollama. Like ollamaPath, the absolute path survives the sandbox's minimal
-// PATH. Stays null when the binary isn't installed.
+// time. When the user picks "claude", "codex", or "opencode" as a launch
+// target we spawn THESE directly via the terminal capability — NOT through
+// `ollama launch`. This is for users who have a direct account and don't want
+// to go through ollama. Like ollamaPath, the absolute path survives the
+// sandbox's minimal PATH. Stays null when the binary isn't installed.
 let claudePath = null;
 let codexPath = null;
+let opencodePath = null;
 // Well-known locations to fall back to when `which` fails under the minimal
 // sandbox PATH (same rationale as OLLAMA_GUESSES).
 const CLAUDE_GUESSES = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude", "/usr/bin/claude", "/bin/claude"];
 const CODEX_GUESSES = ["/usr/local/bin/codex", "/opt/homebrew/bin/codex", "/usr/bin/codex", "/bin/codex"];
+const OPENCODE_GUESSES = ["/usr/local/bin/opencode", "/opt/homebrew/bin/opencode", "/usr/bin/opencode", "/bin/opencode"];
 
 // Wrap a command so it runs in a login shell (full user PATH) when possible.
 // Falls back to the bare command if we can't build a wrapper.
@@ -68,7 +70,7 @@ let state = {
   convShown: {},       // project id -> how many conversations are visible (pagination)
 };
 let settings = {
-  cliDefault: "ask",       // 'ask' | 'ollama' | 'codex' | 'claude'
+  cliDefault: "ask",       // 'ask' | 'ollama' | 'codex' | 'claude' | 'raw:claude' | 'raw:codex' | 'raw:opencode' | ...
   modelDefault: "ask",     // 'ask' | <ollama model name>
   cwdDefault: "",
   // Wake the orchestrator automatically when a delegated agent finishes its turn
@@ -111,7 +113,7 @@ let abortController = null;
 //   (mirrors ollamaPath). The sandboxed terminal runs a non-login shell with a
 //   minimal PATH, so storing the absolute path lets us launch the real CLI
 //   directly even when bare "claude"/"codex" wouldn't resolve.
-let detection = { codex: false, claude: false, ollama: false, models: [], scannedAt: 0, denied: false, claudePath: null, codexPath: null };
+let detection = { codex: false, claude: false, ollama: false, opencode: false, models: [], scannedAt: 0, denied: false, claudePath: null, codexPath: null, opencodePath: null };
 
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
@@ -1420,7 +1422,7 @@ async function detectTools(force = false) {
   if (!force && detection.scannedAt && now - detection.scannedAt < DETECT_TTL_MS) {
     return detection;
   }
-  const fresh = { codex: false, claude: false, ollama: false, models: [], scannedAt: now, denied: false, claudePath: null, codexPath: null };
+  const fresh = { codex: false, claude: false, ollama: false, opencode: false, models: [], scannedAt: now, denied: false, claudePath: null, codexPath: null, opencodePath: null };
   const cwd = defaultCwd();
 
   const probe = async (cmd) => {
@@ -1459,14 +1461,18 @@ async function detectTools(force = false) {
     return path;
   };
 
-  // Resolve the direct claude / codex binaries (for launching them WITHOUT
-  // going through ollama). The boolean flags stay in lockstep with the path.
+  // Resolve the direct claude / codex / opencode binaries (for launching them
+  // WITHOUT going through ollama). The boolean flags stay in lockstep with the
+  // path.
   codexPath = await resolveCliPath("codex", CODEX_GUESSES);
   fresh.codex = !!codexPath;
   fresh.codexPath = codexPath;
   claudePath = await resolveCliPath("claude", CLAUDE_GUESSES);
   fresh.claude = !!claudePath;
   fresh.claudePath = claudePath;
+  opencodePath = await resolveCliPath("opencode", OPENCODE_GUESSES);
+  fresh.opencode = !!opencodePath;
+  fresh.opencodePath = opencodePath;
 
   // Resolve ollama's absolute path — the sandbox shell has a minimal PATH, so
   // "which ollama" may fail even though ollama is installed. Try `which`, then
@@ -1503,10 +1509,12 @@ async function detectTools(force = false) {
     codex: detection.codex,
     claude: detection.claude,
     ollama: detection.ollama,
+    opencode: detection.opencode,
     models: detection.models.slice(),
     denied: detection.denied,
     claudePath: detection.claudePath || null,
     codexPath: detection.codexPath || null,
+    opencodePath: detection.opencodePath || null,
   };
   saveSettings();
   renderDetectedList();
@@ -2815,6 +2823,7 @@ function buildCliOptions() {
   // directly as launch targets.
   if (detection.claude) push("raw:claude", "claude  (direct binary)", true);
   if (detection.codex) push("raw:codex", "codex  (direct binary)", true);
+  if (detection.opencode) push("raw:opencode", "opencode  (direct binary)", true);
   return opts;
 }
 
@@ -3006,7 +3015,7 @@ async function spawnChosen(choice) {
     if (target && target.kind === "direct") {
       // ── Direct CLI launch ── run the REAL binary via the terminal capability,
       // NOT through ollama. Uses the resolved absolute path (claudePath /
-      // codexPath) so it survives the sandbox's minimal PATH.
+      // codexPath / opencodePath) so it survives the sandbox's minimal PATH.
       inner = "exec " + JSON.stringify(target.bin);
       label = target.id + " · " + basename(choice.cwd);
     } else {
@@ -3060,7 +3069,7 @@ function renderDetectedList() {
   // persisted settings.detected snapshot. The snapshot can be stale (restored
   // from an older app version) and then disagrees with the pickers, which is
   // exactly the "Settings shows fewer models than the chat picker" bug.
-  const d = detection || { codex: false, claude: false, ollama: false, models: [], denied: false };
+  const d = detection || { codex: false, claude: false, ollama: false, opencode: false, models: [], denied: false };
   el.detectedList.innerHTML = "";
   const row = (name, ok) => {
     const div = document.createElement("div");
@@ -3075,8 +3084,10 @@ function renderDetectedList() {
   row("codex", !!d.codex);
   row("claude", !!d.claude);
   row("ollama", !!d.ollama);
+  row("opencode", !!d.opencode);
   // Show the resolved direct-CLI paths so the user can confirm the real
-  // binaries were found (these are what "claude"/"codex" launch targets use).
+  // binaries were found (these are what "claude"/"codex"/"opencode" launch
+  // targets use).
   if (d.claude && d.claudePath) {
     const div = document.createElement("div");
     div.className = "detected-item";
@@ -3087,6 +3098,12 @@ function renderDetectedList() {
     const div = document.createElement("div");
     div.className = "detected-item";
     div.textContent = "  codex direct: " + d.codexPath;
+    el.detectedList.appendChild(div);
+  }
+  if (d.opencode && d.opencodePath) {
+    const div = document.createElement("div");
+    div.className = "detected-item";
+    div.textContent = "  opencode direct: " + d.opencodePath;
     el.detectedList.appendChild(div);
   }
   // The COMPLETE ollama model list (terminal detection + local models from the
@@ -3266,8 +3283,9 @@ function availableOllamaModels() {
 //                                          <tool> --model <model>` (existing path).
 //
 // `id` is the stable value stored in settings (alwaysModel / complexityModel*).
-// Direct CLIs use ids "claude" and "codex"; ollama models use their model name.
-// kind is derived from the id with targetKind() so a bare id round-trips.
+// Direct CLIs use ids "claude", "codex", and "opencode"; ollama models use their
+// model name. kind is derived from the id with targetKind() so a bare id
+// round-trips.
 function availableLaunchTargets() {
   const out = [];
   // Direct CLIs first — these are the "I have a direct account" options and
@@ -3278,6 +3296,9 @@ function availableLaunchTargets() {
   }
   if (detection.codex && detection.codexPath) {
     out.push({ kind: "direct", id: "codex", label: "codex  (Codex, direct)", bin: detection.codexPath });
+  }
+  if (detection.opencode && detection.opencodePath) {
+    out.push({ kind: "direct", id: "opencode", label: "opencode  (OpenCode, direct)", bin: detection.opencodePath });
   }
   // Ollama models — the existing launch path. Each becomes its own target so
   // picking one launches through ollama with that model.
@@ -3501,8 +3522,9 @@ window.termCoder.getModelSelectionConfig = function () {
     complexityModelMedium: modelSelection.complexityModelMedium || "",
     complexityModelHigh: modelSelection.complexityModelHigh || "",
     availableModels: availableOllamaModels(),
-    // Unified launch targets: direct CLIs (claude/codex) + ollama models. The
-    // session-startup integration can read these to know everything launchable.
+    // Unified launch targets: direct CLIs (claude/codex/opencode) + ollama
+    // models. The session-startup integration can read these to know everything
+    // launchable.
     availableTargets: availableLaunchTargets(),
   };
 };
@@ -3597,8 +3619,8 @@ function assessComplexity(taskPrompt) {
 window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPrompt) {
   const cfg = window.termCoder.getModelSelectionConfig();
   // Unified launch targets (direct CLIs + ollama models) — supersedes the
-  // ollama-only `availableModels` list so the picker can offer claude/codex
-  // directly alongside ollama models.
+  // ollama-only `availableModels` list so the picker can offer
+  // claude/codex/opencode directly alongside ollama models.
   const targets = Array.isArray(cfg.availableTargets) && cfg.availableTargets.length
     ? cfg.availableTargets
     : (Array.isArray(cfg.availableModels) ? cfg.availableModels.map((m) => ({ kind: "ollama", id: m, label: m, model: m })) : []);
@@ -7522,14 +7544,16 @@ async function init() {
     codex: !!(settings.detected && settings.detected.codex),
     claude: !!(settings.detected && settings.detected.claude),
     ollama: !!(settings.detected && settings.detected.ollama),
+    opencode: !!(settings.detected && settings.detected.opencode),
     models: (settings.detected && settings.detected.models) || [],
     scannedAt: 0, // force a fresh scan at startup
     denied: !!(settings.detected && settings.detected.denied),
     // Restore the resolved direct-CLI paths so the launch-target picker can
-    // list claude/codex immediately on a cold start, before the fresh scan
-    // finishes. detectTools refreshes these with live values shortly after.
+    // list claude/codex/opencode immediately on a cold start, before the fresh
+    // scan finishes. detectTools refreshes these with live values shortly after.
     claudePath: (settings.detected && settings.detected.claudePath) || null,
     codexPath: (settings.detected && settings.detected.codexPath) || null,
+    opencodePath: (settings.detected && settings.detected.opencodePath) || null,
   };
 
   // load models
