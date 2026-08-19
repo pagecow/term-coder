@@ -576,8 +576,97 @@ const SQLITE_DB = "termcoder";
 let sqliteReady = false;
 let sqliteInitPromise = null;
 
+// --- ChatOSS sqlite API shape detection -------------------------------
+// The documented contract is namespace-based: `db.open(name)` returns a
+// sanitized NAME string, then `db.exec(name, sql, params)` / `db.query(name,
+// sql, params)` / `db.close(name)` live on `window.chatoss.db`.
+//
+// The ACTUAL ChatOSS platform (as of the build this app runs against) is
+// HANDLE-based: `db.open(name)` returns an OBJECT whose own methods are
+// `handle.exec(sql)`, `handle.query(sql, params)` and `handle.close()`, with
+// NO name argument (the handle is already bound to its DB). It also has a
+// quirk: `handle.exec` does NOT bind parameters (it ignores any params arg,
+// throwing "Wrong number of parameters passed to query"), while
+// `handle.query(sql, paramsArray)` DOES bind them.
+//
+// To stay correct against EITHER shape (and survive a future platform change
+// that brings the namespace API in line with the docs), we detect the shape
+// once at open time and route every call through these helpers:
+let sqliteApiShape = "unknown"; // "namespace" | "handle"
+let sqliteHandle = null;        // the handle object when shape === "handle"
+let sqliteName = null;          // the sanitized name string when shape === "namespace"
+
+// Safely substitute `?` placeholders in a SQL string when the active exec path
+// cannot bind params (i.e. the handle-exec path, which ignores params). Values
+// are escaped for SQLite: strings get their quotes doubled, numbers/booleans
+// are emitted literally, null/undefined -> NULL. This is only a fallback for
+// the handle.exec() path; the namespace and handle.query() paths bind params
+// natively. NOTE: every value Term Coder stores here is app-generated (ids,
+// model output, tool results) — not user SQL — so interpolation is safe.
+function sqliteInterpolate(sql, params) {
+  if (!Array.isArray(params) || params.length === 0) return sql;
+  let i = 0, out = "", literal = false;
+  for (let k = 0; k < sql.length; k++) {
+    const ch = sql[k];
+    if (literal) { out += ch; if (ch === "'" && sql[k + 1] === "'") { out += "'"; k++; } else if (ch === "'") literal = false; continue; }
+    if (ch === "'") { literal = true; out += ch; continue; }
+    if (ch === "?") {
+      const v = i < params.length ? params[i++] : null;
+      out += sqliteLiteral(v);
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+function sqliteLiteral(v) {
+  if (v === null || v === undefined) return "NULL";
+  if (typeof v === "number") return (isFinite(v) ? String(v) : "NULL");
+  if (typeof v === "boolean") return v ? "1" : "0";
+  // strings: escape embedded single quotes by doubling them
+  return "'" + String(v).replace(/'/g, "''") + "'";
+}
+
+// Internal raw exec — does NOT gate on sqliteReady (used DURING sqliteInit to
+// create the schema before the ready flag is set). Returns affected-row count.
+async function _sqliteExecRaw(sql, params) {
+  if (sqliteApiShape === "namespace") {
+    return await window.chatoss.db.exec(sqliteName, sql, params) | 0;
+  }
+  // handle shape — exec does NOT bind params, so interpolate them in safely
+  const real = params && params.length ? sqliteInterpolate(sql, params) : sql;
+  return await sqliteHandle.exec(real) | 0;
+}
+
+// Internal raw query — does NOT gate on sqliteReady.
+async function _sqliteQueryRaw(sql, params) {
+  if (sqliteApiShape === "namespace") {
+    return await window.chatoss.db.query(sqliteName, sql, params) || [];
+  }
+  // handle shape — query DOES bind params natively
+  return await sqliteHandle.query(sql, params || []) || [];
+}
+
+// Run a statement (DDL/DML). Accepts (sql, params?). Returns the affected-row
+// count from the platform (or 0 when the platform returns nothing meaningful).
+async function sqliteExec(sql, params) {
+  if (!sqliteReady) return 0;
+  try {
+    return await _sqliteExecRaw(sql, params);
+  } catch (e) { console.warn("sqliteExec", e && e.message ? e.message : String(e), sql); throw e; }
+}
+
+// Run a SELECT. Accepts (sql, params?). Returns rows as objects keyed by column.
+async function sqliteQuery(sql, params) {
+  if (!sqliteReady) return [];
+  try {
+    return await _sqliteQueryRaw(sql, params);
+  } catch (e) { console.warn("sqliteQuery", e && e.message ? e.message : String(e), sql); throw e; }
+}
+
 // Open the private DB and create the schema (idempotent). Returns true when
-// the DB is usable; every helper below gates on this.
+// the DB is usable; every helper below gates on this. Retries on a transient
+// failure (the cached promise is cleared so a later open can succeed).
 async function sqliteInit() {
   if (sqliteReady) return true;
   if (sqliteInitPromise) return sqliteInitPromise;
@@ -585,19 +674,39 @@ async function sqliteInit() {
     let step = "open";
     try {
       if (!window.chatoss || !window.chatoss.db) return false;
-      const name = await window.chatoss.db.open(SQLITE_DB);
-      if (!name) return false;
+      const opened = await window.chatoss.db.open(SQLITE_DB);
+      if (!opened) { return false; }
+      // Detect API shape: a string sanitized name -> namespace API; an object
+      // with exec/query -> handle API.
+      if (typeof opened === "string") {
+        sqliteApiShape = "namespace";
+        sqliteName = opened;
+        sqliteHandle = null;
+      } else if (opened && typeof opened === "object" && typeof opened.exec === "function") {
+        sqliteApiShape = "handle";
+        sqliteHandle = opened;
+        sqliteName = null;
+      } else {
+        // Unknown shape — can't proceed.
+        console.warn("sqliteInit: unrecognized db.open() return type", typeof opened);
+        return false;
+      }
       step = "schema";
-      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT, folder_path TEXT, created_at INTEGER)");
-      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, created_at INTEGER)");
-      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, thinking TEXT, tool_calls TEXT, seq INTEGER, created_at INTEGER)");
-      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS tool_calls (id TEXT PRIMARY KEY, conversation_id TEXT, tool TEXT, args TEXT, result TEXT, created_at INTEGER)");
-      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS terminal_sessions (id TEXT PRIMARY KEY, command TEXT, cwd TEXT, label TEXT, agent TEXT, worktree_branch TEXT, status TEXT, exit_code INTEGER, created_at INTEGER, last_active INTEGER, live INTEGER, merged INTEGER, output TEXT)");
-      await window.chatoss.db.exec(name, "CREATE TABLE IF NOT EXISTS worktrees (branch TEXT PRIMARY KEY, wt_path TEXT, parent_branch TEXT, project_path TEXT, created_at INTEGER)");
+      // Use the RAW exec here (sqliteReady is not set yet, so sqliteExec would
+      // no-op). Schema statements have no params, so interpolation is a no-op.
+      await _sqliteExecRaw("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT, folder_path TEXT, created_at INTEGER)");
+      await _sqliteExecRaw("CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, project_id TEXT, title TEXT, created_at INTEGER)");
+      await _sqliteExecRaw("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, thinking TEXT, tool_calls TEXT, seq INTEGER, created_at INTEGER)");
+      await _sqliteExecRaw("CREATE TABLE IF NOT EXISTS tool_calls (id TEXT PRIMARY KEY, conversation_id TEXT, tool TEXT, args TEXT, result TEXT, created_at INTEGER)");
+      await _sqliteExecRaw("CREATE TABLE IF NOT EXISTS terminal_sessions (id TEXT PRIMARY KEY, command TEXT, cwd TEXT, label TEXT, agent TEXT, worktree_branch TEXT, status TEXT, exit_code INTEGER, created_at INTEGER, last_active INTEGER, live INTEGER, merged INTEGER, output TEXT)");
+      await _sqliteExecRaw("CREATE TABLE IF NOT EXISTS worktrees (branch TEXT PRIMARY KEY, wt_path TEXT, parent_branch TEXT, project_path TEXT, created_at INTEGER)");
       sqliteReady = true;
       return true;
     } catch (e) {
       console.warn("sqliteInit failed at step", step, ":", e && e.message ? e.message : String(e));
+      // Clear the cached promise so a later attempt (e.g. after the capability
+      // becomes ready) can retry instead of being stuck on a false result.
+      sqliteInitPromise = null;
       return false;
     }
   })();
@@ -626,22 +735,21 @@ function scheduleSqliteSync() {
 async function syncConversationsToSqlite() {
   if (!(await sqliteInit())) return;
   try {
-    const db = SQLITE_DB;
     const projects = Array.isArray(state.projects) ? state.projects : [];
     for (const p of projects) {
-      await window.chatoss.db.exec(db,
+      await sqliteExec(
         "INSERT OR REPLACE INTO projects (id, name, folder_path, created_at) VALUES (?, ?, ?, ?)",
         [p.id, p.name || "", p.folderPath || "", p.createdAt || Date.now()]);
       for (const c of (p.conversations || [])) {
-        await window.chatoss.db.exec(db,
+        await sqliteExec(
           "INSERT OR REPLACE INTO conversations (id, project_id, title, created_at) VALUES (?, ?, ?, ?)",
           [c.id, p.id, c.name || c.id, c.createdAt || Date.now()]);
-        await window.chatoss.db.exec(db, "DELETE FROM messages WHERE conversation_id = ?", [c.id]);
+        await sqliteExec("DELETE FROM messages WHERE conversation_id = ?", [c.id]);
         const baseTs = c.createdAt || Date.now();
         let idx = 0;
         for (const m of (c.messages || [])) {
           const mid = c.id + ":" + idx;
-          await window.chatoss.db.exec(db,
+          await sqliteExec(
             "INSERT INTO messages (id, conversation_id, role, content, thinking, tool_calls, seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [mid, c.id, m.role || "system", m.content || "",
              m.thinking || null,
@@ -649,7 +757,7 @@ async function syncConversationsToSqlite() {
              idx, baseTs + idx]);
           if (m.toolCalls && m.toolCalls.length) {
             for (const tc of m.toolCalls) {
-              await window.chatoss.db.exec(db,
+              await sqliteExec(
                 "INSERT OR REPLACE INTO tool_calls (id, conversation_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 [tc.id || uuid(), c.id, tc.name || "unknown",
                  JSON.stringify(tc.args || {}),
@@ -669,7 +777,7 @@ async function syncConversationsToSqlite() {
 async function sqlitePersistToolCall(conversationId, tc) {
   if (!(await sqliteInit())) return;
   try {
-    await window.chatoss.db.exec(SQLITE_DB,
+    await sqliteExec(
       "INSERT OR REPLACE INTO tool_calls (id, conversation_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       [tc.id || uuid(), conversationId, tc.name || "unknown",
        JSON.stringify(tc.args || {}),
@@ -681,18 +789,18 @@ async function sqlitePersistToolCall(conversationId, tc) {
 async function sqliteDeleteConversation(cid) {
   if (!(await sqliteInit())) return;
   try {
-    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM messages WHERE conversation_id = ?", [cid]);
-    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM tool_calls WHERE conversation_id = ?", [cid]);
-    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM conversations WHERE id = ?", [cid]);
+    await sqliteExec("DELETE FROM messages WHERE conversation_id = ?", [cid]);
+    await sqliteExec("DELETE FROM tool_calls WHERE conversation_id = ?", [cid]);
+    await sqliteExec("DELETE FROM conversations WHERE id = ?", [cid]);
   } catch (e) { console.warn("sqliteDeleteConversation", e); }
 }
 
 async function sqliteDeleteProject(pid) {
   if (!(await sqliteInit())) return;
   try {
-    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT id FROM conversations WHERE project_id = ?", [pid]);
+    const rows = await sqliteQuery("SELECT id FROM conversations WHERE project_id = ?", [pid]);
     for (const r of rows) await sqliteDeleteConversation(r.id);
-    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM projects WHERE id = ?", [pid]);
+    await sqliteExec("DELETE FROM projects WHERE id = ?", [pid]);
   } catch (e) { console.warn("sqliteDeleteProject", e); }
 }
 
@@ -708,8 +816,7 @@ async function sqliteDeleteProject(pid) {
 async function hydrateFromSqlite() {
   if (!(await sqliteInit())) return;
   try {
-    const db = SQLITE_DB;
-    const prows = await window.chatoss.db.query(db, "SELECT * FROM projects ORDER BY created_at ASC");
+    const prows = await sqliteQuery("SELECT * FROM projects ORDER BY created_at ASC");
     for (const pr of prows) {
       if (!state.projects.some((p) => p.id === pr.id)) {
         state.projects.push({
@@ -720,11 +827,11 @@ async function hydrateFromSqlite() {
         });
       }
     }
-    const crows = await window.chatoss.db.query(db, "SELECT * FROM conversations ORDER BY created_at ASC");
+    const crows = await sqliteQuery("SELECT * FROM conversations ORDER BY created_at ASC");
     for (const cr of crows) {
       const p = state.projects.find((x) => x.id === cr.project_id);
       if (!p) continue; // orphaned (project deleted) — leave the rows alone
-      const mrows = await window.chatoss.db.query(db,
+      const mrows = await sqliteQuery(
         "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq ASC", [cr.id]);
       const sqliteMsgs = mrows.map((mr) => {
         const m = { role: mr.role || "system", content: mr.content || "" };
@@ -760,7 +867,7 @@ async function sqliteSyncTerminalSessions(snaps) {
     for (const s of (snaps || [])) {
       if (!s || !s.id) continue;
       const live = !(s.status === "exited" || s.status === "ended");
-      await window.chatoss.db.exec(SQLITE_DB,
+      await sqliteExec(
         "INSERT OR REPLACE INTO terminal_sessions (id, command, cwd, label, agent, worktree_branch, status, exit_code, created_at, last_active, live, merged, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [s.id, s.agent || s.label || "", s.cwd || "", s.label || s.id, s.agent || "",
          s.worktreeBranch || null, s.status || "ended",
@@ -774,14 +881,14 @@ async function sqliteSyncTerminalSessions(snaps) {
 async function sqliteDeleteTerminalSession(id) {
   if (!(await sqliteInit())) return;
   try {
-    await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM terminal_sessions WHERE id = ?", [id]);
+    await sqliteExec("DELETE FROM terminal_sessions WHERE id = ?", [id]);
   } catch (e) { console.warn("sqliteDeleteTerminalSession", e); }
 }
 
 async function sqliteGetTerminalMeta(id) {
   if (!(await sqliteInit())) return null;
   try {
-    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT * FROM terminal_sessions WHERE id = ?", [id]);
+    const rows = await sqliteQuery("SELECT * FROM terminal_sessions WHERE id = ?", [id]);
     return rows.length ? rows[0] : null;
   } catch (e) { return null; }
 }
@@ -823,7 +930,8 @@ async function loadPlatformSessions() {
           }
         } catch (e) { console.warn("loadPlatformSessions reattach", s.id, e); }
         // Reattach failed (denied or already gone) — leave it to the History
-        // browser, which shows it as LIVE with a Reattach button.
+        // browser, which shows it as LIVE (status badge only; the reattach
+        // affordance was removed from History to avoid confusion).
         continue;
       }
       if (deadSessions.has(s.id)) continue;
@@ -862,15 +970,15 @@ async function sqliteSyncWorktrees(arr) {
     for (const m of (arr || [])) {
       if (!m || !m.branch) continue;
       seen.add(m.branch);
-      await window.chatoss.db.exec(SQLITE_DB,
+      await sqliteExec(
         "INSERT OR REPLACE INTO worktrees (branch, wt_path, parent_branch, project_path, created_at) VALUES (?, ?, ?, ?, ?)",
         [m.branch, m.wtPath || null, m.parentBranch || null, m.projectPath || null, m.createdAt || Date.now()]);
     }
     // Mirror worktreeMeta exactly: merged worktrees are deleted from the map
     // before saveWorktrees() runs, so drop any row that is no longer present.
-    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT branch FROM worktrees");
+    const rows = await sqliteQuery("SELECT branch FROM worktrees");
     for (const r of rows) {
-      if (!seen.has(r.branch)) await window.chatoss.db.exec(SQLITE_DB, "DELETE FROM worktrees WHERE branch = ?", [r.branch]);
+      if (!seen.has(r.branch)) await sqliteExec("DELETE FROM worktrees WHERE branch = ?", [r.branch]);
     }
   } catch (e) { console.warn("sqliteSyncWorktrees", e); }
 }
@@ -878,7 +986,7 @@ async function sqliteSyncWorktrees(arr) {
 async function sqliteHydrateWorktrees() {
   if (!(await sqliteInit())) return;
   try {
-    const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT * FROM worktrees");
+    const rows = await sqliteQuery("SELECT * FROM worktrees");
     for (const r of rows) {
       if (!r.branch || worktreeMeta.has(r.branch)) continue;
       worktreeMeta.set(r.branch, { wtPath: r.wt_path, parentBranch: r.parent_branch, projectPath: r.project_path });
@@ -933,7 +1041,7 @@ async function renderHistoryConversations(list) {
   }
   let rows = [];
   try {
-    rows = await window.chatoss.db.query(SQLITE_DB,
+    rows = await sqliteQuery(
       "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count FROM conversations c ORDER BY c.created_at DESC");
   } catch (e) { console.warn("renderHistoryConversations", e); }
   if (!rows.length) {
@@ -1016,7 +1124,7 @@ async function renderHistoryTerminals(list) {
   const meta = new Map();
   if (await sqliteInit()) {
     try {
-      const rows = await window.chatoss.db.query(SQLITE_DB, "SELECT * FROM terminal_sessions ORDER BY last_active DESC");
+      const rows = await sqliteQuery("SELECT * FROM terminal_sessions ORDER BY last_active DESC");
       for (const r of rows) meta.set(r.id, r);
     } catch (e) { /* ignore */ }
   }
@@ -1090,13 +1198,6 @@ async function renderHistoryTerminals(list) {
       liveBadge.className = "history-badge history-badge-live";
       liveBadge.textContent = "LIVE";
       acts.appendChild(liveBadge);
-      const reBtn = document.createElement("button");
-      reBtn.className = "btn btn-primary btn-small";
-      reBtn.type = "button";
-      reBtn.textContent = "Reattach";
-      reBtn.title = "Reconnect to this still-running session";
-      reBtn.onclick = () => historyReattachTerminal(e.id);
-      acts.appendChild(reBtn);
     } else {
       const endedBadge = document.createElement("span");
       endedBadge.className = "history-badge";
@@ -1130,42 +1231,45 @@ async function historyViewTerminal(id, item) {
   out.className = "history-output";
   out.textContent = "Loading saved output…";
   item.appendChild(out);
+
+  // 1) Try the OS-persisted session first (the live output history). The OS
+  //    store is the authoritative record while the session still exists.
+  let osOutput = null, osGone = false;
   try {
     const attached = await window.chatoss.terminal.attachSession(id);
     if (attached && attached.output) {
-      out.textContent = stripAnsi(decodeBase64(attached.output)) || "(no output)";
-    } else {
-      out.textContent = "(no saved output)";
+      osOutput = stripAnsi(decodeBase64(attached.output));
     }
   } catch (e) {
-    out.textContent = "Could not read saved output: " + (e && e.message ? e.message : String(e));
+    // "no such terminal session: <id>" — the live session was killed/expired/
+    // deleted and the OS no longer has it. Fall through to the saved history.
+    osGone = true;
   }
-}
 
-async function historyReattachTerminal(id) {
-  try {
-    const handle = await window.chatoss.terminal.reattachSession(id);
-    if (!handle) {
-      setStatus("Could not reattach session " + id + " (it may have exited).");
-      renderHistoryBrowser();
-      return;
-    }
-    if (deadSessions.has(id)) {
-      deadSessions.delete(id);
-      const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
-      if (card) card.remove();
-    }
+  if (osOutput) {
+    out.textContent = osOutput || "(no output)";
+    return;
+  }
+
+  // 2) The OS session is gone (or had no output). Fall back to the output tail
+  //    saved in the SQLite history table, plus the in-memory dead card if this
+  //    session is from the current run. Show a clear message instead of a raw
+  //    "no such terminal session" error.
+  let saved = "";
+  const dead = deadSessions.get(id);
+  if (dead && dead.output) saved = dead.output;
+  if (!saved) {
     const meta = await sqliteGetTerminalMeta(id);
-    const label = (meta && meta.label) || "session";
-    const cwd = (meta && meta.cwd) || "";
-    await registerSession(handle, (meta && meta.command) || "", [], cwd, label);
-    persistSessions().catch(() => { /* non-fatal */ });
-    ensureEmptyHint();
-    renderTabs();
-    renderSessionInfo();
-    closeHistoryBrowser();
-  } catch (e) {
-    setStatus("Reattach failed: " + (e && e.message ? e.message : String(e)));
+    if (meta && meta.output) saved = meta.output;
+  }
+
+  const banner = osGone
+    ? "This session is no longer live — showing saved output from history."
+    : "No live output for this session — showing saved output from history.";
+  if (saved) {
+    out.textContent = banner + "\n\n" + saved;
+  } else {
+    out.textContent = "This session is no longer live, and no saved output was found in history.";
   }
 }
 
