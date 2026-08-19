@@ -104,8 +104,8 @@ test("wiring: tool calls race the turn's abort signal", () => {
   assert(m, "runToolWithTimeout(name, args, signal) not found");
   assert(/signal\.addEventListener\("abort"/.test(m[0]),
     "runToolWithTimeout must race the abort signal so an interrupt is responsive");
-  assert(/runToolWithTimeout\(name, args, abortController\)/.test(SRC),
-    "onToolCall must pass the turn's abortController");
+  assert(/runToolWithTimeout\(name, args, abortController\.signal\)/.test(SRC),
+    "onToolCall must pass the turn's abortController.signal (not the controller, which lacks addEventListener)");
 });
 
 // ---------------------------------------------------------------------------
@@ -341,6 +341,119 @@ test("behavior: runToolWithTimeout still returns the tool result when not aborte
   const runToolWithTimeout = make(sandbox);
   const result = await runToolWithTimeout("read_session", {}, signal);
   assert.strictEqual(result, "tool done", "normal tool calls must be unaffected");
+});
+
+// ---------------------------------------------------------------------------
+// Regression — the "signal.removeEventListener is not a function" bug.
+// ---------------------------------------------------------------------------
+// ROOT CAUSE (now fixed): the onToolCall site passed the AbortController OBJECT
+// instead of its .signal to runToolWithTimeout. An AbortController has no
+// addEventListener/removeEventListener (only AbortSignal does), so the
+// unguarded calls threw. Worse, the removeEventListener throw in `finally`
+// MASKED the real addEventListener throw from the Promise executor, so the
+// error users saw was "signal.removeEventListener is not a function". These
+// tests (a) lock in the exact original error via a verbatim copy of the OLD
+// control flow, (b) confirm the real function works with abortController.signal,
+// and (c) confirm the hardened real function degrades gracefully if misused
+// with a controller again. (c) FAILS on the old code and PASSES on the fix.
+
+// A fake toolHandler that returns a DELAYED result, so the synchronous
+// abortPromise rejection (in the old, unguarded code) wins the race instead of
+// the tool settling first.
+function makeDelayedTool(result, ms) {
+  return () => new Promise((resolve) => setTimeout(() => resolve(result), ms));
+}
+
+test("regression: the OLD control flow throws the exact 'signal.removeEventListener is not a function' error when given an AbortController", async () => {
+  // Verbatim copy of the ORIGINAL (buggy) runToolWithTimeout — unguarded
+  // addEventListener/removeEventListener. A FIXTURE: it cannot change when
+  // app.js is fixed, so it locks in the exact error string the bug produced.
+  const TOOL_TIMEOUT_MS = 90 * 1000;
+  const TOOL_TIMEOUT_OVERRIDES = {};
+  const toolHandler = makeDelayedTool("delayed tool result", 50);
+  const OLD_runToolWithTimeout = async function (name, args, signal) {
+    const limit = TOOL_TIMEOUT_OVERRIDES[name] || TOOL_TIMEOUT_MS;
+    let timer = null;
+    let onAbort = null;
+    const abortPromise = new Promise((resolve) => {
+      if (!signal) return;
+      onAbort = () => resolve("Error: interrupted by the user.");
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener("abort", onAbort, { once: true }); // UNGUARDED — throws on an AbortController
+    });
+    try {
+      return await Promise.race([
+        toolHandler(name, args),
+        abortPromise,
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(
+            "Error: the " + name + " tool did not return within " + Math.round(limit / 1000) +
+            "s and was abandoned.",
+            limit
+          ), limit);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort && signal) signal.removeEventListener("abort", onAbort); // UNGUARDED — masks the real error
+    }
+  };
+
+  // A real AbortController (the controller, NOT .signal) has no
+  // addEventListener/removeEventListener.
+  const controller = new AbortController();
+  let caught = null;
+  try {
+    await OLD_runToolWithTimeout("read_session", {}, controller);
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught, "the old control flow must throw when handed an AbortController instead of .signal");
+  assert(
+    /signal\.(add|remove)EventListener is not a function/.test(caught.message),
+    "must reproduce the original error string, got: " + caught.message
+  );
+});
+
+test("regression: the REAL runToolWithTimeout works when given abortController.signal (the fix)", async () => {
+  const make = extractFunction(SRC, "runToolWithTimeout");
+  const sandbox = {
+    TOOL_TIMEOUT_MS: 90 * 1000,
+    TOOL_TIMEOUT_OVERRIDES: {},
+    toolHandler: makeDelayedTool("tool done", 30),
+  };
+  const runToolWithTimeout = make(sandbox);
+  const controller = new AbortController();
+  const result = await runToolWithTimeout("read_session", {}, controller.signal);
+  assert.strictEqual(result, "tool done",
+    "passing .signal must let the tool run and return its result (no error)");
+});
+
+test("regression: the REAL runToolWithTimeout degrades gracefully when MISUSED with an AbortController (hardening)", async () => {
+  // The hardening (guarded addEventListener/removeEventListener) means a future
+  // misuse — passing the controller instead of .signal — no longer throws and
+  // masks the real error; the tool simply runs with the abort path inert. This
+  // FAILS on the old (unguarded) code, which throws "signal.removeEventListener
+  // is not a function", and PASSES on the fixed code.
+  const make = extractFunction(SRC, "runToolWithTimeout");
+  const sandbox = {
+    TOOL_TIMEOUT_MS: 90 * 1000,
+    TOOL_TIMEOUT_OVERRIDES: {},
+    toolHandler: makeDelayedTool("tool done", 30),
+  };
+  const runToolWithTimeout = make(sandbox);
+  const controller = new AbortController();
+  let threw = false;
+  let result;
+  try {
+    result = await runToolWithTimeout("read_session", {}, controller);
+  } catch (e) {
+    threw = true;
+  }
+  assert.strictEqual(threw, false,
+    "a hardened runToolWithTimeout must not throw when misused with an AbortController");
+  assert.strictEqual(result, "tool done",
+    "the tool must still run and return its result when the abort path is inert");
 });
 
 run();
