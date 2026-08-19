@@ -5108,12 +5108,24 @@ async function copyToClipboard(text) {
 }
 
 // ---------- Collapsible thinking widget ----------
+// Codex-desktop-style reasoning container: a small, DIMMED box that is
+// collapsed by default but still shows a short preview of the thinking (a
+// ~120px window with a fade), so the reasoning reads as a muted summary rather
+// than a hidden blob. A "Show more ↓" button expands the full text; "Show less ↑"
+// collapses it back. The header bar doubles as the "still thinking" indicator
+// (💭 Thinking… while streaming, Thought process when done) and also toggles.
+//
+// Streaming contract: onThinking only calls _update() — the widget STAYS
+// collapsed while tokens accumulate, so the latest snippet is always visible
+// inside the max-height window. It never auto-expands. When the response starts
+// the widget remains a collapsed/dim summary.
 function createThinkingWidget(text, opts) {
   const o = opts || {};
   const wrap = document.createElement("div");
   wrap.className = "msg-thinking-collapsible" + (o.streaming ? " is-streaming" : "");
   wrap.setAttribute("data-state", "collapsed");
 
+  // --- Header: the "still thinking" indicator + a toggle ---
   const header = document.createElement("button");
   header.type = "button";
   header.className = "think-toggle";
@@ -5135,21 +5147,46 @@ function createThinkingWidget(text, opts) {
   header.appendChild(label);
   header.appendChild(meta);
 
+  // --- Body: the dimmed preview window + full text ---
   const body = document.createElement("div");
   body.className = "think-body";
   const inner = document.createElement("div");
   inner.className = "think-inner";
   inner.textContent = String(text || "");
+  // Gradient fade pinned to the bottom of the collapsed preview. It sits above
+  // the text and below the Show button, so the last visible line dissolves into
+  // the container background instead of being hard-clipped.
+  const fade = document.createElement("div");
+  fade.className = "think-fade";
+  fade.setAttribute("aria-hidden", "true");
   body.appendChild(inner);
+  body.appendChild(fade);
+
+  // --- "Show more / Show less" button (the explicit expand affordance) ---
+  const moreBtn = document.createElement("button");
+  moreBtn.type = "button";
+  moreBtn.className = "think-show";
+  moreBtn.setAttribute("aria-expanded", "false");
+  moreBtn.textContent = "Show more ↓";
+  body.appendChild(moreBtn);
 
   wrap.appendChild(header);
   wrap.appendChild(body);
 
+  // Shared toggle so the header AND the Show button stay in sync.
+  const setOpen = (open) => {
+    wrap.setAttribute("data-state", open ? "open" : "collapsed");
+    header.setAttribute("aria-expanded", open ? "true" : "false");
+    moreBtn.textContent = open ? "Show less ↑" : "Show more ↓";
+    moreBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  };
   header.addEventListener("click", () => {
-    const open = wrap.getAttribute("data-state") === "open";
-    wrap.setAttribute("data-state", open ? "collapsed" : "open");
-    header.setAttribute("aria-expanded", open ? "false" : "true");
+    setOpen(wrap.getAttribute("data-state") !== "open");
   });
+  moreBtn.addEventListener("click", () => {
+    setOpen(wrap.getAttribute("data-state") !== "open");
+  });
+
   // Expose updaters for streaming.
   wrap._update = (newText) => {
     inner.textContent = String(newText || "");
