@@ -13,6 +13,10 @@ const WORKTREES_KEY = "term-coder.worktrees";
 const SESSIONS_KEY = "term-coder.sessions";
 const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
 const DETECT_TTL_MS = 60 * 1000;
+// The app's own version, used by the Settings "Check for updates" flow.
+// Keep in sync with the "version" field in app.json (the app cannot read its
+// own manifest at runtime — the sandboxed frame has no fetchable origin).
+const APP_VERSION = "1.16.1";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -1276,6 +1280,10 @@ const el = {
   settingsCancel: $("settings-cancel"),
   detectedList: $("detected-list"),
   rescanBtn: $("rescan-btn"),
+  // updates
+  checkUpdatesBtn: $("check-updates-btn"),
+  updateStatus: $("update-status"),
+  openReleasesBtn: $("open-releases-btn"),
   // model selection mode
   modelModeRadios: $("model-mode-radios"),
   modelModeManual: $("model-mode-manual"),
@@ -3047,7 +3055,12 @@ async function spawnChosen(choice) {
 // ---------- Settings panel ----------
 function renderDetectedList() {
   if (!el.detectedList) return;
-  const d = settings.detected || { codex: false, claude: false, ollama: false, models: [], denied: false };
+  // Read the LIVE detection object — the same source the launch-target pickers
+  // (and the chat pill picker) consume via availableOllamaModels() — NOT the
+  // persisted settings.detected snapshot. The snapshot can be stale (restored
+  // from an older app version) and then disagrees with the pickers, which is
+  // exactly the "Settings shows fewer models than the chat picker" bug.
+  const d = detection || { codex: false, claude: false, ollama: false, models: [], denied: false };
   el.detectedList.innerHTML = "";
   const row = (name, ok) => {
     const div = document.createElement("div");
@@ -3076,10 +3089,14 @@ function renderDetectedList() {
     div.textContent = "  codex direct: " + d.codexPath;
     el.detectedList.appendChild(div);
   }
-  if (d.ollama) {
+  // The COMPLETE ollama model list (terminal detection + local models from the
+  // ChatOSS chat model list — the same source the model picker at the top of
+  // the AI chat section uses), so Settings shows every detected model.
+  const ollamaModels = allOllamaModels();
+  if (d.ollama || ollamaModels.length) {
     const div = document.createElement("div");
     div.className = "detected-item";
-    div.textContent = "ollama models (" + (d.models || []).length + "): " + ((d.models || []).join(", ") || "(none)");
+    div.textContent = "ollama models (" + ollamaModels.length + "): " + (ollamaModels.join(", ") || "(none)");
     el.detectedList.appendChild(div);
   }
   if (d.denied) {
@@ -3092,7 +3109,11 @@ function renderDetectedList() {
 }
 
 function openSettings() {
-  el.setCli.value = settings.cliDefault || "ask";
+  // Fall back to "ask" when the saved default isn't among the current options
+  // (e.g. a legacy "ollama" value from an older build) — otherwise the select
+  // renders blank and Save would silently clear the default.
+  const cliValues = Array.from(el.setCli.options).map((o) => o.value);
+  el.setCli.value = cliValues.includes(settings.cliDefault) ? settings.cliDefault : "ask";
   el.setCwd.value = settings.cwdDefault || "";
   renderDetectedList();
   applyModelSelectionModeToUi();
@@ -3119,12 +3140,118 @@ function saveSettingsFromPanel() {
   el.settingsPanel.classList.add("hidden");
 }
 
+// ---------- Check for updates ----------
+// The app cannot replace its own files, so "update" = notify + open the GitHub
+// releases page for the user to install. APP_VERSION (top of file) must stay
+// in sync with app.json's "version".
+const UPDATES_APP_JSON_URL = "https://raw.githubusercontent.com/pagecow/term-coder/main/app.json";
+const UPDATES_RELEASES_API_URL = "https://api.github.com/repos/pagecow/term-coder/releases/latest";
+const UPDATES_RELEASES_PAGE_URL = "https://github.com/pagecow/term-coder/releases";
+
+// Parse "1.16.1" / "v1.16.1" into [major, minor, patch] (missing parts = 0).
+// Returns null when the string has no leading numeric version.
+function parseVersion(v) {
+  const m = String(v == null ? "" : v).trim().replace(/^v/i, "").match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+  if (!m) return null;
+  return [parseInt(m[1], 10) || 0, parseInt(m[2], 10) || 0, parseInt(m[3], 10) || 0];
+}
+// >0 when a is newer than b, <0 when b is newer, 0 when equal/unparseable.
+function compareVersions(a, b) {
+  const pa = parseVersion(a), pb = parseVersion(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+// Fetch the latest published version from GitHub. Primary source is the repo's
+// app.json on main; fallback is the latest release tag. Returns the version
+// string or null when neither source could be read.
+async function fetchLatestVersion() {
+  // web.fetch returns { title, content, links } — content is the page text.
+  const readJson = async (url) => {
+    const page = await window.chatoss.web.fetch(url);
+    const text = (page && (page.content || page.text)) || "";
+    if (!text) return null;
+    try { return JSON.parse(text); } catch (e) { /* fall through to regex */ }
+    // The fetcher may have wrapped/trimmed the raw JSON — pull the field out
+    // with a regex as a last resort.
+    const m = text.match(/"(?:version|tag_name)"\s*:\s*"([^"]+)"/);
+    return m ? { version: m[1], tag_name: m[1] } : null;
+  };
+  try {
+    const json = await readJson(UPDATES_APP_JSON_URL);
+    if (json && json.version) return String(json.version);
+  } catch (e) { console.warn("fetchLatestVersion app.json", e); }
+  try {
+    const json = await readJson(UPDATES_RELEASES_API_URL);
+    if (json && json.tag_name) return String(json.tag_name);
+  } catch (e) { console.warn("fetchLatestVersion releases", e); }
+  return null;
+}
+
+async function checkForUpdates() {
+  const status = el.updateStatus;
+  if (!status) return;
+  if (el.checkUpdatesBtn) el.checkUpdatesBtn.disabled = true;
+  if (el.openReleasesBtn) el.openReleasesBtn.classList.add("hidden");
+  status.textContent = "Checking…";
+  status.className = "update-status";
+  let remote = null;
+  try {
+    remote = await fetchLatestVersion();
+  } catch (e) {
+    console.warn("checkForUpdates", e);
+  }
+  if (el.checkUpdatesBtn) el.checkUpdatesBtn.disabled = false;
+  if (!remote) {
+    status.textContent = "Couldn't check for updates — check your connection";
+    status.className = "update-status update-status-error";
+    return;
+  }
+  if (compareVersions(remote, APP_VERSION) > 0) {
+    status.textContent = "Update available: " + remote;
+    status.className = "update-status update-status-available";
+    if (el.openReleasesBtn) el.openReleasesBtn.classList.remove("hidden");
+  } else {
+    status.textContent = "Up to date (" + APP_VERSION + ")";
+    status.className = "update-status update-status-ok";
+  }
+}
+
+function openReleasesPage() {
+  try {
+    window.chatoss.openExternal.open(UPDATES_RELEASES_PAGE_URL).catch((e) => console.warn("openReleasesPage", e));
+  } catch (e) { console.warn("openReleasesPage", e); }
+}
+
 // ---------- Model Selection Mode ----------
-// Returns the auto-detected ollama model ids (a copy of detection.models),
+// The COMPLETE ollama model list: the terminal-detected models (`ollama list`
+// via detectTools) PLUS every local model the ChatOSS chat model list reports
+// (the same source the model picker at the top of the AI chat section uses).
+// The terminal probe can miss models (truncated output, PATH quirks, a stale
+// persisted snapshot), so the chat list is the authoritative superset.
+// detection.models first (terminal-verified), then chat-local models, deduped
+// by id. Falls back to FALLBACK_MODELS when both sources are empty.
+function allOllamaModels() {
+  const seen = new Set();
+  const out = [];
+  const push = (m) => {
+    if (m && !seen.has(m)) { seen.add(m); out.push(m); }
+  };
+  for (const m of (detection && detection.models) || []) push(m);
+  for (const m of models) {
+    if (m && m.source === "local" && m.id) push(m.id);
+  }
+  return out;
+}
+
+// Returns the auto-detected ollama model ids (a copy of allOllamaModels()),
 // falling back to FALLBACK_MODELS when detection is empty.
 function availableOllamaModels() {
-  const m = (detection && detection.models && detection.models.length) ? detection.models : FALLBACK_MODELS.slice();
-  return m.slice();
+  const m = allOllamaModels();
+  return m.length ? m : FALLBACK_MODELS.slice();
 }
 
 // ── Direct-CLI + ollama launch targets ──
@@ -3239,9 +3366,17 @@ function showModelModePanel(mode) {
 // Reflect the persisted model-selection config into the settings UI.
 // Called on openSettings() (UI open) and after a Re-scan refreshes models.
 function applyModelSelectionModeToUi() {
-  const mode = modelSelection.modelSelectionMode || "manual";
+  let mode = modelSelection.modelSelectionMode || "manual";
   const radio = el.modelModeRadios.querySelector(`input[name="model-mode"][value="${mode}"]`);
-  if (radio) radio.checked = true;
+  if (radio) {
+    radio.checked = true;
+  } else {
+    // Corrupted/legacy persisted mode — fall back to Manual so the UI is never
+    // left with no radio checked and every mode panel hidden.
+    mode = "manual";
+    const fallback = el.modelModeRadios.querySelector('input[name="model-mode"][value="manual"]');
+    if (fallback) fallback.checked = true;
+  }
   populateModelSelect(el.alwaysModel, modelSelection.alwaysModel);
   populateModelSelect(el.complexityModelLow, modelSelection.complexityModelLow);
   populateModelSelect(el.complexityModelMedium, modelSelection.complexityModelMedium);
@@ -7382,6 +7517,10 @@ async function init() {
     // the saved selections where the model is still available.
     applyModelSelectionModeToUi();
   });
+
+  // updates (Settings → Check for updates)
+  el.checkUpdatesBtn.addEventListener("click", checkForUpdates);
+  el.openReleasesBtn.addEventListener("click", openReleasesPage);
 
   // board picker
   el.boardPickerX.addEventListener("click", () => el.boardPicker.classList.add("hidden"));
