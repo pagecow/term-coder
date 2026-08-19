@@ -2446,6 +2446,19 @@ textarea.form-input { resize: vertical; }
 .detected-scanning { color: var(--muted); font-style: italic; }
 .board-pick-btn { margin-bottom: 6px; justify-content: flex-start; width: 100%; }
 
+/* Updates (Check for updates in Settings) */
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 4px;
+}
+.update-status { font-size: 12.5px; color: var(--muted); }
+.update-status-ok { color: #16a34a; }
+.update-status-available { color: var(--accent); font-weight: 600; }
+.update-status-error { color: var(--danger); }
+
 /* ---------- History browser (modal) ----------
    Lists past conversations (from the app's private SQLite DB) and past
    terminal sessions (from the OS-persisted terminal store). Reuses the shared

@@ -368,6 +368,14 @@
         </div>
         <button id="rescan-btn" class="btn btn-ghost btn-small" type="button">Re-scan</button>
         <p class="modal-hint">Detection runs <code>which</code> / <code>ollama list</code> via the terminal API.</p>
+
+        <h3 class="settings-section-title">Updates</h3>
+        <p class="modal-hint">Term Coder can't replace its own files — when an update is available, open the releases page to install it.</p>
+        <div class="update-row">
+          <button id="check-updates-btn" class="btn btn-ghost btn-small" type="button">Check for updates</button>
+          <span id="update-status" class="update-status" role="status" aria-live="polite"></span>
+          <button id="open-releases-btn" class="btn btn-primary btn-small hidden" type="button">Get update</button>
+        </div>
       </div>
     </div>
   </div>
