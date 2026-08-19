@@ -550,3 +550,8 @@ Small single-purpose utilities may omit the pattern, but it is the default. The 
 9. If the app exports documents (PDF/Word/Excel/PowerPoint/image): use the OS `documents` API (no vendored library, no `window.print()` — it's blocked in the sandbox). Declare "documents" (+ "fileAccess" if you use `documents.save()`). For PDF/DOCX with any formatting (bold, italic, headings, lists), pass the content as `content.blocks` (structured blocks + styled runs) — NOT plain `paragraphs`/`text`, which strips formatting. See the Documents section above.
 10. If you are NOT in ChatOSS Code: give zip instructions — files at zip root → rename to .aip → drop on the Apps app.
 11. If you ARE in ChatOSS Code: ask the user whether they'd like to publish the app now, and call `publish_app` with the app folder path if they agree. (See the note at the top of this guide.)
+
+## Orchestrate-mode rules (for the orchestrator)
+
+- **Version bumps are release metadata, not implementation.** When merging a batch to main, the orchestrator may edit the version strings DIRECTLY with edit_file — the `"version"` field in app.json AND the `APP_VERSION` constant in app.js (near line 19) — instead of spawning a sub-agent. Treat them like git operations (the orchestrator's own job). The two strings must always match.
+- Standing rule (also on the Term Coder backlog board, "Something to always know"): bump the version as part of the SAME push that merges a batch to main — MINOR bump for a batch with features/fixes, PATCH bump for a single tiny fix.
