@@ -1462,6 +1462,7 @@ const el = {
   tokenEstimator: $("token-estimator"),
   tokenEstimatorBtn: $("token-estimator-btn"),
   tokenCount: $("token-count"),
+  tokenMax: $("token-max"),
   tokenRingFill: $("token-ring-fill"),
   tokenPopover: $("token-popover"),
   sendBtn: $("send-btn"),
@@ -6836,7 +6837,10 @@ function renderTokenEstimator() {
   const pctInt = Math.round(pct * 100);
 
   if (el.tokenCount) {
-    el.tokenCount.textContent = b.total.toLocaleString() + " / " + (b.max > 0 ? b.max.toLocaleString() : "—");
+    el.tokenCount.textContent = b.total.toLocaleString();
+  }
+  if (el.tokenMax) {
+    el.tokenMax.textContent = b.max > 0 ? b.max.toLocaleString() : "—";
   }
   if (el.tokenRingFill) {
     // stroke-dasharray is 100 100, so offset 100 = empty, 0 = full.

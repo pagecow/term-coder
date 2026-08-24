@@ -100,6 +100,7 @@ test("breakdown: system prompt is cached from buildSystemPrompt", () => {
 test("dom: estimator lives inside .composer-wrap, below the form", () => {
   assert(/id="token-estimator"/.test(HTML), "token-estimator container missing");
   assert(/id="token-count"/.test(HTML), "token-count text missing");
+  assert(/id="token-max"/.test(HTML), "token-max text missing");
   assert(/id="token-ring-fill"/.test(HTML), "progress ring fill missing");
   assert(/id="token-popover"/.test(HTML), "breakdown popover missing");
   // The estimator must come AFTER the composer form and the hint is preserved.

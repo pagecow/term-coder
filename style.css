@@ -2073,6 +2073,8 @@ body.is-resizing-row .term-mount { pointer-events: none; }
   outline: none;
 }
 .token-count { white-space: nowrap; }
+.token-sep { color: var(--muted); opacity: .6; }
+.token-max { white-space: nowrap; }
 .token-ring {
   display: inline-flex;
   width: 14px;
