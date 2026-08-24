@@ -16,7 +16,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.19.0";
+const APP_VERSION = "1.20.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -1922,6 +1922,118 @@ const ORCHESTRATOR_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read a text file's contents from the project (or a worktree path inside it). Returns the content, truncated to maxChars (default 20000). Use this to inspect files yourself — app.json, AGENTS.md, a file an agent just changed — instead of spawning a sub-agent to look.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Absolute path of the file to read. Must be inside the active project folder (worktree paths are inside it)." },
+          maxChars: { type: "number", description: "How many characters to return. Default 20000." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      description: "Write (create or overwrite) a file in the project. Use for small direct edits that are YOUR job — release metadata, docs, config — not for implementation work (that belongs to sub-agents in worktrees).",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Absolute path of the file to write. Must be inside the active project folder." },
+          contents: { type: "string", description: "The complete new file contents." },
+        },
+        required: ["path", "contents"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "edit_file",
+      description: "Make a targeted edit to a file: replace an exact snippet (old_string) with new_string. old_string must appear EXACTLY ONCE in the file — the edit fails otherwise. Use for small precise changes (e.g. bumping a version string). For whole-file rewrites use write_file.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Absolute path of the file to edit. Must be inside the active project folder." },
+          old_string: { type: "string", description: "The exact existing text to replace (copy it verbatim)." },
+          new_string: { type: "string", description: "The replacement text." },
+        },
+        required: ["path", "old_string", "new_string"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_status",
+      description: "Show the project's git state: current branch, ahead/behind vs origin, uncommitted changes, and the last 5 commits. Use this to check whether a commit or push is needed.",
+      parameters: {
+        type: "object",
+        properties: { projectId: { type: "string", description: "Optional. Defaults to the active project." } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_commit",
+      description: "Stage ALL changes in the project and commit them with the given message. This is YOUR job (the orchestrator's) — never delegate a commit to a sub-agent. Returns the commit output.",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional. Defaults to the active project." },
+          message: { type: "string", description: "The commit message (required)." },
+        },
+        required: ["message"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git_push",
+      description: "Push the project's current branch to origin (sets upstream on first push). This is YOUR job — never delegate a push to a sub-agent. Returns the push output.",
+      parameters: {
+        type: "object",
+        properties: { projectId: { type: "string", description: "Optional. Defaults to the active project." } },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "version_bump",
+      description: "Bump the project's version: the \"version\" field in app.json AND any matching APP_VERSION constant in the project's root-level JS files (the two must always match). bump is 'major', 'minor' or 'patch'. This is release metadata — YOUR job, never a sub-agent's. Call this BEFORE git_commit/git_push/create_release.",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional. Defaults to the active project." },
+          bump: { type: "string", description: "'major', 'minor' or 'patch' (required). MINOR for a batch with features/fixes, PATCH for a single tiny fix." },
+        },
+        required: ["bump"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_release",
+      description: "Create a GitHub release for the project's CURRENT version (from app.json) and attach installable assets: gh release create v<version> --target main, then build the .aip (zip of the app's runtime files — app.json, entry HTML, JS/CSS, icon, libs/ — excluding tests/, docs, .git, *.md, and old .aip/.zip files) plus a .zip copy, and upload both with gh release upload. The version bump must already be committed and pushed (version_bump → git_commit → git_push → create_release). This is YOUR job — never delegate a release to a sub-agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional. Defaults to the active project." },
+          notes: { type: "string", description: "Release notes (markdown). Defaults to a one-line summary." },
+        },
+      },
+    },
+  },
 ];
 
 // ---------- PTY input (ChatOSS >= 1.8.4 native input APIs) ----------
@@ -3005,6 +3117,227 @@ async function toolHandler(name, args) {
         const r = await window.chatoss.terminal.exec(loginShell("git branch --show-current"), { cwd: p.folderPath });
         if (r === null) return "Error: terminal permission denied";
         return (r.output || "").trim() || "(no branch)";
+      }
+      // ---------- Direct file tools (the orchestrator's own job) ----------
+      // These ride the files API (fileAccess), so they work on the project
+      // folder and every worktree inside it — the same roots the user picked.
+      case "read_file": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const path = String(args.path || "").trim();
+        if (!path) return "Error: pass the file path to read.";
+        if (!path.startsWith(p.folderPath.replace(/\/+$/, "") + "/")) {
+          return "Error: path must be inside the active project folder (" + p.folderPath + ").";
+        }
+        try {
+          const text = await window.chatoss.files.readFile(path);
+          if (typeof text !== "string") return "Error: not a text file (binary).";
+          const max = args.maxChars || 20000;
+          if (text.length > max) {
+            return text.slice(0, max) + "\n…[truncated at " + max + " chars — pass a larger maxChars to read more]";
+          }
+          return text;
+        } catch (e) {
+          return "Error reading " + path + ": " + (e && e.message ? e.message : String(e));
+        }
+      }
+      case "write_file": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const path = String(args.path || "").trim();
+        if (!path) return "Error: pass the file path to write.";
+        if (!path.startsWith(p.folderPath.replace(/\/+$/, "") + "/")) {
+          return "Error: path must be inside the active project folder (" + p.folderPath + ").";
+        }
+        const contents = String(args.contents == null ? "" : args.contents);
+        try {
+          await window.chatoss.files.writeFile(path, contents);
+          return "Wrote " + path + " (" + contents.length + " chars).";
+        } catch (e) {
+          return "Error writing " + path + ": " + (e && e.message ? e.message : String(e));
+        }
+      }
+      case "edit_file": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const path = String(args.path || "").trim();
+        if (!path) return "Error: pass the file path to edit.";
+        if (!path.startsWith(p.folderPath.replace(/\/+$/, "") + "/")) {
+          return "Error: path must be inside the active project folder (" + p.folderPath + ").";
+        }
+        const oldStr = String(args.old_string == null ? "" : args.old_string);
+        const newStr = String(args.new_string == null ? "" : args.new_string);
+        if (!oldStr) return "Error: old_string is required.";
+        try {
+          const text = await window.chatoss.files.readFile(path);
+          if (typeof text !== "string") return "Error: not a text file (binary).";
+          const idx = text.indexOf(oldStr);
+          if (idx === -1) return "Error: old_string not found in " + path + ". Read the file first and copy the exact text.";
+          if (text.indexOf(oldStr, idx + 1) !== -1) {
+            return "Error: old_string appears more than once in " + path + " — make it more specific so it matches exactly once.";
+          }
+          const updated = text.slice(0, idx) + newStr + text.slice(idx + oldStr.length);
+          await window.chatoss.files.writeFile(path, updated);
+          return "Edited " + path + " (replaced " + oldStr.length + " chars with " + newStr.length + ").";
+        } catch (e) {
+          return "Error editing " + path + ": " + (e && e.message ? e.message : String(e));
+        }
+      }
+      // ---------- Git + release tools (the orchestrator's own job) ----------
+      case "git_status": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const base = p.folderPath.replace(/\/+$/, "");
+        const run = async (cmd) => {
+          const r = await window.chatoss.terminal.exec(loginShell(cmd), { cwd: base });
+          if (r === null) return "Error: terminal permission denied (approve git to continue)";
+          return (r.output || "").trim();
+        };
+        const branch = await run("git branch --show-current");
+        const status = await run("git status --porcelain");
+        const ahead = await run("git rev-list --count @{upstream}..HEAD 2>/dev/null || echo 'no upstream'");
+        const behind = await run("git rev-list --count HEAD..@{upstream} 2>/dev/null || echo 'no upstream'");
+        const log = await run("git log --oneline -5");
+        return "Branch: " + (branch || "(none)") +
+          "\nAhead of upstream: " + ahead +
+          "\nBehind upstream: " + behind +
+          "\nUncommitted changes:\n" + (status || "(none — working tree clean)") +
+          "\nLast commits:\n" + (log || "(none)");
+      }
+      case "git_commit": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const msg = String(args.message || "").trim();
+        if (!msg) return "Error: pass a commit message.";
+        const r = await window.chatoss.terminal.exec(
+          loginShell("git add -A && git commit -m " + JSON.stringify(msg)),
+          { cwd: p.folderPath }
+        );
+        if (r === null) return "Error: terminal permission denied (approve git to continue)";
+        if (r.exitCode !== 0) return "git commit failed (exit " + r.exitCode + "):\n" + r.output;
+        return "Committed:\n" + r.output;
+      }
+      case "git_push": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        let r = await window.chatoss.terminal.exec(loginShell("git push"), { cwd: p.folderPath });
+        if (r === null) return "Error: terminal permission denied (approve git to continue)";
+        if (r.exitCode !== 0 && /no upstream branch|--set-upstream/i.test(r.output || "")) {
+          r = await window.chatoss.terminal.exec(loginShell("git push -u origin HEAD"), { cwd: p.folderPath });
+          if (r === null) return "Error: terminal permission denied (approve git to continue)";
+        }
+        if (r.exitCode !== 0) return "git push failed (exit " + r.exitCode + "):\n" + r.output;
+        return "Pushed:\n" + r.output;
+      }
+      case "version_bump": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const bump = String(args.bump || "").toLowerCase();
+        if (!/^(major|minor|patch)$/.test(bump)) return "Error: bump must be 'major', 'minor' or 'patch'.";
+        const base = p.folderPath.replace(/\/+$/, "");
+        const appJsonPath = base + "/app.json";
+        let appJson;
+        try {
+          appJson = JSON.parse(await window.chatoss.files.readFile(appJsonPath));
+        } catch (e) {
+          return "Error: could not read/parse " + appJsonPath + " — is this a ChatOSS app project? " + (e && e.message ? e.message : String(e));
+        }
+        const oldV = String(appJson.version || "");
+        const m = oldV.match(/^(\d+)\.(\d+)\.(\d+)$/);
+        if (!m) return "Error: app.json version \"" + oldV + "\" is not semver x.y.z — bump it manually with edit_file.";
+        let [ma, mi, pa] = [Number(m[1]), Number(m[2]), Number(m[3])];
+        if (bump === "major") { ma += 1; mi = 0; pa = 0; }
+        else if (bump === "minor") { mi += 1; pa = 0; }
+        else { pa += 1; }
+        const newV = ma + "." + mi + "." + pa;
+        appJson.version = newV;
+        await window.chatoss.files.writeFile(appJsonPath, JSON.stringify(appJson, null, 2) + "\n");
+        // Keep any matching APP_VERSION constant in root-level JS files in sync.
+        const updatedFiles = [];
+        try {
+          const entries = await window.chatoss.files.listDir(base);
+          for (const ent of (entries || [])) {
+            if (!ent || ent.kind === "dir") continue;
+            const name = ent.name || "";
+            if (!/\.(js|mjs|cjs)$/.test(name)) continue;
+            const fpath = base + "/" + name;
+            try {
+              const text = await window.chatoss.files.readFile(fpath);
+              if (typeof text !== "string") continue;
+              let changed = false;
+              const updated = text.replace(/(APP_VERSION\s*=\s*["'])([^"']+)(["'])/g, (all, pre, v, post) => {
+                if (v === oldV) { changed = true; return pre + newV + post; }
+                return all;
+              });
+              if (changed) {
+                await window.chatoss.files.writeFile(fpath, updated);
+                updatedFiles.push(name);
+              }
+            } catch (e) { /* skip unreadable files */ }
+          }
+        } catch (e) { /* listDir unavailable — app.json alone is still bumped */ }
+        return "Version bumped " + oldV + " → " + newV + " in app.json" +
+          (updatedFiles.length ? " and APP_VERSION in: " + updatedFiles.join(", ") : "") +
+          ".\nNext: git_commit, then git_push, then create_release.";
+      }
+      case "create_release": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const base = p.folderPath.replace(/\/+$/, "");
+        const appJsonPath = base + "/app.json";
+        let appJson;
+        try {
+          appJson = JSON.parse(await window.chatoss.files.readFile(appJsonPath));
+        } catch (e) {
+          return "Error: could not read/parse " + appJsonPath + " — is this a ChatOSS app project? " + (e && e.message ? e.message : String(e));
+        }
+        const version = String(appJson.version || "");
+        if (!/^\d+\.\d+\.\d+/.test(version)) {
+          return "Error: app.json version \"" + version + "\" is not semver — bump it with version_bump first.";
+        }
+        const tag = "v" + version;
+        const appName = appJson.name || p.name || "app";
+        const notes = String(args.notes || "").trim() || appName + " " + tag;
+        const run = async (cmd) => {
+          const r = await window.chatoss.terminal.exec(loginShell(cmd), { cwd: base });
+          if (r === null) return { denied: true };
+          return { denied: false, exitCode: r.exitCode, output: r.output || "" };
+        };
+        // 1) Create the release on GitHub, targeting main.
+        const rel = await run("gh release create " + JSON.stringify(tag) + " --target main --title " +
+          JSON.stringify(appName + " " + tag) + " --notes " + JSON.stringify(notes));
+        if (rel.denied) return "Error: terminal permission denied (approve gh to continue)";
+        if (rel.exitCode !== 0) return "gh release create failed (exit " + rel.exitCode + "):\n" + rel.output;
+        // 2) Build the .aip: zip ONLY the app's runtime files. Exclude tests/,
+        //    docs, dot-folders (.git, .chatoss), *.md, and old .aip/.zip artifacts.
+        const EXCLUDE = new Set(["tests", "docs", "node_modules", ".git", ".chatoss"]);
+        let files = [];
+        try {
+          const entries = await window.chatoss.files.listDir(base);
+          for (const ent of (entries || [])) {
+            const name = ent.name || "";
+            if (!name || name.startsWith(".")) continue;
+            if (EXCLUDE.has(name)) continue;
+            if (/\.(md|aip|zip)$/i.test(name)) continue;
+            files.push(name);
+          }
+        } catch (e) {
+          files = ["app.json", "index.html", "app.js", "style.css", "icon.svg", "libs"];
+        }
+        if (!files.length) return "Error: no app files found to package.";
+        const aipName = String(p.name || "app").toLowerCase().replace(/[^a-z0-9._-]+/g, "-") + "-" + tag + ".aip";
+        const zipName = aipName.replace(/\.aip$/, ".zip");
+        const zipR = await run("zip -r -X " + JSON.stringify(aipName) + " " + files.map(JSON.stringify).join(" "));
+        if (zipR.denied) return "Error: terminal permission denied (approve zip to continue)";
+        if (zipR.exitCode !== 0) return "zip build failed (exit " + zipR.exitCode + "):\n" + zipR.output;
+        const cpR = await run("cp " + JSON.stringify(aipName) + " " + JSON.stringify(zipName));
+        if (cpR.denied) return "Error: terminal permission denied (approve cp to continue)";
+        if (cpR.exitCode !== 0) return "cp failed (exit " + cpR.exitCode + "):\n" + cpR.output;
+        // 3) Upload both installable assets.
+        const upR = await run("gh release upload " + JSON.stringify(tag) + " " + JSON.stringify(aipName) + " " + JSON.stringify(zipName));
+        if (upR.denied) return "Error: terminal permission denied (approve gh to continue)";
+        if (upR.exitCode !== 0) return "gh release upload failed (exit " + upR.exitCode + "):\n" + upR.output;
+        return "Release " + tag + " created with installable assets:\n" + aipName + "\n" + zipName + "\n\n" + rel.output + "\n" + upR.output;
       }
       default:
         return "Error: unknown tool " + name;
@@ -6428,6 +6761,17 @@ async function buildSystemPrompt() {
     "  • When all agents are done and all worktrees merged, summarize what was accomplished.",
     "  • Read the attached Kanban board with get_board({}) and call update_card({ cardId, done:true }) to mark the task complete (if a card exists for it).",
     "",
+    "STEP 7 — FINISH THE BATCH: COMMIT, PUSH, RELEASE. THESE ARE YOUR JOB.",
+    "  • Merges, git commits, git pushes, version bumps, and GitHub releases are the ORCHESTRATOR's job — NEVER delegate them to a sub-agent. You have the tools: git_status, git_commit, git_push, version_bump, create_release, read_file, write_file, edit_file.",
+    "  • When the user asks to finish a batch (or says 'stop when everything is done'), the done condition is: every worktree merged, main pushed to origin, and a release created with installable assets.",
+    "  • Release flow, in order:",
+    "      1. version_bump({ bump: 'minor' }) — MINOR for a batch with features/fixes, PATCH for a single tiny fix. It updates app.json AND the APP_VERSION constant together.",
+    "      2. git_commit({ message: 'vX.Y.Z: <summary>' })",
+    "      3. git_push({})",
+    "      4. create_release({ notes: '<summary>' }) — creates the GitHub release and builds/uploads the .aip + .zip assets.",
+    "  • Small direct file edits (release metadata, docs like AGENTS.md, config) are also YOUR job — use read_file/write_file/edit_file. Implementation work still belongs to sub-agents in worktrees.",
+    "  • If a tool reports 'terminal permission denied', tell the user to approve the command in the pending permission prompt — do NOT delegate the operation to a sub-agent.",
+    "",
     "═══════════════════════════════════════════════════════════════",
     "WHEN AN AGENT GETS STUCK — TALK TO IT, DON'T REPLACE IT",
     "═══════════════════════════════════════════════════════════════",
@@ -6471,7 +6815,7 @@ async function buildSystemPrompt() {
     "",
     "═══════════════════════════════════════════════════════════════",
     "",
-    "ACT, don't just explore. When the user asks you to build or change something, your job is to DECOMPOSE the task, create worktrees, SPIN UP coding agents (start_cli_session) to do the work in their own terminals, coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session), and MERGE the results back (merge_worktree). Don't try to write all the code yourself in chat; delegate it to sub-agents.",
+    "ACT, don't just explore. When the user asks you to build or change something, your job is to DECOMPOSE the task, create worktrees, SPIN UP coding agents (start_cli_session) to do the work in their own terminals, coordinate them by reading their output (read_session) and sending follow-up instructions (send_to_session), and MERGE the results back (merge_worktree). Don't try to write all the code yourself in chat; delegate it to sub-agents. But when the batch is done, YOU finish it: commit, push, and release (STEP 7) — never hand that to a sub-agent.",
     "",
   ];
   if (p) {

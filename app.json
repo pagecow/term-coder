@@ -1,11 +1,12 @@
 {
   "id": "com.thetjmccarty.termcoder",
   "name": "Term Coder",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "AI agent orchestrator with live terminal squares — decomposes tasks into parallel sub-agents, each in its own git worktree, and merges the results.",
   "icon": "icon.svg",
   "entry": "index.html",
   "capabilities": ["chatApi", "terminal", "fileAccess", "fileDrop", "boards", "notifications", "clipboardWrite", "sqlite", "webSearch", "openExternal"],
+  "terminalCommandPrefixes": ["zsh", "git", "gh", "zip", "cp", "which", "test", "ollama"],
   "openExternalAllowlist": ["github.com", "raw.githubusercontent.com"],
   "scopedDataKeys": ["term-coder.state", "term-coder.settings", "term-coder.worktrees", "term-coder.sessions", "modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "subAgentEffort", "trustMode", "term-coder.userTerm"],
   "dataStoreRequests": [],
