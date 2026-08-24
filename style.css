@@ -2036,12 +2036,143 @@ body.is-resizing-row .term-mount { pointer-events: none; }
 .composer-send:disabled { opacity: .4; cursor: default; box-shadow: none; }
 .composer-send.is-running { background: var(--text); box-shadow: 0 2px 6px rgba(0,0,0,0.2); }
 .composer-send.is-running:hover { background: var(--text); }
-.composer-hint {
+/* Project + git branch bar — sits under the composer where the old hint text
+   used to be. Two clickable chips (project name, branch name) that each open a
+   selector popover. */
+.project-branch-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 8px;
-  text-align: center;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
+  min-width: 0;
 }
+.pb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color .1s ease, background-color .1s ease;
+}
+.pb-chip:hover { color: var(--text); background-color: var(--surface-2); }
+.pb-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pb-chip:disabled { opacity: .5; cursor: default; }
+.pb-icon { display: inline-flex; flex: 0 0 auto; color: var(--muted); }
+.pb-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pb-caret { font-size: 9px; color: var(--muted); flex: 0 0 auto; }
+.pb-sep { color: var(--border-strong); flex: 0 0 auto; }
+
+/* Selector popover — anchored to the bar, opens upward like the token popover. */
+.pb-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 50;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pb-popover[hidden] { display: none; }
+.pb-search {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
+  outline: none;
+}
+.pb-search::placeholder { color: var(--muted); }
+.pb-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  max-height: 260px;
+}
+.pb-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color .1s ease;
+}
+.pb-item:hover { background-color: var(--surface-2); }
+.pb-item.is-current { color: var(--accent); font-weight: 600; }
+.pb-item .pb-item-check {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.pb-item .pb-item-sub { color: var(--muted); font-size: 11px; margin-left: auto; flex: 0 0 auto; }
+.pb-item.is-main .pb-item-sub { color: var(--accent); font-weight: 600; }
+.pb-empty {
+  padding: 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: center;
+}
+.pb-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: background-color .1s ease;
+}
+.pb-create:hover { background-color: var(--accent-tint); }
+.pb-create-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+}
+.pb-create-row .form-input { flex: 1 1 auto; }
+.pb-create-row .btn { flex: 0 0 auto; }
 
 /* Token estimator — bottom-right of the composer, under the input. */
 .token-estimator {
