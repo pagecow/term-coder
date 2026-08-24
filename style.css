@@ -2043,6 +2043,120 @@ body.is-resizing-row .term-mount { pointer-events: none; }
   color: var(--muted);
 }
 
+/* Token estimator — bottom-right of the composer, under the input. */
+.token-estimator {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.token-estimator-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transition: color .1s ease, background-color .1s ease;
+}
+.token-estimator-btn:hover,
+.token-estimator-btn:focus-visible {
+  color: var(--text);
+  background-color: var(--surface-2);
+  outline: none;
+}
+.token-count { white-space: nowrap; }
+.token-ring {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+.token-ring svg { width: 100%; height: 100%; display: block; transform: rotate(-90deg); }
+.token-ring-bg {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 3.2;
+}
+.token-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-dasharray: 100 100;
+  stroke-dashoffset: 100;
+  transition: stroke-dashoffset .15s ease, stroke .15s ease;
+}
+.token-ring-fill.is-warn { stroke: var(--chat-tool-running); }
+.token-ring-fill.is-over { stroke: var(--danger); }
+
+/* Breakdown popover */
+.token-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  width: 260px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text);
+}
+.token-popover[hidden] { display: none; }
+.token-popover-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.token-popover-head .token-popover-total { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.token-popover-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 7px;
+}
+.token-popover-row:last-child { margin-bottom: 0; }
+.token-popover-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-2);
+}
+.token-popover-label .token-popover-num { color: var(--muted); font-variant-numeric: tabular-nums; }
+.token-popover-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.token-popover-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width .15s ease;
+}
+.token-popover-note {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
 .session-info {
   padding: 6px 18px;
   font-size: 11px;

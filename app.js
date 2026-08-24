@@ -131,6 +131,30 @@ let defaultModelId = null;
 let running = false;
 let abortController = null;
 
+// ---------- Token estimator ----------
+// Context-window fallbacks keyed by model id, used when listModels() doesn't
+// report a contextLength. Matched by substring (case-insensitive) so a family
+// of model ids (e.g. "claude-3-5-sonnet", "claude-opus-4") all resolve.
+const CONTEXT_WINDOW_MAP = [
+  { match: /claude|anthropic/i, tokens: 200000 },
+  { match: /gpt-4o|gpt-4\.1|gpt-4-turbo|gpt-4-32k|o1|o3|o4|chatgpt/i, tokens: 128000 },
+  { match: /gpt-3\.5/i, tokens: 16385 },
+  { match: /gemini/i, tokens: 1000000 },
+  { match: /deepseek/i, tokens: 128000 },
+  { match: /llama3|llama-3/i, tokens: 128000 },
+  { match: /qwen/i, tokens: 128000 },
+  { match: /mistral/i, tokens: 128000 },
+  { match: /codex/i, tokens: 128000 },
+  { match: /grok/i, tokens: 128000 },
+];
+const DEFAULT_CONTEXT_WINDOW = 128000;
+// Static fallback for the system prompt before the first turn has built one.
+// buildSystemPrompt() caches its real output into _lastSystemPrompt each turn.
+const SYSTEM_PROMPT_FALLBACK = "You are Term Coder, an autonomous software-building orchestrator.";
+let _lastSystemPrompt = "";
+let _lastBreakdown = null;
+let _lastMax = 0;
+
 // Auto-detection cache (refreshed every ~60s).
 //   claudePath / codexPath: resolved absolute path to the direct CLI binary
 //   (mirrors ollamaPath). The sandboxed terminal runs a non-login shell with a
@@ -1435,6 +1459,11 @@ const el = {
   chatStatus: $("chat-status"),
   chatForm: $("chat-form"),
   chatInput: $("chat-input"),
+  tokenEstimator: $("token-estimator"),
+  tokenEstimatorBtn: $("token-estimator-btn"),
+  tokenCount: $("token-count"),
+  tokenRingFill: $("token-ring-fill"),
+  tokenPopover: $("token-popover"),
   sendBtn: $("send-btn"),
   sendIcon: document.querySelector("#send-btn .send-icon"),
   stopIcon: document.querySelector("#send-btn .stop-icon"),
@@ -6552,6 +6581,7 @@ function renderChat() {
   chatAutoScroll = true;
   scrollChatBottom(false);
   updateChatEmpty();
+  renderTokenEstimator();
 }
 function renderMessage(m) {
   const role = m.role || "system";
@@ -6729,6 +6759,143 @@ function selectedModel() { return el.modelPicker.value; }
 function selectedEffort() {
   if (el.effortPicker.disabled) return null;
   return el.effortPicker.value || null;
+}
+
+// ---------- Token estimator ----------
+// Heuristic token count: ~4 characters per token, with a floor of 1 token for
+// any non-empty string. Good enough for a live estimate without a tokenizer.
+function estimateTokens(text) {
+  if (text == null) return 0;
+  const s = String(text);
+  if (!s.length) return 0;
+  return Math.max(1, Math.round(s.length / 4));
+}
+
+// Resolve the max context window for a model id. Prefers the model's own
+// contextLength from listModels(); falls back to the CONTEXT_WINDOW_MAP, then
+// a default. Returns 0 when no model is selected.
+function maxTokensForModel(modelId) {
+  if (!modelId) return 0;
+  const m = models.find((x) => x.id === modelId);
+  if (m && m.contextLength && m.contextLength > 0) return m.contextLength;
+  for (const entry of CONTEXT_WINDOW_MAP) {
+    if (entry.match.test(modelId)) return entry.tokens;
+  }
+  return DEFAULT_CONTEXT_WINDOW;
+}
+
+// Estimate the token cost of the tool definitions (JSON schema) passed to
+// runTurn. Serializes each tool and counts it with the same heuristic.
+function estimateToolTokens(tools) {
+  if (!tools || !tools.length) return 0;
+  let total = 0;
+  for (const t of tools) {
+    try { total += estimateTokens(JSON.stringify(t)); } catch (e) { /* ignore */ }
+  }
+  return total;
+}
+
+// Build the full token breakdown for the current composer state. Categories:
+//   - system prompt (cached from the last real turn, or a static fallback)
+//   - tool definitions (ORCHESTRATOR_TOOLS JSON schema)
+//   - messages (the conversation history that will be sent)
+//   - draft (the text currently typed in the composer)
+// Returns { system, tools, messages, draft, total, max }.
+function computeTokenBreakdown() {
+  const c = activeConversation();
+  const modelId = selectedModel() || defaultModelId;
+  const max = maxTokensForModel(modelId);
+
+  const systemText = _lastSystemPrompt || SYSTEM_PROMPT_FALLBACK;
+  const system = estimateTokens(systemText);
+  const tools = estimateToolTokens(ORCHESTRATOR_TOOLS);
+
+  let messages = 0;
+  if (c && c.messages) {
+    for (const m of c.messages) {
+      if (m.role === "user" || m.role === "assistant") {
+        messages += estimateTokens(m.content);
+      }
+    }
+  }
+
+  const draft = estimateTokens(el.chatInput ? el.chatInput.value : "");
+
+  return { system, tools, messages, draft, total: system + tools + messages + draft, max };
+}
+
+// Render the estimator: the "current / max" text, the progress ring, and the
+// popover breakdown. Called on input, on model change, and after each turn.
+function renderTokenEstimator() {
+  if (!el.tokenEstimator) return;
+  const b = computeTokenBreakdown();
+  _lastBreakdown = b;
+  _lastMax = b.max;
+
+  const pct = b.max > 0 ? Math.min(1, b.total / b.max) : 0;
+  const pctInt = Math.round(pct * 100);
+
+  if (el.tokenCount) {
+    el.tokenCount.textContent = b.total.toLocaleString() + " / " + (b.max > 0 ? b.max.toLocaleString() : "—");
+  }
+  if (el.tokenRingFill) {
+    // stroke-dasharray is 100 100, so offset 100 = empty, 0 = full.
+    el.tokenRingFill.style.strokeDashoffset = String(100 - pct * 100);
+    el.tokenRingFill.classList.toggle("is-warn", pct >= 0.75 && pct < 1);
+    el.tokenRingFill.classList.toggle("is-over", pct >= 1);
+  }
+  if (el.tokenEstimatorBtn) {
+    el.tokenEstimatorBtn.setAttribute(
+      "aria-label",
+      "Token usage: " + b.total.toLocaleString() + " of " + (b.max > 0 ? b.max.toLocaleString() : "unknown") + " tokens (" + pctInt + "%)"
+    );
+  }
+  renderTokenPopover();
+}
+
+// Render the popover breakdown (only when open). Each category shows its count
+// and a bar proportional to its share of the total.
+function renderTokenPopover() {
+  if (!el.tokenPopover || el.tokenPopover.hidden) return;
+  const b = _lastBreakdown || computeTokenBreakdown();
+  const rows = [
+    { key: "system", label: "System prompt", n: b.system },
+    { key: "tools", label: "Tool definitions", n: b.tools },
+    { key: "messages", label: "Messages", n: b.messages },
+    { key: "draft", label: "Draft (typed)", n: b.draft },
+  ];
+  const maxN = Math.max(1, ...rows.map((r) => r.n));
+  const pct = b.max > 0 ? Math.min(1, b.total / b.max) : 0;
+
+  let html = '<div class="token-popover-head"><span>Token breakdown</span>' +
+    '<span class="token-popover-total">' + b.total.toLocaleString() + " / " + (b.max > 0 ? b.max.toLocaleString() : "—") + "</span></div>";
+  for (const r of rows) {
+    const share = r.n > 0 ? Math.max(2, Math.round((r.n / maxN) * 100)) : 0;
+    html += '<div class="token-popover-row">' +
+      '<div class="token-popover-label"><span>' + esc(r.label) + '</span>' +
+      '<span class="token-popover-num">' + r.n.toLocaleString() + "</span></div>" +
+      '<div class="token-popover-bar"><div class="token-popover-bar-fill" style="width:' + share + '%"></div></div>' +
+      "</div>";
+  }
+  html += '<div class="token-popover-note">Estimate: ~4 characters per token. ' +
+    (b.max > 0 ? "Context used: " + Math.round(pct * 100) + "%." : "No model selected.") + "</div>";
+  el.tokenPopover.innerHTML = html;
+}
+
+function openTokenPopover() {
+  if (!el.tokenPopover) return;
+  el.tokenPopover.hidden = false;
+  el.tokenEstimatorBtn.setAttribute("aria-expanded", "true");
+  renderTokenPopover();
+}
+function closeTokenPopover() {
+  if (!el.tokenPopover) return;
+  el.tokenPopover.hidden = true;
+  el.tokenEstimatorBtn.setAttribute("aria-expanded", "false");
+}
+function toggleTokenPopover() {
+  if (el.tokenPopover && !el.tokenPopover.hidden) closeTokenPopover();
+  else openTokenPopover();
 }
 
 // ---------- Attachments (files + images) ----------
@@ -7248,7 +7415,9 @@ async function buildSystemPrompt() {
   } else {
     sys.push("", "(No Kanban board attached to this conversation. You can still list_boards to see what exists.)");
   }
-  return sys.join("\n");
+  const joined = sys.join("\n");
+  _lastSystemPrompt = joined;
+  return joined;
 }
 
 // ---------- Send message ----------
@@ -7618,6 +7787,7 @@ async function runOrchestratorTurn(c) {
     }
     setRunning(false);
     abortController = null;
+    renderTokenEstimator();
   }
 }
 
@@ -9465,6 +9635,7 @@ async function init() {
     const c = activeConversation();
     if (c) { c.modelId = el.modelPicker.value; saveState(); }
     renderEffortPicker();
+    renderTokenEstimator();
   });
   // Lazy recovery: if the picker was opened while the model list is empty (the
   // first-install warm-up case), reload it on the spot so the dropdown fills in.
@@ -9530,6 +9701,7 @@ async function init() {
     // While a turn runs the send button doubles as Stop; typing flips it back
     // to Send so the user can see their message will be delivered.
     syncSendButton();
+    renderTokenEstimator();
   });
 
   // Chat scroll tracking — show the "Jump to latest" button when scrolled up,
@@ -9621,6 +9793,19 @@ async function init() {
   // board picker
   el.boardPickerX.addEventListener("click", () => el.boardPicker.classList.add("hidden"));
 
+  // Token estimator — toggle popover on click, close on outside click.
+  if (el.tokenEstimatorBtn) {
+    el.tokenEstimatorBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleTokenPopover();
+    });
+  }
+  document.addEventListener("click", (e) => {
+    if (!el.tokenPopover || el.tokenPopover.hidden) return;
+    if (el.tokenEstimator && el.tokenEstimator.contains(e.target)) return;
+    closeTokenPopover();
+  });
+
   // history browser (past conversations + terminal sessions)
   initHistoryBrowser();
 
@@ -9645,6 +9830,7 @@ async function init() {
     else if (!el.boardPicker.classList.contains("hidden")) el.boardPicker.classList.add("hidden");
     else if (!el.historyModal.classList.contains("hidden")) closeHistoryBrowser();
     else if (el.imagePreviewModal && !el.imagePreviewModal.classList.contains("hidden")) closeImagePreview();
+    else if (el.tokenPopover && !el.tokenPopover.hidden) closeTokenPopover();
   });
 
   // column resizers (restores any saved layout)
@@ -9753,6 +9939,7 @@ async function init() {
   renderProjects();
   renderChat();
   renderSessionInfo();
+  renderTokenEstimator();
   // Code editor column: bind events + restore the saved width (the pane stays
   // hidden until a file is opened).
   if (settings.editorWidth) editorState.size = settings.editorWidth;
