@@ -30,9 +30,27 @@
 
     <!-- TOP BAR -->
     <header id="topbar" class="topbar">
-      <div class="topbar-title">
-        <span class="topbar-mark">▮</span>
-        <strong>Term Coder</strong>
+      <div class="topbar-left">
+        <div class="topbar-title">
+          <span class="topbar-mark">▮</span>
+          <strong>Term Coder</strong>
+        </div>
+        <span class="topbar-sep" aria-hidden="true"></span>
+        <button id="new-chat-btn" class="btn btn-ghost btn-small topbar-new-btn" type="button"
+                title="Start a new chat in the current project (⌘N / Ctrl+N)">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M8 3.5v9M3.5 8h9"/>
+          </svg>
+          <span>New chat</span>
+        </button>
+        <button id="new-project-top-btn" class="btn btn-ghost btn-small topbar-new-btn" type="button"
+                title="Add a project folder">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12.5v-8a1 1 0 0 1 1-1h3l1.5 2H13a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>
+            <path d="M8 8v3.2M6.4 9.6h3.2"/>
+          </svg>
+          <span>New project</span>
+        </button>
       </div>
       <div class="topbar-actions">
         <button id="history-btn" class="btn btn-ghost btn-small" type="button" title="Browse past conversations and terminal sessions">History</button>
@@ -43,14 +61,6 @@
 
     <!-- COLUMN 1 — Projects -->
     <aside class="col-projects pane">
-      <header class="pane-titlebar proj-titlebar">
-        <span class="pane-label">Projects</span>
-        <button id="new-project-btn" class="icon-button" type="button" title="Add a project folder" aria-label="New project">
-          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
-            <path d="M8 3.5v9M3.5 8h9"/>
-          </svg>
-        </button>
-      </header>
       <nav id="project-list" class="project-list" aria-label="Projects"></nav>
       <!-- Footer toolbar pinned to the bottom of the sidebar. The user's own
            terminal lives here: a toggle that slides a bottom-drawer terminal
@@ -101,26 +111,37 @@
     <!-- COLUMN 2 — Orchestrator chat -->
     <section class="col-chat pane">
       <header class="pane-titlebar chat-titlebar">
-        <div class="chat-title-row">
-          <strong id="chat-title" class="chat-title">New conversation</strong>
-          <span id="board-chip" class="board-chip hidden" title="Attached Kanban board">
-            <span class="board-chip-icon">▦</span>
-            <span id="attached-board-name" class="board-chip-name"></span>
-            <button id="detach-board-btn" class="board-chip-x" type="button" title="Detach board" aria-label="Detach board">&times;</button>
-          </span>
-        </div>
-        <div class="chat-controls-row">
-          <select id="model-picker" class="pill-select" aria-label="Model" title="Chat model"></select>
-          <select id="effort-picker" class="pill-select hidden" aria-label="Reasoning effort" title="Reasoning effort"></select>
-          <span class="chat-controls-spacer"></span>
-          <button id="copy-conv-btn" class="btn btn-ghost btn-small copy-conv-btn" type="button" title="Copy the full conversation to the clipboard" disabled>
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>
-              <path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/>
-            </svg>
-            <span class="copy-conv-label">Copy</span>
-          </button>
-          <button id="attach-board-btn" class="btn btn-ghost btn-small" type="button" title="Attach a Kanban board">▦ Board</button>
+        <div class="chat-topbar">
+          <div class="chat-topbar-left">
+            <button id="add-file-btn" class="btn btn-ghost btn-small chat-topbar-btn" type="button" title="Add a file to the chat context" aria-label="Add file to context">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 2.5 4.5 7a3 3 0 0 0 4.2 4.2l5-5a2 2 0 0 0-2.8-2.8l-5 5a1 1 0 0 0 1.4 1.4l4.2-4.2"/>
+              </svg>
+              <span>Add file</span>
+            </button>
+            <button id="attach-board-btn" class="btn btn-ghost btn-small chat-topbar-btn" type="button" title="Attach a Kanban board">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+                <rect x="1.5" y="2" width="4" height="12" rx="1"/>
+                <rect x="6.5" y="2" width="3.5" height="7" rx="1"/>
+                <rect x="11" y="2" width="3.5" height="10" rx="1"/>
+              </svg>
+              <span>Board</span>
+            </button>
+            <span id="board-chip" class="board-chip hidden" title="Attached Kanban board">
+              <span class="board-chip-icon">▦</span>
+              <span id="attached-board-name" class="board-chip-name"></span>
+              <button id="detach-board-btn" class="board-chip-x" type="button" title="Detach board" aria-label="Detach board">&times;</button>
+            </span>
+          </div>
+          <div class="chat-topbar-right">
+            <button id="copy-conv-btn" class="btn btn-ghost btn-small copy-conv-btn" type="button" title="Copy the full conversation to the clipboard" disabled>
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>
+                <path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/>
+              </svg>
+              <span class="copy-conv-label">Copy</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -130,11 +151,6 @@
           <div class="chat-empty-title">Term Coder</div>
           <div class="chat-empty-body">
             An autonomous software-building orchestrator. Describe what you want to build and it decomposes the work into parallel subtasks, spawns a coding agent for each, and merges the results.
-          </div>
-          <div class="chat-empty-prompts">
-            <button type="button" class="chat-empty-prompt" data-prompt="Build a todo app with React and a Node/Express API, split into frontend and backend agents working in parallel.">Build a <strong>todo app</strong> — React frontend + Node/Express API, split across two parallel agents</button>
-            <button type="button" class="chat-empty-prompt" data-prompt="Refactor my project's CSS into a design-token system and fix the responsive layout.">Refactor my <strong>CSS</strong> into a design-token system and fix responsive layout</button>
-            <button type="button" class="chat-empty-prompt" data-prompt="Add unit tests and a GitHub Actions CI workflow to my project.">Add <strong>unit tests</strong> and a GitHub Actions CI workflow</button>
           </div>
         </div>
         <div id="chat-log" class="chat-log" aria-live="polite"></div>
@@ -149,14 +165,19 @@
       <div id="chat-status" class="chat-status" aria-live="polite"></div>
 
       <div class="composer-wrap">
+        <div id="attachment-strip" class="attachment-strip hidden"></div>
         <form id="chat-form" class="composer">
           <textarea id="chat-input" class="composer-input" placeholder="Message the orchestrator…" rows="1"></textarea>
-          <button id="send-btn" type="submit" class="composer-send" title="Send" aria-label="Send">
-            <span class="send-icon">↑</span>
-            <span class="stop-icon hidden">■</span>
-          </button>
+          <div class="composer-toolbar">
+            <select id="model-picker" class="composer-select" aria-label="Model"></select>
+            <select id="effort-picker" class="composer-select" aria-label="Reasoning effort"></select>
+            <button id="send-btn" type="submit" class="composer-send" title="Send" aria-label="Send">
+              <span class="send-icon">↑</span>
+              <span class="stop-icon hidden">■</span>
+            </button>
+          </div>
         </form>
-        <div class="composer-hint">Enter to send · ⇧Enter for newline · send while it works to interrupt</div>
+        <div class="composer-hint">Enter to send · ⇧Enter for newline · drag an image to attach · send while it works to interrupt</div>
       </div>
 
       <div id="session-info" class="session-info"></div>
@@ -235,15 +256,15 @@
   </div>
 
   <!-- SPAWN MODAL -->
-  <div id="spawn-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="spawn-title">
-    <div class="modal-backdrop" data-close="spawn"></div>
-    <div class="modal-card">
-      <header class="modal-header">
+  <div id="spawn-modal" class="tc-modal hidden" role="dialog" aria-modal="true" aria-labelledby="spawn-title">
+    <div class="tc-backdrop" data-close="spawn"></div>
+    <div class="tc-card">
+      <header class="tc-card-hd">
         <strong id="spawn-title">New session</strong>
         <button id="spawn-cancel-x" class="icon-button" type="button" title="Cancel" aria-label="Cancel">&times;</button>
       </header>
-      <div class="modal-body">
-        <p class="modal-hint">Launch a coding agent in its own terminal. After you click Start, pick a launch target — claude / codex directly, or an ollama model.</p>
+      <div class="tc-card-body">
+        <p class="tc-hint">Launch a coding agent in its own terminal. After you click Start, pick a launch target — claude / codex directly, or an ollama model.</p>
         <label class="form-row">
           <span class="form-label">Agent</span>
           <select id="spawn-cli" class="form-input"></select>
@@ -264,9 +285,9 @@
           <input id="spawn-remember" type="checkbox" />
           <span>Remember as defaults</span>
         </label>
-        <div id="spawn-status" class="modal-status"></div>
+        <div id="spawn-status" class="tc-modal-status"></div>
       </div>
-      <footer class="modal-footer">
+      <footer class="tc-card-foot">
         <button id="spawn-cancel" class="btn btn-ghost" type="button">Cancel</button>
         <button id="spawn-start" class="btn btn-primary" type="button">Start session</button>
       </footer>
@@ -274,31 +295,31 @@
   </div>
 
   <!-- BOARD PICKER -->
-  <div id="board-picker" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="board-picker-title">
-    <div class="modal-backdrop" data-close="board"></div>
-    <div class="modal-card">
-      <header class="modal-header">
+  <div id="board-picker" class="tc-modal hidden" role="dialog" aria-modal="true" aria-labelledby="board-picker-title">
+    <div class="tc-backdrop" data-close="board"></div>
+    <div class="tc-card">
+      <header class="tc-card-hd">
         <strong id="board-picker-title">Attach board</strong>
         <button id="board-picker-x" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button>
       </header>
-      <div class="modal-body" id="board-picker-list"></div>
+      <div class="tc-card-body" id="board-picker-list"></div>
     </div>
   </div>
 
   <!-- SETTINGS -->
-  <div id="settings-panel" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <div class="modal-backdrop" data-close="settings"></div>
-    <div class="modal-card">
-      <header class="modal-header">
+  <div id="settings-panel" class="tc-modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="tc-backdrop" data-close="settings"></div>
+    <div class="tc-card">
+      <header class="tc-card-hd">
         <strong id="settings-title">Settings</strong>
-        <div class="modal-header-actions">
+        <div class="tc-card-actions">
           <button id="settings-cancel" class="btn btn-ghost btn-small" type="button">Cancel</button>
           <button id="settings-save" class="btn btn-primary btn-small" type="button">Save</button>
         </div>
       </header>
-      <div class="modal-body">
+      <div class="tc-card-body">
         <h3 class="settings-section-title">Defaults</h3>
-        <p class="modal-hint">Defaults pre-fill the spawn modal — it always appears and you can change anything before starting.</p>
+        <p class="tc-hint">Defaults pre-fill the spawn modal — it always appears and you can change anything before starting.</p>
         <label class="form-row">
           <span class="form-label">Default agent</span>
           <select id="set-cli" class="form-input">
@@ -323,7 +344,7 @@
           <input id="set-cwd" class="form-input" type="text" placeholder="Blank = ask" />
         </label>
         <h3 class="settings-section-title">Model Selection Mode</h3>
-        <p class="modal-hint">Choose how sub-agent sessions pick their launch target. Options include the direct <code>claude</code> / <code>codex</code> CLIs (when installed) and ollama models from <code>ollama list</code>.</p>
+        <p class="tc-hint">Choose how sub-agent sessions pick their launch target. Options include the direct <code>claude</code> / <code>codex</code> CLIs (when installed) and ollama models from <code>ollama list</code>. Each target can also carry an <strong>Effort</strong> level: applied when the session starts — Codex gets its real <code>model_reasoning_effort</code> flag; agents without an effort flag (claude / opencode / ollama) get an effort instruction added to the task brief instead.</p>
         <div class="model-mode-radios" id="model-mode-radios">
           <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the target each time a session starts</span></label>
           <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific target</span><span class="radio-sub">Use one fixed target for every session</span></label>
@@ -331,33 +352,57 @@
         </div>
 
         <div class="model-mode-panel" id="model-mode-manual">
-          <p class="modal-hint">You'll be asked to pick a launch target (claude / codex direct, or an ollama model) each time a session starts.</p>
+          <p class="tc-hint">You'll be asked to pick a launch target (claude / codex direct, or an ollama model) each time a session starts. Effort levels saved in the other modes still apply per target when it launches.</p>
         </div>
 
         <div class="model-mode-panel hidden" id="model-mode-always">
-          <label class="form-row">
-            <span class="form-label">Target</span>
-            <select id="always-model" class="form-input"></select>
-          </label>
+          <div class="target-effort-grid">
+            <label class="form-row">
+              <span class="form-label">Target</span>
+              <select id="always-model" class="form-input"></select>
+            </label>
+            <label class="form-row form-row-effort">
+              <span class="form-label">Effort</span>
+              <select id="always-effort" class="form-input"></select>
+            </label>
+          </div>
         </div>
 
         <div class="model-mode-panel hidden" id="model-mode-complexity">
-          <label class="form-row">
-            <span class="form-label">Low complexity</span>
-            <select id="complexity-model-low" class="form-input"></select>
-          </label>
-          <label class="form-row">
-            <span class="form-label">Medium complexity</span>
-            <select id="complexity-model-medium" class="form-input"></select>
-          </label>
-          <label class="form-row">
-            <span class="form-label">High complexity</span>
-            <select id="complexity-model-high" class="form-input"></select>
-          </label>
+          <div class="target-effort-grid">
+            <label class="form-row">
+              <span class="form-label">Low complexity</span>
+              <select id="complexity-model-low" class="form-input"></select>
+            </label>
+            <label class="form-row form-row-effort">
+              <span class="form-label">Effort</span>
+              <select id="complexity-effort-low" class="form-input"></select>
+            </label>
+          </div>
+          <div class="target-effort-grid">
+            <label class="form-row">
+              <span class="form-label">Medium complexity</span>
+              <select id="complexity-model-medium" class="form-input"></select>
+            </label>
+            <label class="form-row form-row-effort">
+              <span class="form-label">Effort</span>
+              <select id="complexity-effort-medium" class="form-input"></select>
+            </label>
+          </div>
+          <div class="target-effort-grid">
+            <label class="form-row">
+              <span class="form-label">High complexity</span>
+              <select id="complexity-model-high" class="form-input"></select>
+            </label>
+            <label class="form-row form-row-effort">
+              <span class="form-label">Effort</span>
+              <select id="complexity-effort-high" class="form-input"></select>
+            </label>
+          </div>
         </div>
 
         <h3 class="settings-section-title">Folder trust</h3>
-        <p class="modal-hint">When a coding agent (Claude Code, Codex, etc.) asks to "trust this folder" at startup, Term Coder can ask you in chat before confirming, or always trust automatically.</p>
+        <p class="tc-hint">When a coding agent (Claude Code, Codex, etc.) asks to "trust this folder" at startup, Term Coder can ask you in chat before confirming, or always trust automatically.</p>
         <div class="model-mode-radios" id="trust-mode-radios">
           <label class="radio-row"><input type="radio" name="trust-mode" value="ask" /><span class="radio-label">Ask each time</span><span class="radio-sub">Show a yes/no prompt in the chat before confirming trust</span></label>
           <label class="radio-row"><input type="radio" name="trust-mode" value="always" /><span class="radio-label">Always trust automatically</span><span class="radio-sub">Confirm the trust dialog without asking</span></label>
@@ -377,10 +422,10 @@
           <div class="detected-scanning">Scanning…</div>
         </div>
         <button id="rescan-btn" class="btn btn-ghost btn-small" type="button">Re-scan</button>
-        <p class="modal-hint">Detection runs <code>which</code> / <code>ollama list</code> via the terminal API.</p>
+        <p class="tc-hint">Detection runs <code>which</code> / <code>ollama list</code> via the terminal API.</p>
 
         <h3 class="settings-section-title">Updates</h3>
-        <p class="modal-hint">Term Coder can't replace its own files — when an update is available, open the releases page to install it.</p>
+        <p class="tc-hint">Term Coder can't replace its own files — when an update is available, open the releases page to install it.</p>
         <div class="update-row">
           <button id="check-updates-btn" class="btn btn-ghost btn-small" type="button">Check for updates</button>
           <span id="update-status" class="update-status" role="status" aria-live="polite"></span>
@@ -394,23 +439,32 @@
        Conversations/messages live in the app's private SQLite DB (capability
        "sqlite"); terminal sessions are persisted by the OS and read back via
        terminal.listSessions / attachSession / reattachSession / killSession. -->
-  <div id="history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
-    <div class="modal-backdrop" data-close="history"></div>
-    <div class="modal-card">
-      <header class="modal-header">
+  <div id="history-modal" class="tc-modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
+    <div class="tc-backdrop" data-close="history"></div>
+    <div class="tc-card">
+      <header class="tc-card-hd">
         <strong id="history-title">History</strong>
-        <div class="modal-header-actions">
+        <div class="tc-card-actions">
           <button id="history-refresh" class="btn btn-ghost btn-small" type="button" title="Refresh the list">Refresh</button>
           <button id="history-close-x" class="icon-button" type="button" title="Close" aria-label="Close">&times;</button>
         </div>
       </header>
-      <div class="modal-body">
+      <div class="tc-card-body">
         <div id="history-tabs" class="history-tabs" role="tablist" aria-label="History sections">
           <button class="history-tab active" type="button" data-tab="conversations" role="tab" aria-selected="true">Conversations</button>
           <button class="history-tab" type="button" data-tab="terminals" role="tab" aria-selected="false">Terminals</button>
         </div>
         <div id="history-list" class="history-list"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- IMAGE PREVIEW — full-size view of an image attached to the chat. -->
+  <div id="image-preview-modal" class="tc-modal hidden" role="dialog" aria-modal="true" aria-label="Image preview">
+    <div class="tc-backdrop" data-close="image-preview"></div>
+    <div class="image-preview-card">
+      <button id="image-preview-close" class="image-preview-x" type="button" title="Close preview" aria-label="Close preview">&times;</button>
+      <img id="image-preview-img" class="image-preview-img" alt="Attached image preview" />
     </div>
   </div>
 

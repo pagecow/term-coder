@@ -16,7 +16,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.18.3";
+const APP_VERSION = "1.19.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -92,9 +92,35 @@ let modelSelection = {
   complexityModelLow: "",
   complexityModelMedium: "",
   complexityModelHigh: "",
+  // Per-TARGET effort levels for sub-agent sessions: { [launchTargetId]: "low" | "medium" | "high" }.
+  // Empty/absent = model default. Applies in every selection mode (manual picks
+  // included): whatever target launches carries its saved effort. Codex targets
+  // get the real --config model_reasoning_effort flag; agents without an effort
+  // flag get a guidance line appended to the task brief (see spawnChosen).
+  subAgentEffort: {},
 };
 // The scopedData keys that back each model-selection field (top-level keys).
-const MS_KEYS = ["modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh"];
+const MS_KEYS = ["modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "subAgentEffort"];
+
+// Fixed option list for direct CLI targets (claude/codex/opencode) and for
+// ollama models whose model list entry hasn't arrived yet. Direct Codex has a
+// real --config model_reasoning_effort flag that accepts these exact values.
+const SUBAGENT_EFFORT_OPTIONS_BASE = [
+  { value: "", label: "Model default" },
+  { value: "low", label: "Low — fast & pragmatic" },
+  { value: "medium", label: "Medium — balanced" },
+  { value: "high", label: "High — deep reasoning" },
+];
+
+// Values that are safe to pass directly to Codex's --config model_reasoning_effort
+// flag. Anything outside this set falls back to a guidance line in the prompt.
+const CODEX_EFFORT_FLAG_VALUES = new Set(["low", "medium", "high"]);
+
+// Generic effort levels shown when a model/target does not enumerate its own
+// thinkLevels in listModels(). The user explicitly asked for more than
+// low/medium/high — most reasoning models support at least a "max" level, and
+// an "extra-high" slot covers the gap between high and max.
+const GENERIC_EFFORT_LEVELS = ["low", "medium", "high", "extra-high", "max"];
 
 // Trust-folder policy for spawned CLI agents (claude/codex/etc.):
 //   "ask"    -> when a "trust this folder?" dialog appears, ask the user IN CHAT
@@ -1323,8 +1349,9 @@ const el = {
   loading: $("app-loading"),
   // top bar
   settingsBtn: $("settings-btn"),
+  newChatBtn: $("new-chat-btn"),
+  newProjectTopBtn: $("new-project-top-btn"),
   // left
-  newProjectBtn: $("new-project-btn"),
   projectList: $("project-list"),
   projSessionsBody: null,   // filled in by renderProjects (selected project only)
   projSessionsCount: null,
@@ -1341,10 +1368,15 @@ const el = {
   modelPicker: $("model-picker"),
   effortPicker: $("effort-picker"),
   copyConvBtn: $("copy-conv-btn"),
+  addFileBtn: $("add-file-btn"),
   attachBoardBtn: $("attach-board-btn"),
   attachedBoardName: $("attached-board-name"),
   boardChip: $("board-chip"),
   detachBoardBtn: $("detach-board-btn"),
+  attachmentStrip: $("attachment-strip"),
+  imagePreviewModal: $("image-preview-modal"),
+  imagePreviewImg: $("image-preview-img"),
+  imagePreviewClose: $("image-preview-close"),
   chatLog: $("chat-log"),
   chatEmpty: $("chat-empty"),
   chatScroll: $("chat-scroll"),
@@ -1356,7 +1388,6 @@ const el = {
   sendBtn: $("send-btn"),
   sendIcon: document.querySelector("#send-btn .send-icon"),
   stopIcon: document.querySelector("#send-btn .stop-icon"),
-  chatTitle: $("chat-title"),
   sessionInfo: $("session-info"),
   // right
   newSessionBtn: $("new-session-btn"),
@@ -1400,6 +1431,11 @@ const el = {
   complexityModelLow: $("complexity-model-low"),
   complexityModelMedium: $("complexity-model-medium"),
   complexityModelHigh: $("complexity-model-high"),
+  // Per-target sub-agent effort selects (Model Selection Mode panels)
+  alwaysEffort: $("always-effort"),
+  complexityEffortLow: $("complexity-effort-low"),
+  complexityEffortMedium: $("complexity-effort-medium"),
+  complexityEffortHigh: $("complexity-effort-high"),
   // trust-folder mode
   trustModeRadios: $("trust-mode-radios"),
   autoFollow: $("auto-follow"),
@@ -3175,15 +3211,21 @@ async function spawnChosen(choice) {
   // resolves on the full PATH — the sandboxed default shell has a minimal PATH,
   // which is exactly what caused "Unable to spawn ollama … not found in PATH".
   let inner, label;
+  // effortTargetId: which launch-target id to look the effort up under. The raw:
+  // dropdown path names a binary directly, so its id IS the bin name.
+  let effortTargetId = null;
+  let codexFlagApplied = false; // true once --config model_reasoning_effort is on the command line
   // Manual raw-binary override from the dropdown (kept for backward compat and
   // for CLIs not yet covered by the launch-target picker).
   if (choice.cli && choice.cli.startsWith("raw:")) {
     const bin = choice.cli.slice(4);
+    effortTargetId = bin;
     inner = "exec " + bin;
     label = bin + " · " + basename(choice.cwd);
   } else {
     // Route by the chosen launch target.
     const target = findLaunchTarget(choice.target);
+    if (target) effortTargetId = target.id;
     if (target && target.kind === "direct") {
       // ── Direct CLI launch ── run the REAL binary via the terminal capability,
       // NOT through ollama. Uses the resolved absolute path (claudePath /
@@ -3207,6 +3249,32 @@ async function spawnChosen(choice) {
     }
   }
 
+  // ── Per-target effort level (Settings → Model Selection Mode) ──
+  // Direct Codex has a REAL reasoning-effort flag that accepts low/medium/high
+  // (verified OpenAI codex CLI values). Apply it on the command line ONLY when
+  // the chosen effort is one of those safe values — if a future model exposes a
+  // non-codex level like "max" for a codex target, we fall back to a guidance
+  // line instead of passing an invalid flag. Every other agent (claude /
+  // opencode / anything under `ollama launch`) has no effort flag, so the level
+  // is expressed as a guidance line appended to the task brief — universal and
+  // harmless on CLIs that don't parse it. Effort values are validated against
+  // the target's option list before storage, so interpolating them is safe.
+  const effort = effortForTarget(effortTargetId);
+  let effectivePrompt = choice.prompt;
+  if (effort) {
+    const isCodex = /^exec "?[^"]*codex/.test(inner);
+    if (isCodex && CODEX_EFFORT_FLAG_VALUES.has(effort)) {
+      inner += " --config 'model_reasoning_effort=\"" + effort + "\"'";
+      codexFlagApplied = true;
+    } else if (EFFORT_BRIEF[effort] && effectivePrompt) {
+      effectivePrompt = effectivePrompt + "\n\n[" + EFFORT_BRIEF[effort] + "]";
+    } else if (effectivePrompt) {
+      // Unknown/custom level (e.g. "max" on a non-codex target with no EFFORT_BRIEF entry):
+      // append a generic instruction so the level is not silently dropped.
+      effectivePrompt = effectivePrompt + "\n\n[Reasoning effort level: " + effort + "]";
+    }
+  }
+
   let session = null;
   try {
     session = await window.chatoss.terminal.spawn("zsh", { args: ["-lic", inner], cwd: choice.cwd, cols: 90, rows: 22 });
@@ -3221,14 +3289,14 @@ async function spawnChosen(choice) {
   // session.onExit, session.resize, session.kill. Pass the WHOLE handle to
   // registerSession so mount() can wire output→terminal and input→stdin.
   await registerSession(session, "zsh", ["-lic", inner], choice.cwd, label);
-  if (choice.prompt) {
+  if (effectivePrompt) {
     // Don't write the prompt immediately — the CLI (Claude Code / Codex) shows a
     // "trust this folder?" dialog and sometimes a model picker at launch, and
     // typing the prompt too early dumps it into the wrong screen. autoDriveStartup
     // watches the live output, handles the trust dialog (per the Settings trust
     // policy: ask in chat, or always trust), and sends the prompt once the agent's
     // real input box is ready (with a 12s safety timeout).
-    try { autoDriveStartup(session, choice.prompt, label, choice.cwd); } catch (e) { /* non-fatal */ }
+    try { autoDriveStartup(session, effectivePrompt, label, choice.cwd); } catch (e) { /* non-fatal */ }
   }
   return { id: session.id, label, cwd: choice.cwd };
 }
@@ -3607,6 +3675,103 @@ function populateModelSelect(selectEl, selected) {
   else selectEl.value = ids[0];
 }
 
+// ---------- Sub-agent effort (per launch target) ----------
+// Settings → Model Selection Mode rows pair each target select with an Effort
+// select. The effort belongs to the TARGET (not the row), so it applies in
+// every selection mode — a manual pill pick of that target carries the same
+// effort saved for it in Always/Complexity.
+
+// Read the saved effort for a launch-target id. For ollama-model targets the
+// value must be one of the model's current thinkLevels (or "" for default).
+// Direct CLI targets are restricted to the fixed low/medium/high set.
+function effortForTarget(targetId) {
+  if (!targetId) return null;
+  const map = modelSelection.subAgentEffort;
+  const v = map && typeof map === "object" ? map[targetId] : null;
+  if (v == null || v === "") return null;
+  const opts = effortOptionsForTarget(targetId);
+  return opts.some((o) => o.value === v) ? v : null;
+}
+
+// Return the effort options for a given launch target:
+//   - Direct CLI (claude/codex/opencode) → low/medium/high (the values Codex's
+//     real flag accepts; other direct agents get guidance lines).
+//   - An ollama model id with thinkLevels → those exact levels.
+//   - Otherwise → the generic low/medium/high/extra-high/max set.
+function effortOptionsForTarget(targetId) {
+  const directIds = ["claude", "codex", "opencode"];
+  if (targetId && directIds.includes(targetId)) {
+    return [{ value: "", label: "Model default" },
+      { value: "low", label: "Low — fast & pragmatic" },
+      { value: "medium", label: "Medium — balanced" },
+      { value: "high", label: "High — deep reasoning" }];
+  }
+  const m = models.find((x) => x.id === targetId);
+  if (m && m.thinkLevels && m.thinkLevels.length) {
+    const opts = [{ value: "", label: "Model default" }];
+    for (const lvl of m.thinkLevels) {
+      opts.push({ value: lvl, label: lvl.charAt(0).toUpperCase() + lvl.slice(1) });
+    }
+    return opts;
+  }
+  return [{ value: "", label: "Model default" },
+    { value: "low", label: "Low — fast & pragmatic" },
+    { value: "medium", label: "Medium — balanced" },
+    { value: "high", label: "High — deep reasoning" },
+    { value: "extra-high", label: "Extra high" },
+    { value: "max", label: "Max" }];
+}
+
+// Populate an effort select with the option list for `targetId`, selecting the
+// value saved for that target ("" = model default).
+function populateEffortSelect(selectEl, targetId) {
+  if (!selectEl) return;
+  selectEl.innerHTML = "";
+  for (const o of effortOptionsForTarget(targetId)) {
+    const opt = document.createElement("option");
+    opt.value = o.value;
+    opt.textContent = o.label;
+    selectEl.appendChild(opt);
+  }
+  selectEl.value = effortForTarget(targetId) || "";
+}
+
+// Reflect the per-target effort map into every Settings row. Runs whenever a
+// row's target select changes and whenever the panels are (re)populated.
+function syncEffortRows() {
+  populateEffortSelect(el.alwaysEffort, el.alwaysModel.value);
+  populateEffortSelect(el.complexityEffortLow, el.complexityModelLow.value);
+  populateEffortSelect(el.complexityEffortMedium, el.complexityModelMedium.value);
+  populateEffortSelect(el.complexityEffortHigh, el.complexityModelHigh.value);
+}
+
+// Wire one effort select: changing it stores the level against the CURRENT
+// target of its sibling model select, and persists immediately ("" deletes the
+// entry so a target returns to its model default).
+function bindEffortSelect(effortSel, modelSel) {
+  if (!effortSel || !modelSel) return;
+  effortSel.addEventListener("change", () => {
+    const targetId = modelSel.value;
+    if (!targetId) return; // empty picker ("nothing detected") — nothing to attach the effort to
+    if (!modelSelection.subAgentEffort || typeof modelSelection.subAgentEffort !== "object") modelSelection.subAgentEffort = {};
+    const v = effortSel.value;
+    if (v) modelSelection.subAgentEffort[targetId] = v;
+    else delete modelSelection.subAgentEffort[targetId];
+    persistModelSelection();
+  });
+}
+
+// The task-brief guidance line appended when an effort level is set but the
+// target has no real effort flag (claude / opencode / ollama launches). Direct
+// Codex instead gets the verified --config model_reasoning_effort flag.
+const EFFORT_BRIEF = {
+  low: "Effort level: LOW. Work fast and pragmatically — minimal analysis, no over-engineering; prefer the simplest correct solution.",
+  medium: "Effort level: MEDIUM. Balance speed and care — think through the important decisions, but don't over-engineer routine parts.",
+  high: "Effort level: HIGH. Work with maximum care — reason deeply, consider edge cases and trade-offs, and verify your work before calling it done.",
+  "extra-high": "Effort level: EXTRA HIGH. Push deeper than the standard high setting — explore more alternatives, check subtle edge cases, and prioritize correctness over speed.",
+  max: "Effort level: MAX. Use the deepest reasoning available — exhaustively analyze the problem, validate assumptions, and produce the most robust solution regardless of time.",
+};
+
 // Show only the picker panel matching the active radio mode.
 function showModelModePanel(mode) {
   el.modelModeManual.classList.toggle("hidden", mode !== "manual");
@@ -3632,6 +3797,7 @@ function applyModelSelectionModeToUi() {
   populateModelSelect(el.complexityModelLow, modelSelection.complexityModelLow);
   populateModelSelect(el.complexityModelMedium, modelSelection.complexityModelMedium);
   populateModelSelect(el.complexityModelHigh, modelSelection.complexityModelHigh);
+  syncEffortRows();
   showModelModePanel(mode);
 }
 
@@ -3664,6 +3830,10 @@ async function loadModelSelection() {
       const v = await window.chatoss.scopedData.get(key);
       if (v !== undefined && v !== null) modelSelection[key] = v;
     } catch (e) { console.warn("loadModelSelection", key, e); }
+  }
+  // Sanitize: the effort map must be a plain object of targetId → level.
+  if (!modelSelection.subAgentEffort || typeof modelSelection.subAgentEffort !== "object" || Array.isArray(modelSelection.subAgentEffort)) {
+    modelSelection.subAgentEffort = {};
   }
   applyModelSelectionModeToUi();
 }
@@ -4037,9 +4207,19 @@ function renderProjects() {
     name.appendChild(nameText);
     row.appendChild(name);
 
-    // Hover actions — pencil always on hover; delete shows after a beat.
+    // Hover actions — new chat (+) first, then pencil; delete shows after a beat.
     const acts = document.createElement("div");
     acts.className = "proj-actions";
+    const newConvBtn = document.createElement("button");
+    newConvBtn.className = "btn-icon";
+    newConvBtn.title = "New chat in this project";
+    newConvBtn.setAttribute("aria-label", "New chat in this project");
+    newConvBtn.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>';
+    newConvBtn.onclick = (e) => {
+      e.stopPropagation();
+      newConversation(p);
+      try { el.chatInput.focus(); } catch (_) {}
+    };
     const renameBtn = document.createElement("button");
     renameBtn.className = "btn-icon";
     renameBtn.title = "Rename project";
@@ -4050,6 +4230,7 @@ function renderProjects() {
     delBtn.title = "Delete project";
     delBtn.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 5.5h10M6.2 5.5V3.8c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.7M4.8 5.5l.6 6.6c.05.55.5 1 1.05 1h3.1c.55 0 1-.45 1.05-1l.6-6.6"/></svg>';
     delBtn.onclick = (e) => { e.stopPropagation(); confirmDelete(() => deleteProject(p), delBtn); };
+    acts.appendChild(newConvBtn);
     acts.appendChild(renameBtn);
     acts.appendChild(delBtn);
     row.appendChild(acts);
@@ -4061,15 +4242,17 @@ function renderProjects() {
       const body = document.createElement("div");
       body.className = "proj-body";
 
-      // Conversations group — a "New conversation" command + one row per chat.
-      // Newest first; paginated: 7 shown by default, +10 per "Show more",
-      // "Show less" back.
+      // Conversations group — one row per chat. Newest first; paginated: 7
+      // shown by default, +10 per "Show more", "Show less" back. New chats are
+      // created via the + on the project row, the top-bar "New chat" button, or
+      // Cmd/Ctrl+N — NOT a row here — and an empty chat stays OUT of this list
+      // until its first post, so repeated "new chat" clicks can't pile up a
+      // stack of empty rows.
       const convWrap = document.createElement("div");
       convWrap.className = "proj-group";
       const convList = document.createElement("div");
       convList.className = "conversation-list";
-      const stateKey = "convShown:" + p.id;
-      const allConvs = p.conversations;
+      const allConvs = p.conversations.filter(conversationHasPosts);
       const base = 7, step = 10;
       // Most recent first (newest is appended at the end of the array).
       const recent = [...allConvs].reverse();
@@ -4136,32 +4319,42 @@ function renderProjects() {
         convList.appendChild(moreRow);
       }
 
-      const add = document.createElement("div");
-      add.className = "conversation-item conv-new";
-      add.innerHTML = '<span class="conv-plus"><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3.5v5M5.5 6h5"/></svg></span><span>New conversation</span>';
-      add.onclick = () => newConversation(p);
-      convList.appendChild(add);
       convWrap.appendChild(convList);
       body.appendChild(convWrap);
 
-      // File tree (live, expandable) — same group styling.
+      // Section collapse state — Files and Sessions start COLLAPSED and stay
+      // that way until the user expands one (persisted per project).
+      const sec = (state.sectionCollapsed && state.sectionCollapsed[p.id]) || {};
+      const filesCollapsed = sec.files !== false;
+      const sessionsCollapsed = sec.sessions !== false;
+
+      // File tree (live, expandable, collapsible) — same group styling.
       const filesWrap = document.createElement("div");
-      filesWrap.className = "file-tree";
-      renderFileTree(p, filesWrap);
+      filesWrap.className = "file-tree" + (filesCollapsed ? " is-collapsed" : "");
+      renderFileTree(p, filesWrap, { collapsed: filesCollapsed });
       body.appendChild(filesWrap);
 
       // Sessions group — live agent status (click selects in the grid).
+      // Collapsible like Files; the count badge stays visible when collapsed.
       const sesWrap = document.createElement("div");
-      sesWrap.className = "proj-group proj-sessions-group";
+      sesWrap.className = "proj-group proj-sessions-group" + (sessionsCollapsed ? " is-collapsed" : "");
       const sesHead = document.createElement("div");
-      sesHead.className = "proj-sessions-head";
+      sesHead.className = "proj-sessions-head section-toggle";
+      sesHead.title = sessionsCollapsed ? "Expand Sessions" : "Collapse Sessions";
+      sesHead.setAttribute("role", "button");
+      sesHead.setAttribute("aria-expanded", String(!sessionsCollapsed));
+      const sesChev = document.createElement("span");
+      sesChev.className = "section-chev" + (sessionsCollapsed ? " is-collapsed" : "");
+      sesChev.innerHTML = '<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 10 8l-4.5 4.5"/></svg>';
       const sesTitle = document.createElement("span");
       sesTitle.className = "file-tree-title";
       sesTitle.textContent = "Sessions";
       const sesCount = document.createElement("span");
       sesCount.className = "proj-sessions-count";
+      sesHead.appendChild(sesChev);
       sesHead.appendChild(sesTitle);
       sesHead.appendChild(sesCount);
+      sesHead.onclick = () => toggleProjSection(p.id, "sessions");
       const sesBody = document.createElement("div");
       sesBody.className = "proj-sessions-list";
       sesWrap.appendChild(sesHead);
@@ -4329,17 +4522,25 @@ function ensureFileWatch(projectPath) {
   } catch (e) { console.warn("files.watch unavailable", e); }
 }
 
-function renderFileTree(project, container) {
+function renderFileTree(project, container, opts) {
+  const collapsed = !!(opts && opts.collapsed);
   // Switching projects resets expansion state and rebinds the watcher.
   if (fileTree.projectPath !== project.folderPath) resetFileTree(project.folderPath);
   fileTree.container = container;
 
   container.innerHTML = "";
   const head = document.createElement("div");
-  head.className = "file-tree-head";
+  head.className = "file-tree-head section-toggle";
+  head.title = collapsed ? "Expand Files" : "Collapse Files";
+  head.setAttribute("role", "button");
+  head.setAttribute("aria-expanded", String(!collapsed));
+  const chev = document.createElement("span");
+  chev.className = "section-chev" + (collapsed ? " is-collapsed" : "");
+  chev.innerHTML = '<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 10 8l-4.5 4.5"/></svg>';
   const title = document.createElement("span");
   title.className = "file-tree-title";
   title.textContent = "Files";
+  head.appendChild(chev);
   head.appendChild(title);
   const refresh = document.createElement("button");
   refresh.className = "btn-icon";
@@ -4353,11 +4554,21 @@ function renderFileTree(project, container) {
     repaintFileTree();
   };
   head.appendChild(refresh);
+  // Clicking anywhere on the head (except the refresh button, which stops
+  // propagation) toggles the section.
+  head.onclick = () => toggleProjSection(project.id, "files");
   container.appendChild(head);
 
   const body = document.createElement("div");
   body.className = "file-tree-body";
   container.appendChild(body);
+
+  if (collapsed) {
+    // Collapsed by default: skip the initial directory read entirely — the tree
+    // loads the first time the user expands the section (which re-renders the
+    // project with collapsed=false and lands here).
+    return;
+  }
 
   paintFileTree(body, project.folderPath);
   // Load the root on first paint (no "Loading…" flash once it's cached).
@@ -4757,7 +4968,10 @@ function selectProject(pid) {
   collapsedProjects.delete(pid);
   const p = getProject(pid);
   const cur = getConversation(pid, state.activeConversationId);
-  if (!cur) state.activeConversationId = p && p.conversations.length ? p.conversations[0].id : null;
+  if (!cur) {
+    const pref = preferredConversation(p);
+    state.activeConversationId = pref ? pref.id : null;
+  }
   saveState();
   renderProjects();
   renderChat();
@@ -4797,7 +5011,8 @@ function deleteProject(p) {
   if (state.activeProjectId === p.id) {
     state.activeProjectId = state.projects.length ? state.projects[0].id : null;
     const np = getProject(state.activeProjectId);
-    state.activeConversationId = np && np.conversations.length ? np.conversations[0].id : null;
+    const pref = preferredConversation(np);
+    state.activeConversationId = pref ? pref.id : null;
   }
   saveState();
   renderProjects();
@@ -4822,10 +5037,55 @@ function nameFromFirstMessage(text, fallback) {
   return cut ? cut + "…" : fallback;
 }
 
+// A conversation only "exists" for the sidebar once the user has posted in it.
+// Brand-new empty chats stay hidden so New chat / Cmd+N can never pile up a
+// stack of empty rows — see newConversation(), which reuses the empty draft.
+function conversationHasPosts(c) {
+  return !!(c && c.messages && c.messages.some((m) => m.role === "user" && !m.event));
+}
+
+// Pick which conversation to open when none is selected: the newest one that
+// has posts (empty drafts stay out of the way), falling back to the newest
+// overall when every conversation is still empty.
+function preferredConversation(p) {
+  if (!p || !p.conversations.length) return null;
+  for (let i = p.conversations.length - 1; i >= 0; i--) {
+    if (conversationHasPosts(p.conversations[i])) return p.conversations[i];
+  }
+  return p.conversations[p.conversations.length - 1];
+}
+
+// Files / Sessions section collapse — persisted per project in
+// state.sectionCollapsed. Both are COLLAPSED by default: a section counts as
+// expanded only when it was explicitly set to false.
+function toggleProjSection(pid, key) {
+  if (!state.sectionCollapsed) state.sectionCollapsed = {};
+  const cur = state.sectionCollapsed[pid] || {};
+  const nowCollapsed = cur[key] !== false;
+  state.sectionCollapsed[pid] = Object.assign({}, cur, { [key]: !nowCollapsed });
+  saveState();
+  renderProjects();
+}
+
 function newConversation(p) {
+  // One empty draft at a time per project: if one already exists (no posts
+  // yet), just switch back to it instead of creating another. The user can
+  // hit New chat / Cmd+N repeatedly and always lands on the same fresh chat
+  // until they actually post something in it.
+  const draft = p.conversations.find((c) => !conversationHasPosts(c));
+  if (draft) {
+    state.activeProjectId = p.id;
+    state.activeConversationId = draft.id;
+    collapsedProjects.delete(p.id);
+    saveState();
+    renderProjects();
+    renderChat();
+    renderSessionInfo();
+    return draft;
+  }
   // Start with the "Conversation N" placeholder; the real name is filled in
   // from the user's first message in sendMessage (see nameFromFirstMessage).
-  const c = { id: uuid(), name: "Conversation " + (p.conversations.length + 1), messages: [], modelId: null, effort: null, boardId: null };
+  const c = { id: uuid(), name: "Conversation " + (p.conversations.length + 1), messages: [], modelId: null, effort: null, boardId: null, attachments: [] };
   p.conversations.push(c);
   state.activeProjectId = p.id;
   state.activeConversationId = c.id;
@@ -4834,13 +5094,39 @@ function newConversation(p) {
   renderProjects();
   renderChat();
   renderSessionInfo();
+  return c;
+}
+
+// Top-bar "New Chat" — starts a fresh conversation inside the CURRENTLY
+// selected project (same flow as the + button on a project row). Disabled via
+// syncTopNewButtons() when there is no project to put it in.
+function newChatFromTopbar() {
+  const p = getProject(state.activeProjectId);
+  if (!p) {
+    setStatus("Add a project folder first — new chats live inside a project.");
+    return;
+  }
+  newConversation(p);
+  // Drop the caret into the composer so the user can type immediately.
+  try { el.chatInput.focus(); } catch (_) {}
+}
+// Keep the top-bar New Chat enabled state in step with the active project.
+// renderChat runs on every project/conversation change, so it owns the sync.
+function syncTopNewButtons() {
+  if (!el.newChatBtn) return;
+  const hasProject = !!getProject(state.activeProjectId);
+  el.newChatBtn.disabled = !hasProject;
+  el.newChatBtn.title = hasProject
+    ? "Start a new chat in the current project (⌘N / Ctrl+N)"
+    : "Add a project folder first";
 }
 function deleteConversation(p, c) {
   p.conversations = p.conversations.filter((x) => x.id !== c.id);
   // Remove it from the SQLite history store too (messages + tool calls).
   sqliteDeleteConversation(c.id);
   if (state.activeConversationId === c.id) {
-    state.activeConversationId = p.conversations.length ? p.conversations[0].id : null;
+    const pref = preferredConversation(p);
+    state.activeConversationId = pref ? pref.id : null;
   }
   saveState();
   renderProjects();
@@ -5562,22 +5848,23 @@ function renderChat() {
   const c = activeConversation();
   el.chatLog.innerHTML = "";
   syncCopyConvBtn();
+  syncTopNewButtons();
   if (!c) {
-    el.chatTitle.textContent = "Ask the agent";
     el.chatInput.placeholder = "Select or create a conversation…";
     renderModelPicker();
     renderEffortPicker();
     renderBoardChip();
+    renderAttachmentStrip();
     chatAutoScroll = true;
     if (el.chatJumpBtn) el.chatJumpBtn.classList.add("hidden");
     updateChatEmpty();
     return;
   }
-  el.chatTitle.textContent = c.name;
   el.chatInput.placeholder = "Ask the orchestrator to build something…";
   renderModelPicker();
   renderEffortPicker();
   renderBoardChip();
+  renderAttachmentStrip();
 
   for (const m of c.messages) {
     renderMessage(m);
@@ -5633,9 +5920,60 @@ function renderMessage(m) {
   return row;
 }
 
+// ---------- Model list loading (with first-install retry) ----------
+// models is populated ONLY here. Callers re-render the pickers when it arrives
+// so a list that lands late (fresh install warm-up) fills the dropdown without
+// an app restart.
+async function loadModels() {
+  try {
+    const list = await window.chatoss.chat.listModels();
+    models = Array.isArray(list) ? list : [];
+    defaultModelId = await window.chatoss.chat.getDefaultModel();
+  } catch (e) {
+    console.warn("listModels", e);
+    models = []; defaultModelId = null;
+  }
+  renderModelPicker();
+  renderEffortPicker();
+  return models.length;
+}
+
+// Retry cadence for the fresh-install case (~26s total). Stops as soon as a
+// non-empty list lands. Guarded so concurrent empty renders start ONE chain.
+let _modelRetryScheduled = false;
+function scheduleModelRetries() {
+  if (_modelRetryScheduled) return;
+  _modelRetryScheduled = true;
+  const DELAYS = [700, 1500, 3000, 6000, 10000, 12000];
+  let i = 0;
+  const tick = async () => {
+    if (models.length) { _modelRetryScheduled = false; return; }
+    const n = await loadModels();
+    if (n === 0 && i < DELAYS.length) {
+      setTimeout(tick, DELAYS[i++]);
+    } else {
+      _modelRetryScheduled = false; // list arrived, or budget exhausted
+    }
+  };
+  setTimeout(tick, DELAYS[i++]);
+}
+
 // Display-only renders — no state mutation, no saveState here.
 function renderModelPicker() {
-  if (!models.length) { el.modelPicker.innerHTML = ""; return; }
+  if (!models.length) {
+    // Never leave a silently-blank dropdown: show WHY it is empty. The picker is
+    // disabled so its empty state can't be persisted onto a conversation.
+    el.modelPicker.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Loading models…";
+    el.modelPicker.appendChild(opt);
+    el.modelPicker.value = "";
+    el.modelPicker.disabled = true;
+    scheduleModelRetries(); // covers mid-session loss, harmless when already retried
+    return;
+  }
+  el.modelPicker.disabled = false;
   const c = activeConversation();
   const cur = c && c.modelId ? c.modelId : null;
   let preselect = cur;
@@ -5652,30 +5990,259 @@ function renderModelPicker() {
   }
   if (preselect) el.modelPicker.value = preselect;
 }
-function renderEffortPicker() {
-  const c = activeConversation();
+
+// Whether the currently-picked model can take an effort level at all.
+// The real signal is the presence of thinkLevels OR a reasoning capability.
+// If the model advertises neither, we still let the user pick from a generic
+// set — many cloud models accept effort overrides even when listModels() doesn't
+// enumerate the exact levels.
+function selectedModelSupportsEffort() {
   const id = el.modelPicker.value;
   const m = models.find((x) => x.id === id);
-  if (m && m.capabilities && m.capabilities.includes("reasoning") && m.thinkLevels && m.thinkLevels.length) {
-    el.effortPicker.classList.remove("hidden");
+  return !!(m && (m.thinkLevels && m.thinkLevels.length ||
+                        (m.capabilities && m.capabilities.includes("reasoning"))));
+}
+
+// Effort levels shown for the orchestrator chat. Prefer the model's own
+// thinkLevels; otherwise fall back to the generic expanded set.
+function orchestratorEffortLevels() {
+  const id = el.modelPicker.value;
+  const m = models.find((x) => x.id === id);
+  if (m && m.thinkLevels && m.thinkLevels.length) return m.thinkLevels;
+  return GENERIC_EFFORT_LEVELS;
+}
+function renderEffortPicker() {
+  const c = activeConversation();
+  // No model at all (list empty / nothing selected) → disable the picker.
+  if (!models.length || !el.modelPicker.value) {
     el.effortPicker.innerHTML = "";
-    for (const lvl of m.thinkLevels) {
-      const opt = document.createElement("option");
-      opt.value = lvl;
-      opt.textContent = lvl;
-      el.effortPicker.appendChild(opt);
-    }
-    let eff = c && c.effort ? c.effort : null;
-    if (!eff || !m.thinkLevels.includes(eff)) eff = m.thinkDefault || m.thinkLevels[0];
-    el.effortPicker.value = eff;
-  } else {
-    el.effortPicker.classList.add("hidden");
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "—";
+    el.effortPicker.appendChild(o);
+    el.effortPicker.disabled = true;
+    el.effortPicker.value = "";
+    return;
   }
+  const id = el.modelPicker.value;
+  const m = models.find((x) => x.id === id);
+  const levels = orchestratorEffortLevels();
+  const hasEnumeratedLevels = !!(m && m.thinkLevels && m.thinkLevels.length);
+  el.effortPicker.innerHTML = "";
+  el.effortPicker.disabled = false;
+  el.effortPicker.title = hasEnumeratedLevels
+    ? "Reasoning effort (levels reported by this model)"
+    : "Reasoning effort override (generic levels — effect depends on the model provider)";
+  const defOpt = document.createElement("option");
+  defOpt.value = "";
+  defOpt.textContent = "Default";
+  el.effortPicker.appendChild(defOpt);
+  for (const lvl of levels) {
+    const opt = document.createElement("option");
+    opt.value = lvl;
+    opt.textContent = lvl.charAt(0).toUpperCase() + lvl.slice(1);
+    el.effortPicker.appendChild(opt);
+  }
+  let eff = c && c.effort ? c.effort : null;
+  if (!eff || (!levels.includes(eff) && eff !== "")) eff = m && m.thinkDefault ? m.thinkDefault : "";
+  el.effortPicker.value = eff;
 }
 function selectedModel() { return el.modelPicker.value; }
 function selectedEffort() {
-  if (el.effortPicker.classList.contains("hidden")) return null;
+  if (el.effortPicker.disabled) return null;
   return el.effortPicker.value || null;
+}
+
+// ---------- Attachments (files + images) ----------
+// Per-conversation attachments: an array of { id, name, kind: 'image'|'file',
+// dataUrl?, text?, path? }. Images are stored as data URLs (base64) so they can
+// be previewed and passed to runTurn as multimodal content. Text files are read
+// and embedded into the user's message as context.
+function getAttachments() {
+  const c = activeConversation();
+  if (!c) return [];
+  if (!c.attachments) c.attachments = [];
+  return c.attachments;
+}
+function setAttachments(arr) {
+  const c = activeConversation();
+  if (!c) return;
+  c.attachments = arr || [];
+  saveState();
+  renderAttachmentStrip();
+}
+
+// Render the attachment thumbnails above the composer.
+function renderAttachmentStrip() {
+  const strip = el.attachmentStrip;
+  if (!strip) return;
+  const atts = getAttachments();
+  if (!atts.length) { strip.classList.add("hidden"); strip.innerHTML = ""; return; }
+  strip.classList.remove("hidden");
+  strip.innerHTML = "";
+  for (const att of atts) {
+    const thumb = document.createElement("div");
+    thumb.className = "attachment-thumb";
+    thumb.title = att.name || "attachment";
+    if (att.kind === "image" && att.dataUrl) {
+      const img = document.createElement("img");
+      img.src = att.dataUrl;
+      img.alt = att.name || "image";
+      thumb.appendChild(img);
+      thumb.addEventListener("click", () => openImagePreview(att.dataUrl));
+    } else {
+      const icon = document.createElement("span");
+      icon.className = "att-file-icon";
+      icon.textContent = "📄";
+      thumb.appendChild(icon);
+      const nm = document.createElement("span");
+      nm.className = "att-name";
+      nm.textContent = att.name || "file";
+      thumb.appendChild(nm);
+    }
+    const rm = document.createElement("button");
+    rm.className = "att-remove";
+    rm.type = "button";
+    rm.innerHTML = "&times;";
+    rm.title = "Remove attachment";
+    rm.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeAttachment(att.id);
+    });
+    thumb.appendChild(rm);
+    strip.appendChild(thumb);
+  }
+}
+
+function removeAttachment(id) {
+  const atts = getAttachments().filter((a) => a.id !== id);
+  setAttachments(atts);
+}
+
+// Open the full-size image preview modal.
+function openImagePreview(dataUrl) {
+  if (!el.imagePreviewModal || !el.imagePreviewImg) return;
+  el.imagePreviewImg.src = dataUrl;
+  el.imagePreviewModal.classList.remove("hidden");
+}
+function closeImagePreview() {
+  if (!el.imagePreviewModal) return;
+  el.imagePreviewModal.classList.add("hidden");
+  el.imagePreviewImg.src = "";
+}
+
+// Add a file via the file picker (fileAccess openDialog).
+async function addFileFromPicker() {
+  try {
+    const path = await window.chatoss.files.openDialog({ multiple: false });
+    if (!path) return; // cancelled/denied
+    await addFileByPath(path);
+  } catch (e) {
+    console.warn("addFileFromPicker", e);
+    setStatus("Could not open that file: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// Add a file from a known path: read its bytes, detect if it's an image.
+async function addFileByPath(path) {
+  const name = basename(path);
+  const ext = name.split(".").pop().toLowerCase();
+  const imageExts = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
+  if (imageExts.includes(ext)) {
+    // Image: read as base64 and build a data URL.
+    try {
+      const b64 = await window.chatoss.files.readFile(path, { binary: true });
+      const mime = ext === "svg" ? "image/svg+xml" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/" + ext;
+      const dataUrl = "data:" + mime + ";base64," + b64;
+      addAttachment({ id: uuid(), name, kind: "image", dataUrl });
+    } catch (e) {
+      console.warn("readFile image", e);
+      setStatus("Could not read that image: " + (e && e.message ? e.message : String(e)));
+    }
+  } else {
+    // Text/code file: read as text and store for embedding in the message.
+    try {
+      const text = await window.chatoss.files.readFile(path);
+      addAttachment({ id: uuid(), name, kind: "file", text, path });
+    } catch (e) {
+      // Binary non-image file: store just the path/name as context.
+      console.warn("readFile", e);
+      addAttachment({ id: uuid(), name, kind: "file", text: null, path });
+    }
+  }
+}
+
+// Add a dropped file (from fileDrop onDrop). The drop callback gives file
+// objects with .text() and .arrayBuffer() methods, NOT paths.
+async function addDroppedFile(file) {
+  const name = file.name || "dropped-file";
+  const type = file.type || "";
+  if (type.startsWith("image/")) {
+    try {
+      const buf = await file.arrayBuffer();
+      const b64 = arrayBufferToBase64(buf);
+      const dataUrl = "data:" + type + ";base64," + b64;
+      addAttachment({ id: uuid(), name, kind: "image", dataUrl });
+    } catch (e) { console.warn("dropped image", e); }
+  } else {
+    try {
+      const text = await file.text();
+      addAttachment({ id: uuid(), name, kind: "file", text });
+    } catch (e) {
+      addAttachment({ id: uuid(), name, kind: "file", text: null });
+    }
+  }
+}
+
+function addAttachment(att) {
+  const atts = getAttachments();
+  atts.push(att);
+  saveState();
+  renderAttachmentStrip();
+}
+
+// Convert an ArrayBuffer to a base64 string (for dropped image data URLs).
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+// Build the content for runTurn: if there are image attachments, return an
+// array of text + image parts (multimodal); otherwise return the plain string.
+function buildMessageContent(userText) {
+  const atts = getAttachments();
+  const images = atts.filter((a) => a.kind === "image" && a.dataUrl);
+  const files = atts.filter((a) => a.kind === "file");
+
+  // Embed file contents into the text portion.
+  let text = userText;
+  if (files.length) {
+    const fileBlocks = [];
+    for (const f of files) {
+      if (f.text) {
+        fileBlocks.push("--- File: " + f.name + " ---\n" + f.text);
+      } else {
+        fileBlocks.push("--- File: " + f.name + " (binary — path: " + (f.path || "?") + ") ---");
+      }
+    }
+    text = text + "\n\n[Attached files]\n" + fileBlocks.join("\n\n");
+  }
+
+  // If there are images, send multimodal content (text + image_url parts).
+  if (images.length) {
+    const parts = [{ type: "text", text }];
+    for (const img of images) {
+      parts.push({ type: "image_url", image_url: { url: img.dataUrl } });
+    }
+    return parts;
+  }
+  return text;
+}
+
+// Clear attachments after a message is sent.
+function clearAttachments() {
+  setAttachments([]);
 }
 
 // ---------- Copy conversation ----------
@@ -6077,8 +6644,13 @@ async function sendMessage(textOverride, opts) {
   if (!text) return;
   if (textOverride == null) el.chatInput.value = "";
 
-  const userMsg = { role: "user", content: text };
+  // Build the user message content: if there are attachments, embed file
+  // contents and pass images as multimodal parts; otherwise just the text.
+  const content = buildMessageContent(text);
+  const userMsg = { role: "user", content };
   if (o.event) userMsg.event = true;
+  // Clear the attachment strip after the message is consumed.
+  if (textOverride == null) clearAttachments();
   // Name the conversation from the user's first real (non-event) message,
   // replacing the "Conversation N" placeholder — but only if the user hasn't
   // already renamed it by hand. This covers every conversation regardless of
@@ -6091,7 +6663,9 @@ async function sendMessage(textOverride, opts) {
   }
   c.messages.push(userMsg);
   saveState();
-  if (renamedConv) { renderProjects(); renderSessionInfo(); }
+  // The conversation is hidden from the sidebar until its first post — reveal
+  // it now (also renames the "Conversation N" placeholder on that same post).
+  if (renamedConv || (wasFirstUserMsg && !o.event)) { renderProjects(); renderSessionInfo(); }
   renderMessage(userMsg);
   scrollChatBottom(false);
   updateChatEmpty();
@@ -6116,7 +6690,10 @@ async function runOrchestratorTurn(c) {
   const canThink = !!(modelInfo && modelInfo.capabilities && modelInfo.capabilities.includes("reasoning"));
   const effort = selectedEffort();
   if (modelId) { c.modelId = modelId; }
-  if (canThink && effort) { c.effort = effort; } else { c.effort = null; }
+  // Persist the effort if one was chosen, even if the model doesn't explicitly
+  // advertise "reasoning" in capabilities — many cloud models accept an effort
+  // override even when listModels() doesn't enumerate the levels.
+  c.effort = effort || null;
   saveState();
 
   // Typing indicator — shown until the first content token streams in.
@@ -6262,8 +6839,8 @@ async function runOrchestratorTurn(c) {
           return err;
         }
       },
-      think: canThink,                       // only thinking-capable models get think:true
-      thinkLevel: canThink && effort ? effort : undefined,
+      think: canThink || !!effort,            // request reasoning if the model supports it OR the user asked for an effort level
+      thinkLevel: effort || undefined,         // pass the chosen level when set; undefined lets the model use its default
       signal: abortController.signal,
     });
 
@@ -6399,7 +6976,8 @@ async function interruptAndSend(text) {
     }
     c.messages.push(userMsg);
     saveState();
-    if (renamedConv) { renderProjects(); renderSessionInfo(); }
+    // Reveal in the sidebar on first post (see sendMessage).
+    if (renamedConv || wasFirstUserMsg) { renderProjects(); renderSessionInfo(); }
     const userRow = renderMessage(userMsg);
     scrollChatBottom(false);
     updateChatEmpty();
@@ -7846,7 +8424,8 @@ async function init() {
   // restore state + settings
   try {
     const saved = await window.chatoss.scopedData.get(STORE_KEY);
-    if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null, termView: "squares", convShown: {} }, saved);
+    if (saved) state = Object.assign({ projects: [], activeProjectId: null, activeConversationId: null, activeSessionId: null, termView: "squares", convShown: {}, sectionCollapsed: {} }, saved);
+    if (!state.sectionCollapsed) state.sectionCollapsed = {};
   } catch (e) { console.warn("restore state", e); }
   // Hydrate conversations + messages from the private SQLite DB (the durable
   // history store). scopedData may be stale or lost after an orchestration
@@ -7917,17 +8496,25 @@ async function init() {
     opencodePath: (settings.detected && settings.detected.opencodePath) || null,
   };
 
-  // load models
-  try {
-    models = await window.chatoss.chat.listModels();
-    defaultModelId = await window.chatoss.chat.getDefaultModel();
-  } catch (e) { console.warn("listModels", e); models = []; defaultModelId = null; }
+  // Load the model list, retrying in the background when it comes back empty.
+  // On a FRESH INSTALL the OS model service can still be warming up on the very
+  // first boot: listModels() then returns [] (or rejects), the picker stayed
+  // empty, and the app looked model-less until a full close+reopen. Retrying
+  // for ~25s and re-rendering the picker fixes the first-run experience; the
+  // picker also retries lazily on focus (see the focus listener below).
+  await loadModels();
+  if (!models.length) scheduleModelRetries();
 
   // model picker change → persist on the conversation (render never mutates state)
   el.modelPicker.addEventListener("change", () => {
     const c = activeConversation();
     if (c) { c.modelId = el.modelPicker.value; saveState(); }
     renderEffortPicker();
+  });
+  // Lazy recovery: if the picker was opened while the model list is empty (the
+  // first-install warm-up case), reload it on the spot so the dropdown fills in.
+  el.modelPicker.addEventListener("focus", () => {
+    if (!models.length) loadModels();
   });
   el.effortPicker.addEventListener("change", () => {
     const c = activeConversation();
@@ -7936,12 +8523,24 @@ async function init() {
 
   // top bar + left column
   el.settingsBtn.addEventListener("click", openSettings);
-  el.newProjectBtn.addEventListener("click", newProject);
+  if (el.newChatBtn) el.newChatBtn.addEventListener("click", newChatFromTopbar);
+  if (el.newProjectTopBtn) el.newProjectTopBtn.addEventListener("click", newProject);
 
   // middle column
   el.copyConvBtn.addEventListener("click", copyConversation);
   el.attachBoardBtn.addEventListener("click", openBoardPicker);
   if (el.detachBoardBtn) el.detachBoardBtn.addEventListener("click", detachBoard);
+  if (el.addFileBtn) el.addFileBtn.addEventListener("click", addFileFromPicker);
+  // Image preview modal close handlers
+  if (el.imagePreviewClose) el.imagePreviewClose.addEventListener("click", closeImagePreview);
+  // Drag-and-drop file import (capability "fileDrop"): any file dropped on the
+  // app window is added to the chat's attachments (images show a preview strip).
+  try {
+    window.chatoss.files.onDrop(async (files) => {
+      if (!files || !files.length) return;
+      for (const f of files) await addDroppedFile(f);
+    });
+  } catch (e) { console.warn("onDrop not available", e); }
   el.chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const text = el.chatInput.value.trim();
@@ -7977,19 +8576,6 @@ async function init() {
     // to Send so the user can see their message will be delivered.
     syncSendButton();
   });
-
-  // Empty-state example prompts — clicking fills the composer and sends.
-  if (el.chatEmpty) {
-    el.chatEmpty.addEventListener("click", (e) => {
-      const btn = e.target.closest && e.target.closest(".chat-empty-prompt");
-      if (!btn) return;
-      const prompt = btn.getAttribute("data-prompt");
-      if (!prompt) return;
-      el.chatInput.value = prompt;
-      autoResizeInput();
-      if (!running) el.chatForm.requestSubmit();
-    });
-  }
 
   // Chat scroll tracking — show the "Jump to latest" button when scrolled up,
   // and pause auto-scroll while streaming so the user can read history.
@@ -8054,10 +8640,15 @@ async function init() {
       saveModelSelectionMode();
     }
   });
-  el.alwaysModel.addEventListener("change", saveModelSelectionMode);
-  el.complexityModelLow.addEventListener("change", saveModelSelectionMode);
-  el.complexityModelMedium.addEventListener("change", saveModelSelectionMode);
-  el.complexityModelHigh.addEventListener("change", saveModelSelectionMode);
+  el.alwaysModel.addEventListener("change", () => { syncEffortRows(); saveModelSelectionMode(); });
+  el.complexityModelLow.addEventListener("change", () => { syncEffortRows(); saveModelSelectionMode(); });
+  el.complexityModelMedium.addEventListener("change", () => { syncEffortRows(); saveModelSelectionMode(); });
+  el.complexityModelHigh.addEventListener("change", () => { syncEffortRows(); saveModelSelectionMode(); });
+  // Effort selects write straight into the per-target map (persisted live).
+  bindEffortSelect(el.alwaysEffort, el.alwaysModel);
+  bindEffortSelect(el.complexityEffortLow, el.complexityModelLow);
+  bindEffortSelect(el.complexityEffortMedium, el.complexityModelMedium);
+  bindEffortSelect(el.complexityEffortHigh, el.complexityModelHigh);
 
   el.rescanBtn.addEventListener("click", async () => {
     el.detectedList.innerHTML = "<div class='detected-scanning'>Scanning…</div>";
@@ -8084,9 +8675,10 @@ async function init() {
     [el.settingsPanel, () => el.settingsPanel.classList.add("hidden")],
     [el.boardPicker, () => el.boardPicker.classList.add("hidden")],
     [el.historyModal, closeHistoryBrowser],
+    [el.imagePreviewModal, closeImagePreview],
   ]) {
     modal.addEventListener("click", (e) => {
-      if (e.target === modal || (e.target.classList && e.target.classList.contains("modal-backdrop"))) closer();
+      if (e.target === modal || (e.target.classList && e.target.classList.contains("tc-backdrop"))) closer();
     });
   }
 
@@ -8097,6 +8689,7 @@ async function init() {
     else if (!el.settingsPanel.classList.contains("hidden")) el.settingsPanel.classList.add("hidden");
     else if (!el.boardPicker.classList.contains("hidden")) el.boardPicker.classList.add("hidden");
     else if (!el.historyModal.classList.contains("hidden")) closeHistoryBrowser();
+    else if (el.imagePreviewModal && !el.imagePreviewModal.classList.contains("hidden")) closeImagePreview();
   });
 
   // column resizers (restores any saved layout)
@@ -8135,6 +8728,17 @@ async function init() {
     if (!isCombo) return;
     e.preventDefault();
     userTermToggle();
+  });
+
+  // Cmd+N (mac) / Ctrl+N — new chat in the current project, same as the
+  // top-bar "New chat" button and the + on a project row. Repeated presses
+  // reuse the one empty draft until a post is made (see newConversation).
+  document.addEventListener("keydown", (e) => {
+    const isCombo = (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey &&
+      (e.key === "n" || e.key === "N" || e.code === "KeyN");
+    if (!isCombo) return;
+    e.preventDefault();
+    newChatFromTopbar();
   });
 
   // Wake the orchestrator when a delegated agent finishes its turn.

@@ -76,10 +76,16 @@ test("T1: update decision predicate flags only genuinely newer versions", () => 
   // Verbatim from app.js (checkForUpdates): update shown iff compareVersions(remote, APP_VERSION) > 0.
   const APP_VERSION = APP_JSON.version;
   const decide = (remote) => compareVersions(remote, APP_VERSION) > 0;
-  assert.strictEqual(decide("1.19.0"), true, "newer remote must show the update");
-  assert.strictEqual(decide("v1.19.0"), true, "newer v-prefixed tag must show the update");
-  assert.strictEqual(decide("1.18.0"), false, "same version must show up-to-date");
-  assert.strictEqual(decide("1.17.0"), false, "older remote must show up-to-date");
+  // Derive the "newer"/"older"/"same" cases from the CURRENT app version so a
+  // version bump can never rot these literals again (1.19.0 was hardcoded as
+  // "newer" while the app itself shipped 1.19.0 and the test went false-red).
+  const cur = parseVersion(APP_JSON.version);
+  const newer = (cur[0] + 1) + ".0.0";
+  const older = "0.0.1";
+  assert.strictEqual(decide(newer), true, "newer remote must show the update");
+  assert.strictEqual(decide("v" + newer), true, "newer v-prefixed tag must show the update");
+  assert.strictEqual(decide(APP_JSON.version), false, "same version must show up-to-date");
+  assert.strictEqual(decide(older), false, "older remote must show up-to-date");
   assert.strictEqual(decide("garbage"), false, "unparseable remote must NOT show an update");
 });
 
