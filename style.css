@@ -1294,19 +1294,19 @@ body.is-resizing .term-mount { pointer-events: none; }
 .md-table tbody tr:nth-child(even) { background: var(--surface); }
 
 /* ---------- Collapsible thinking ---------- */
-/* Codex-desktop-style reasoning container: a small, DIMMED box, collapsed by
-   default but still showing a short preview window (~120px) of the thinking
-   with a fade at the bottom, so it reads as a muted summary — clearly distinct
-   from the bright response text. A "Show more ↓" button expands the full text;
-   "Show less ↑" collapses it back. While streaming the widget stays collapsed
-   and the latest snippet is visible inside the preview window. */
+/* Codex-desktop-style reasoning disclosure: a subtle, DIMMED row that is FULLY
+   collapsed by default — just a "Thinking…" header, no preview — so the
+   reasoning never competes with the actual response text. Clicking the header
+   expands the full reasoning inline; clicking again collapses it. The thinking
+   text is muted + monospace so it reads clearly distinct from the bright,
+   sans-serif markdown response. */
 .msg-thinking-collapsible {
   align-self: center;
   max-width: 740px;
   width: 100%;
   margin: 0;
   border: 1px solid var(--chat-think-border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--chat-think-bg);
   /* Lower opacity than the response so the whole block reads as dimmed/muted. */
   opacity: 0.92;
@@ -1325,7 +1325,7 @@ body.is-resizing .term-mount { pointer-events: none; }
   border: 0;
   background: transparent;
   color: var(--chat-think-fg);
-  padding: 9px 14px;
+  padding: 8px 14px;
   cursor: pointer;
   font-family: var(--sans);
   font-size: 12.5px;
@@ -1346,23 +1346,19 @@ body.is-resizing .term-mount { pointer-events: none; }
 .msg-thinking-collapsible.is-streaming .think-label { color: var(--accent); }
 .think-meta { color: var(--muted); font-size: 11px; margin-left: auto; font-variant-numeric: tabular-nums; }
 
-/* The body holds the preview window (collapsed) or the full text (open). It is
-   positioned so the fade + Show button can be pinned to its bottom edge. */
+/* The body holds the full reasoning text. Collapsed = fully hidden (max-height:0,
+   no preview) so the response is the single clear focus; open = scrolls. */
 .think-body {
-  position: relative;
-  /* Collapsed = a short preview window with a max-height + overflow hidden, so
-     the latest thinking snippet is visible while the rest is clipped (and
-     revealed by the fade). NOT max-height:0 — that hid everything. */
-  max-height: 120px;
+  max-height: 0;
   overflow: hidden;
   transition: max-height .28s ease;
 }
-.msg-thinking-collapsible[data-state="open"] .think-body { max-height: 640px; overflow-y: auto; }
+.msg-thinking-collapsible[data-state="open"] .think-body { max-height: 480px; overflow-y: auto; }
 
-/* The thinking text itself: muted, monospace-ish, smaller than the response so
-   it is visually DISTINCT from the bright, sans-serif markdown response. */
+/* The thinking text itself: muted, monospace, smaller than the response so it
+   is visually DISTINCT from the bright, sans-serif markdown response. */
 .think-inner {
-  padding: 4px 16px 30px 24px;
+  padding: 10px 16px 14px 24px;
   color: var(--chat-think-fg);
   font-family: var(--mono);
   font-size: 11.5px;
@@ -1370,50 +1366,6 @@ body.is-resizing .term-mount { pointer-events: none; }
   white-space: pre-wrap;
   border-top: 1px solid var(--border);
   word-break: break-word;
-}
-
-/* Bottom fade — only meaningful while collapsed (the preview clips mid-text).
-   When open the body scrolls, so drop the fade to avoid covering content. */
-.think-fade {
-  pointer-events: none;
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  height: 34px;
-  background: linear-gradient(to bottom, transparent, var(--chat-think-bg));
-  transition: opacity .2s ease;
-}
-.msg-thinking-collapsible[data-state="open"] .think-fade { opacity: 0; }
-
-/* "Show more ↓" / "Show less ↑" button — the explicit expand affordance, sat
-   on the fade line at the bottom of the preview. */
-.think-show {
-  position: absolute;
-  left: 50%;
-  bottom: 6px;
-  transform: translateX(-50%);
-  border: 1px solid var(--chat-think-border);
-  border-radius: 999px;
-  background: var(--chat-think-bg);
-  color: var(--text-2);
-  padding: 2px 12px;
-  font-family: var(--sans);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.5;
-  cursor: pointer;
-  white-space: nowrap;
-  box-shadow: var(--shadow-sm);
-  transition: background .12s ease, color .12s ease, border-color .12s ease;
-}
-.think-show:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
-/* When open the body scrolls and the button floats at the bottom of the
-   viewport; keep it reachable but lift it clear of the text. */
-.msg-thinking-collapsible[data-state="open"] .think-show {
-  position: sticky;
-  left: 50%;
-  margin: 0 auto 8px;
-  bottom: 8px;
-  transform: translateX(-50%);
 }
 
 /* ---------- Live "Working" activity card ---------- */
