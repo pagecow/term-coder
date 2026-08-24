@@ -527,6 +527,21 @@ function renderDeadSessionCard(snap) {
   square.appendChild(header);
   square.appendChild(body);
 
+  // Resize handles (same as live squares) so ended cards resize in columns/rows
+  // views too. The drag logic is delegated on the grid in initTermResize().
+  const resizeX = document.createElement("div");
+  resizeX.className = "term-resize-handle term-resize-handle-x";
+  resizeX.setAttribute("role", "separator");
+  resizeX.setAttribute("aria-orientation", "vertical");
+  resizeX.setAttribute("aria-label", "Resize terminal width");
+  const resizeY = document.createElement("div");
+  resizeY.className = "term-resize-handle term-resize-handle-y";
+  resizeY.setAttribute("role", "separator");
+  resizeY.setAttribute("aria-orientation", "horizontal");
+  resizeY.setAttribute("aria-label", "Resize terminal height");
+  square.appendChild(resizeX);
+  square.appendChild(resizeY);
+
   // insert before the empty-state card so the grid stays clean
   if (el.termEmpty && el.termEmpty.parentNode === el.termGrid) el.termGrid.insertBefore(square, el.termEmpty);
   else el.termGrid.appendChild(square);
@@ -7248,6 +7263,22 @@ async function registerSession(session, cmd, args, cwd, label, conversationId) {
 
   square.appendChild(header);
   square.appendChild(mountEl);
+  // Resize handles: a vertical one on the right edge (columns view → width) and
+  // a horizontal one on the bottom edge (rows view → height). Only the handle
+  // matching the active view is shown (CSS); the drag logic is delegated on the
+  // grid in initTermResize().
+  const resizeX = document.createElement("div");
+  resizeX.className = "term-resize-handle term-resize-handle-x";
+  resizeX.setAttribute("role", "separator");
+  resizeX.setAttribute("aria-orientation", "vertical");
+  resizeX.setAttribute("aria-label", "Resize terminal width");
+  const resizeY = document.createElement("div");
+  resizeY.className = "term-resize-handle term-resize-handle-y";
+  resizeY.setAttribute("role", "separator");
+  resizeY.setAttribute("aria-orientation", "horizontal");
+  resizeY.setAttribute("aria-label", "Resize terminal height");
+  square.appendChild(resizeX);
+  square.appendChild(resizeY);
   // Newest session first: prepend the square to the TOP of the grid so
   // currently-running terminals sit above ended (dead) cards and stay visible
   // without scrolling. The empty-state hint (termEmpty) remains the last child.
@@ -8049,6 +8080,77 @@ function initColumnResizers() {
   bind($("rz-chat"), "chat");
 }
 
+// ---------- Terminal resize (columns width / rows height) ----------
+// Each terminal square carries two drag handles: a vertical one on its right
+// edge (columns view → width) and a horizontal one on its bottom edge (rows
+// view → height). Only the handle matching the active view is shown (CSS), and
+// only that one is draggable. Sizes are applied as inline CSS variables
+// (--term-w / --term-h) so they survive view switches; the live PTY refits
+// automatically via each mount's ResizeObserver as the box changes.
+const TERM_MIN_W = 200; // min column width (px)
+const TERM_MIN_H = 120; // min row height (px)
+
+function initTermResize() {
+  if (!el.termGrid) return;
+  let drag = null;
+
+  const onMove = (e) => {
+    if (!drag) return;
+    const delta = (drag.axis === "x" ? e.clientX : e.clientY) - drag.startPos;
+    const min = drag.axis === "x" ? TERM_MIN_W : TERM_MIN_H;
+    const size = Math.max(min, drag.startSize + delta);
+    drag.square.style.setProperty(drag.axis === "x" ? "--term-w" : "--term-h", size + "px");
+  };
+  const onUp = () => {
+    if (!drag) return;
+    const handle = drag.handle;
+    drag = null;
+    if (handle) handle.classList.remove("is-dragging");
+    document.body.classList.remove("is-resizing", "is-resizing-row");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+  };
+
+  el.termGrid.addEventListener("pointerdown", (e) => {
+    const handle = e.target.closest && e.target.closest(".term-resize-handle");
+    if (!handle) return;
+    const square = handle.closest(".term-square");
+    if (!square) return;
+    const axis = handle.classList.contains("term-resize-handle-x") ? "x" : "y";
+    // Only the handle matching the current view is active (the other is hidden
+    // by CSS, but guard against a stale handle during a view transition).
+    if (axis === "x" && !el.termGrid.classList.contains("view-columns")) return;
+    if (axis === "y" && !el.termGrid.classList.contains("view-rows")) return;
+    if (square.classList.contains("expanded")) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = square.getBoundingClientRect();
+    drag = {
+      square,
+      handle,
+      axis,
+      startPos: axis === "x" ? e.clientX : e.clientY,
+      startSize: axis === "x" ? rect.width : rect.height,
+    };
+    handle.classList.add("is-dragging");
+    document.body.classList.add(axis === "x" ? "is-resizing" : "is-resizing-row");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  });
+
+  // A click on a handle (no drag) must not select the session — swallow it in
+  // the capture phase so it never reaches the square's click listener.
+  el.termGrid.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest(".term-resize-handle")) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  }, true);
+}
+
 // ============================================================
 // USER TERMINAL — bottom drawer
 // ============================================================
@@ -8747,6 +8849,8 @@ async function init() {
 
   // column resizers (restores any saved layout)
   initColumnResizers();
+  // terminal resize handles (columns width / rows height) — delegated on the grid
+  initTermResize();
 
   // window resize → re-clamp a saved layout, then refit visible terminals
   let resizeTimer = null;
