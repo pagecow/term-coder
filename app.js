@@ -401,6 +401,7 @@ async function snapshotLiveSession(rec) {
     label: rec.label || rec.id,
     cwd: rec.cwd || "",
     agent: rec.agent || rec.label || rec.id,
+    conversationId: rec.conversationId || null,
     worktreeBranch: rec.worktreeBranch || null,
     status,
     exitCode: (rec.active === false) ? rec.exitCode : null,
@@ -458,6 +459,7 @@ async function loadPersistedSessions() {
         label: s.label || s.id,
         cwd: s.cwd || "",
         agent: s.agent || s.label || s.id,
+        conversationId: s.conversationId || null,
         worktreeBranch: s.worktreeBranch || null,
         // "working"/"starting"/"needs-input" all become "ended" after a reopen.
         status: (s.status === "exited") ? "exited" : "ended",
@@ -945,7 +947,7 @@ async function loadPlatformSessions() {
           if (handle) {
             const label = (prior && prior.label) || s.command || "session";
             const cwd = (prior && prior.cwd) || s.cwd || "";
-            await registerSession(handle, s.command || "", [], cwd, label);
+            await registerSession(handle, s.command || "", [], cwd, label, (prior && prior.conversationId) || null);
             // The reattached session is live again — drop the stale dead card.
             if (prior) {
               deadSessions.delete(s.id);
@@ -975,6 +977,7 @@ async function loadPlatformSessions() {
         label: (prior && prior.label) || s.command || s.id,
         cwd: (prior && prior.cwd) || s.cwd || "",
         agent: (prior && prior.agent) || s.command || s.id,
+        conversationId: (prior && prior.conversationId) || null,
         worktreeBranch: (prior && prior.worktreeBranch) || worktreeBranchForCwd(s.cwd),
         status: "ended",
         exitCode: null,
@@ -4374,22 +4377,35 @@ function renderProjects() {
 // ---------- Sidebar Sessions section ----------
 // Live agent status mirror in the Projects column, refreshed every 2s by the
 // auto-follow ticker. Clicking a row selects that session in the terminal grid.
+//
+// Sessions are scoped to the conversation that was active when they were
+// spawned (rec.conversationId). Only the ACTIVE conversation's sessions are
+// shown here, so a new chat / a different conversation starts with an empty
+// Sessions section instead of inheriting the previous conversation's terminals.
+function sessionsForActiveConversation() {
+  const cid = state.activeConversationId;
+  const live = [...sessions.values()].filter((s) => (s.conversationId || null) === cid);
+  const dead = [...deadSessions.values()].filter((s) => (s.conversationId || null) === cid);
+  return { live, dead };
+}
+
 function paintProjSessions() {
   const body = el.projSessionsBody;
   if (!body || !body.isConnected) return;
-  const total = sessions.size + deadSessions.size;
+  const { live: liveAll, dead: deadAll } = sessionsForActiveConversation();
+  const total = liveAll.length + deadAll.length;
   if (el.projSessionsCount) el.projSessionsCount.textContent = String(total);
 
   body.innerHTML = "";
   // Newest session first (by createdAt, which is immutable — unlike lastOutputAt,
   // so the list order stays stable as agents emit output). Live sessions render
   // above the ended ones.
-  const recs = [...sessions.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const deads = [...deadSessions.values()].sort((a, b) => (b.endedAt || b.createdAt || 0) - (a.endedAt || a.createdAt || 0));
+  const recs = liveAll.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const deads = deadAll.sort((a, b) => (b.endedAt || b.createdAt || 0) - (a.endedAt || a.createdAt || 0));
   if (!recs.length && !deads.length) {
     const note = document.createElement("div");
     note.className = "proj-sessions-empty";
-    note.textContent = "No sessions";
+    note.textContent = "No sessions in this conversation";
     body.appendChild(note);
     return;
   }
@@ -7105,11 +7121,33 @@ function stopAutoFollow() {
 }
 
 // ---------- Right column: terminal grid ----------
+// Show/hide each terminal square (live) and ended card (dead) based on whether
+// it belongs to the ACTIVE conversation, and keep the empty-state hint + count
+// badge in sync with the visible total. Sessions are scoped per conversation
+// (rec.conversationId), so switching conversations shows only that
+// conversation's terminals and a fresh chat starts with an empty grid.
+function refreshSessionVisibility() {
+  const cid = state.activeConversationId;
+  let visible = 0;
+  for (const rec of sessions.values()) {
+    const show = (rec.conversationId || null) === cid;
+    if (rec.squareEl) rec.squareEl.style.display = show ? "" : "none";
+    if (show) visible++;
+  }
+  for (const card of el.termGrid.querySelectorAll(".term-square-ended")) {
+    const snap = deadSessions.get(card.dataset.deadId);
+    const show = !!snap && (snap.conversationId || null) === cid;
+    card.style.display = show ? "" : "none";
+    if (show) visible++;
+  }
+  if (el.termEmpty) el.termEmpty.style.display = visible ? "none" : "";
+  if (el.termCount) el.termCount.textContent = String(visible);
+}
+
 function ensureEmptyHint() {
-  // Both live sessions and persisted (ended) cards count toward "not empty".
-  const total = sessions.size + deadSessions.size;
-  if (el.termEmpty) el.termEmpty.style.display = total ? "none" : "";
-  if (el.termCount) el.termCount.textContent = String(total);
+  // Both live sessions and persisted (ended) cards count toward "not empty",
+  // but only those belonging to the active conversation.
+  refreshSessionVisibility();
 }
 
 // Switch the terminal sessions panel between the three layout modes
@@ -7149,7 +7187,7 @@ function renderTabs() {
   for (const card of el.termGrid.querySelectorAll(".term-square-ended")) {
     card.classList.toggle("active", card.dataset.deadId === state.activeSessionId);
   }
-  if (el.termCount) el.termCount.textContent = String(sessions.size + deadSessions.size);
+  refreshSessionVisibility();
 }
 
 function selectSession(id) {
@@ -7166,8 +7204,12 @@ function selectSession(id) {
   renderSessionInfo();
 }
 
-async function registerSession(session, cmd, args, cwd, label) {
+async function registerSession(session, cmd, args, cwd, label, conversationId) {
   const id = session.id;
+  // Scope the session to the conversation that was active when it was spawned
+  // (or the explicit id passed by the reattach path). This is what lets the
+  // Sessions section show only the current conversation's terminals.
+  const convId = (conversationId !== undefined) ? conversationId : state.activeConversationId;
   // square
   const square = document.createElement("div");
   square.className = "term-square";
@@ -7233,6 +7275,7 @@ async function registerSession(session, cmd, args, cwd, label) {
     // cwd is a worktree of (derived from the path / worktreeMeta), so the merged-
     // worktree cleanup can match a session to a merged branch.
     agent: label ? String(label).split(" · ")[0] : label,
+    conversationId: convId,
     createdAt: Date.now(), endedAt: null, worktreeBranch: worktreeBranchForCwd(cwd), merged: false };
   sessions.set(session.id, rec);
   // Persist immediately so a session that's spawned but produces no output
@@ -7671,6 +7714,14 @@ async function closeSession(id) {
 }
 
 function renderSessionInfo() {
+  // If the selected session belongs to a different conversation, drop the
+  // selection so the footer doesn't name a terminal that isn't visible here.
+  if (state.activeSessionId) {
+    const sel = sessions.get(state.activeSessionId) || deadSessions.get(state.activeSessionId);
+    if (!sel || (sel.conversationId || null) !== state.activeConversationId) {
+      state.activeSessionId = null;
+    }
+  }
   const rec = state.activeSessionId ? sessions.get(state.activeSessionId) : null;
   const dead = (!rec && state.activeSessionId) ? deadSessions.get(state.activeSessionId) : null;
   const c = activeConversation();
@@ -7679,6 +7730,8 @@ function renderSessionInfo() {
   if (rec) bits.push("Session: " + rec.label + " @ " + rec.cwd + (rec.active ? "" : " (exited)"));
   else if (dead) bits.push("Session: " + dead.label + " @ " + dead.cwd + " (ended)");
   el.sessionInfo.textContent = bits.join("  ·  ");
+  // Keep the terminal grid + count badge scoped to the active conversation.
+  refreshSessionVisibility();
 }
 
 // ---------- Reusable multiple-choice chat component ----------
