@@ -177,7 +177,20 @@
             </button>
           </div>
         </form>
-        <div class="composer-hint">Enter to send · ⇧Enter for newline · drag an image to attach · send while it works to interrupt</div>
+        <div class="project-branch-bar" id="project-branch-bar">
+          <button type="button" class="pb-chip" id="pb-project-btn" aria-haspopup="true" aria-expanded="false" title="Switch project">
+            <span class="pb-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.75 4.5a1.25 1.25 0 0 1 1.25-1.25h3l1.5 1.5h6.75a1.25 1.25 0 0 1 1.25 1.25v6a1.25 1.25 0 0 1-1.25 1.25H3a1.25 1.25 0 0 1-1.25-1.25v-7.5z"/></svg></span>
+            <span class="pb-name" id="pb-project-name">No project</span>
+            <span class="pb-caret" aria-hidden="true">▾</span>
+          </button>
+          <span class="pb-sep" aria-hidden="true">/</span>
+          <button type="button" class="pb-chip" id="pb-branch-btn" aria-haspopup="true" aria-expanded="false" title="Switch branch">
+            <span class="pb-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5v7"/><circle cx="4" cy="2.5" r="1.5"/><circle cx="4" cy="11" r="1.5"/><path d="M4 5.5c0 2 1.5 3 4 3h2"/><circle cx="12" cy="8.5" r="1.5"/></svg></span>
+            <span class="pb-name" id="pb-branch-name">—</span>
+            <span class="pb-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="pb-popover" id="pb-popover" role="dialog" aria-label="Project and branch selector" hidden></div>
+        </div>
         <div class="token-estimator" id="token-estimator">
           <button type="button" class="token-estimator-btn" id="token-estimator-btn" aria-haspopup="true" aria-expanded="false" aria-label="Token usage estimate">
             <span class="token-count" id="token-count">0 / 0</span>

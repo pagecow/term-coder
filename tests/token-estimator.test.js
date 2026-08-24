@@ -102,10 +102,11 @@ test("dom: estimator lives inside .composer-wrap, below the form", () => {
   assert(/id="token-count"/.test(HTML), "token-count text missing");
   assert(/id="token-ring-fill"/.test(HTML), "progress ring fill missing");
   assert(/id="token-popover"/.test(HTML), "breakdown popover missing");
-  // The estimator must come AFTER the composer form and the hint is preserved.
+  // The estimator must come AFTER the composer form (the old hint text was
+  // removed and replaced by the project/branch bar).
   const wrap = HTML.slice(HTML.indexOf('class="composer-wrap"'), HTML.indexOf('id="session-info"'));
   assert(wrap.indexOf("token-estimator") > wrap.indexOf("chat-form"), "estimator must be below the form");
-  assert(/composer-hint/.test(wrap), "composer-hint must be preserved");
+  assert(!/composer-hint/.test(wrap), "composer-hint must be removed (replaced by the project/branch bar)");
 });
 
 test("dom: estimator is a button with aria attributes, popover is a dialog", () => {
