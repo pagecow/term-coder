@@ -4003,13 +4003,29 @@ function assessComplexity(taskPrompt) {
     "method", "style", "css", "layout", "dark mode", "responsive", "accessib"];
 
   let high = 0, med = 0;
-  for (const w of HIGH) if (text.includes(w)) high++;
-  for (const w of MED) if (text.includes(w)) med++;
+  // Keyword counts use word-boundary matching (NOT text.includes) so substring
+  // collisions can't double-count or false-positive: "architecture" must not
+  // also match "architect", "address" must not match "add", "prefix" must not
+  // match "fix". Two entries are intentional prefixes — "concurren" (→
+  // concurrency/concurrent) and "accessib" (→ accessibility/accessible) — and
+  // match with only a LEADING boundary so they still catch their word family.
+  const kw = (w) => {
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const isPrefix = /(?:concurren|accessib)$/.test(w);
+    return new RegExp("\\b" + esc + (isPrefix ? "" : "\\b")).test(text);
+  };
+  for (const w of HIGH) if (kw(w)) high++;
+  for (const w of MED) if (kw(w)) med++;
 
-  // Breadth signals — these say "big" far more reliably than length does.
+  // Breadth signals — these say "big" far more reliably than length does, BUT
+  // the orchestrator is explicitly instructed to write FOCUSED, DETAILED prompts
+  // naming exact files, so a handful of file mentions is ROUTINE, not a
+  // complexity signal. Only a genuinely broad span (many files / many enumerated
+  // steps) adds a high signal; naming 3–4 files to "create a component + wire it
+  // + test it" stays medium.
   const fileMentions = (text.match(/\b[\w./-]+\.(?:js|ts|tsx|jsx|css|scss|html|json|py|rb|go|rs|java|swift|md)\b/g) || []).length;
   const enumeratedSteps = (text.match(/^\s*(?:\d+[.)]|[-*•])\s+/gm) || []).length;
-  if (fileMentions >= 4) high++;
+  if (fileMentions >= 6) high++;
   if (enumeratedSteps >= 6) high++;
   if (/\b(?:entire|whole|every|all)\b.{0,24}\b(?:app|project|codebase|file|component)/.test(text)) high++;
 
