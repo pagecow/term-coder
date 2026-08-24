@@ -28,7 +28,7 @@ const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
 // Source-of-truth checks — the ordering fix must be present in app.js itself.
 // ---------------------------------------------------------------------------
 test("paintProjSessions sorts live sessions newest-first by createdAt", () => {
-  assert(/const recs = \[\.\.\.sessions\.values\(\)\]\.sort\(\(a, b\) => \(b\.createdAt \|\| 0\) - \(a\.createdAt \|\| 0\)\);/.test(SRC),
+  assert(/const recs = liveAll\.sort\(\(a, b\) => \(b\.createdAt \|\| 0\) - \(a\.createdAt \|\| 0\)\);/.test(SRC),
     "paintProjSessions should sort live sessions by createdAt descending (newest first)");
   // The old activity-based sort must be gone: ordering by lastOutputAt made
   // the list reshuffle as agents emitted output (unstable, not creation order).
