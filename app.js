@@ -16,7 +16,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.21.0";
+const APP_VERSION = "1.22.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -2117,6 +2117,33 @@ const ORCHESTRATOR_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "delete_worktree",
+      description: "Delete a worktree WITHOUT merging: commits any uncommitted work in it (WIP commit), removes the worktree directory (git worktree remove --force), deletes its branch (git branch -D), and purges the bookkeeping entry. The response lists the discarded unmerged commits so nothing is lost silently. Use this for abandoned/stale worktrees you do NOT want merged into main. You have FULL authority over worktree management — create, merge, delete, and prune are all yours.",
+      parameters: {
+        type: "object",
+        properties: {
+          branchName: { type: "string", description: "The worktree's branch name (from list_worktrees)." },
+          worktreePath: { type: "string", description: "Alternative: the worktree's absolute path." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "prune_worktrees",
+      description: "Reconcile worktree bookkeeping with reality: purge every bookkeeping entry whose directory AND branch no longer exist (stale orphaned entries — e.g. worktrees whose folders were already removed), and report real git worktrees on disk that are NOT in bookkeeping. Call this whenever list_worktrees shows entries whose directories are gone, or after a batch, to keep the worktree list clean. You have FULL authority over worktree management.",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional. Defaults to the active project (stale entries from ANY project are still purged)." },
+        },
+      },
+    },
+  },
 ];
 
 // ---------- PTY input (ChatOSS >= 1.8.4 native input APIs) ----------
@@ -2839,10 +2866,23 @@ async function toolHandler(name, args) {
       }
       case "list_worktrees": {
         if (!worktreeMeta.size) return "No open worktrees. Create one with create_worktree before spawning a coding agent.";
-        const lines = [...worktreeMeta.entries()].map(([branch, m]) =>
-          "  branch " + branch + " | parent " + (m.parentBranch || "main") + " | path " + (m.wtPath || "(unknown)"));
+        // Flag stale entries (directory gone) so the orchestrator can prune them.
+        const lines = [];
+        for (const [branch, m] of [...worktreeMeta.entries()]) {
+          let stale = false;
+          if (m.wtPath) {
+            const t = await window.chatoss.terminal.exec(
+              loginShell("test -d " + JSON.stringify(m.wtPath) + " && echo yes || echo no"),
+              { cwd: (m.projectPath || undefined) }
+            );
+            stale = !(t && (t.output || "").trim() === "yes");
+          }
+          lines.push("  branch " + branch + " | parent " + (m.parentBranch || "main") + " | path " + (m.wtPath || "(unknown)") +
+            (stale ? "  [STALE: directory gone — purge with prune_worktrees or delete_worktree]" : ""));
+        }
         return "OPEN WORKTREES (" + worktreeMeta.size + "):\n" + lines.join("\n") +
-          "\n\nMerge each one with merge_worktree({ branchName: <branch> }) once its agent has finished.";
+          "\n\nMerge each one with merge_worktree({ branchName: <branch> }) once its agent has finished. " +
+          "Delete abandoned ones with delete_worktree({ branchName }) and purge stale bookkeeping with prune_worktrees({}).";
       }
       case "start_cli_session": {
         // The USER decides the CLI + model in the spawn modal. The tool WAITS
@@ -3513,6 +3553,101 @@ async function toolHandler(name, args) {
         }
         return "BATCH SPAWN (" + results.length + " tasks):\n" + results.join("\n") +
           "\n\nMonitor each with wait_for_session({ sessionId }), then merge each worktree with merge_worktree({ branchName }).";
+      }
+      case "delete_worktree": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const base = p.folderPath.replace(/\/+$/, "");
+        const branch = String(args.branchName || "").trim();
+        const meta = branch ? worktreeMeta.get(branch) : null;
+        const wtPath = (meta && meta.wtPath) || String(args.worktreePath || "").trim();
+        if (!wtPath && !branch) return "Error: pass branchName or worktreePath of the worktree to delete.";
+        const parentBranch = (meta && meta.parentBranch) || "main";
+        // Commit any uncommitted work in the worktree first so it is at least
+        // captured in the branch's history (and reported below) before the
+        // branch is deleted — nothing is lost silently.
+        if (wtPath) {
+          const commitR = await window.chatoss.terminal.exec(
+            loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before deleting " + (branch || wtPath)) + " --allow-empty"),
+            { cwd: wtPath }
+          );
+          if (commitR === null) return "Error: terminal permission denied (approve git to continue)";
+        }
+        // Report the unmerged commits that will be discarded.
+        let discardNote = "";
+        if (branch) {
+          const logR = await window.chatoss.terminal.exec(
+            loginShell("git log --oneline " + JSON.stringify(parentBranch) + ".." + JSON.stringify(branch)),
+            { cwd: base }
+          );
+          if (logR && (logR.output || "").trim()) {
+            discardNote = "\nDISCARDED unmerged commits on " + branch + ":\n" + logR.output.trim();
+          }
+        }
+        if (wtPath) {
+          const rmR = await window.chatoss.terminal.exec(loginShell("git worktree remove " + JSON.stringify(wtPath) + " --force"), { cwd: base });
+          if (rmR === null) return "Error: terminal permission denied (approve git to continue)";
+          if (rmR.exitCode !== 0) return "git worktree remove failed (exit " + rmR.exitCode + "):\n" + rmR.output;
+        }
+        if (branch) {
+          const brR = await window.chatoss.terminal.exec(loginShell("git branch -D " + JSON.stringify(branch)), { cwd: base });
+          if (brR === null) return "Error: terminal permission denied (approve git to continue)";
+          if (brR.exitCode !== 0) return "git branch -D failed (exit " + brR.exitCode + "):\n" + brR.output;
+        }
+        if (branch) { worktreeMeta.delete(branch); saveWorktrees(); }
+        return "Deleted worktree " + (branch || wtPath) + " (directory removed, branch deleted, bookkeeping purged)." + discardNote;
+      }
+      case "prune_worktrees": {
+        const entries = [...worktreeMeta.entries()];
+        if (!entries.length) return "No worktree bookkeeping entries to prune.";
+        const purged = [];
+        const kept = [];
+        for (const [branch, m] of entries) {
+          const proj = (m && m.projectPath) || "";
+          const wtPath = (m && m.wtPath) || "";
+          let dirExists = false, branchExists = false;
+          if (wtPath) {
+            const t = await window.chatoss.terminal.exec(
+              loginShell("test -d " + JSON.stringify(wtPath) + " && echo yes || echo no"),
+              { cwd: proj || undefined }
+            );
+            dirExists = !!(t && (t.output || "").trim() === "yes");
+          }
+          if (proj && branch) {
+            const b = await window.chatoss.terminal.exec(
+              loginShell("git branch --list " + JSON.stringify(branch)),
+              { cwd: proj }
+            );
+            branchExists = !!(b && (b.output || "").trim());
+          }
+          if (!dirExists && !branchExists) {
+            worktreeMeta.delete(branch);
+            purged.push(branch + " (dir gone, branch gone)");
+          } else {
+            kept.push(branch + (dirExists ? "" : " [dir gone]") + (branchExists ? "" : " [branch gone]"));
+          }
+        }
+        if (purged.length) saveWorktrees();
+        // Report real git worktrees on disk that are NOT in bookkeeping.
+        let orphans = "";
+        const p = resolveProject(args);
+        if (p) {
+          const base = p.folderPath.replace(/\/+$/, "");
+          const wl = await window.chatoss.terminal.exec(loginShell("git worktree list --porcelain"), { cwd: base });
+          if (wl && wl.output) {
+            const real = new Set();
+            for (const line of wl.output.split("\n")) {
+              if (line.startsWith("worktree ")) real.add(line.slice(9).trim());
+            }
+            const known = new Set([...worktreeMeta.values()].map((x) => x && x.wtPath).filter(Boolean));
+            const orphanPaths = [...real].filter((wp) => wp !== base && !known.has(wp));
+            if (orphanPaths.length) {
+              orphans = "\nReal git worktrees NOT in bookkeeping (delete with delete_worktree({ worktreePath }) if stale):\n  " + orphanPaths.join("\n  ");
+            }
+          }
+        }
+        return "PRUNED " + purged.length + " stale bookkeeping entries:\n" + (purged.map((x) => "  - " + x).join("\n") || "  (none)") +
+          "\nRemaining entries:\n" + (kept.map((x) => "  - " + x).join("\n") || "  (none)") + orphans;
       }
       default:
         return "Error: unknown tool " + name;
@@ -6900,6 +7035,7 @@ async function buildSystemPrompt() {
     "  • For EACH subtask, call create_worktree({ branchName: <descriptive name> }) to get an isolated working directory.",
     "  • create_worktree returns JSON: { worktreePath, branch, parentBranch }. Save these — you need worktreePath and branch later.",
     "  • If the project folder isn't a git repo yet, create_worktree auto-initializes one (git init + initial commit) — you don't need to do anything extra.",
+    "  • YOU HAVE FULL AUTHORITY OVER WORKTREE MANAGEMENT (CRUD): create_worktree, list_worktrees, worktree_git_status, merge_worktree, delete_worktree (remove WITHOUT merging — for abandoned work), and prune_worktrees (purge stale bookkeeping entries whose directories/branches are gone). Clean up stale entries yourself — never leave orphaned bookkeeping behind, and never tell the user a cleanup is 'a ChatOSS-side task'.",
     "  • NEVER spawn a coding agent directly in the project folder. ALWAYS create a worktree first and pass its worktreePath as cwd to start_cli_session. This prevents parallel agents from stomping on each other's changes.",
     "  • Create ALL the worktrees you need up front (or in batches) before spawning agents.",
     "",
