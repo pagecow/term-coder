@@ -16,7 +16,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.20.0";
+const APP_VERSION = "1.21.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -24,12 +24,9 @@ const APP_VERSION = "1.20.0";
 // Only the tools below are offered; "openclaw"/"droid" were previously listed
 // but never actually wired into the dropdown, so they were removed.
 const OLLAMA_LAUNCH_TOOLS = [
+  { id: "opencode", label: "ollama launch opencode  (OpenCode)" },
   { id: "claude", label: "ollama launch claude  (Claude Code)" },
   { id: "codex", label: "ollama launch codex  (Codex)" },
-  { id: "chatgpt", label: "ollama launch chatgpt  (ChatGPT)" },
-  { id: "hermes", label: "ollama launch hermes  (Hermes Agent)" },
-  { id: "opencode", label: "ollama launch opencode  (OpenCode)" },
-  { id: "copilot", label: "ollama launch copilot  (Copilot CLI)" },
 ];
 
 // Resolved absolute path to the ollama binary (found at detect time). The
@@ -187,6 +184,18 @@ const TURN_IDLE_MS = 4000;
 // exists BEFORE the task is submitted would read as an instantly-completed turn.
 const MIN_WORK_BYTES = 200;
 
+// ---------- Session health check (stall detection + nudge) ----------
+// Agents sometimes go quiet mid-task and never resume on their own (the user
+// has had to type "are you working?" into the terminal by hand). A periodic
+// check detects a session that has produced no output for STALL_QUIET_MS while
+// still classified WORKING/STARTING, nudges it with a "are you still working?
+// continue" prompt, and notifies the user. Nudges are rate-limited so a
+// genuinely stuck agent isn't spammed.
+const HEALTH_CHECK_MS = 5 * 60 * 1000;      // run the check every 5 minutes
+const STALL_QUIET_MS = 10 * 60 * 1000;      // no output for 10 min = stalled
+const NUDGE_COOLDOWN_MS = 10 * 60 * 1000;   // at most one nudge per 10 min per session
+const NUDGE_TEXT = "are you still working? continue";
+
 // Recognisable failure text from a coding agent's provider or the CLI itself.
 // An agent hitting one of these is NOT going to finish on its own, and an agent
 // RETRYING one is the worst case: it keeps emitting output, so it looks busy
@@ -230,7 +239,22 @@ function sessionActivity(s) {
   if (!s.taskSubmittedAt) return quietFor >= TURN_IDLE_MS ? "IDLE" : "STARTING";
   if (s.bytesSinceTask < MIN_WORK_BYTES) return "STARTING";
   if (quietFor < TURN_IDLE_MS) return "WORKING";
-  return s.tailAtPrompt ? "IDLE" : "WORKING";
+  // IDLE = quiet at a prompt. Two independent signals, either one suffices:
+  //   1. tailAtPrompt — the text heuristic (prompt glyph / idle chrome in the
+  //      output tail). This is what opencode/codex sessions kept failing: their
+  //      prompt chrome never matched the glyph patterns, so IDLE was unreachable
+  //      and the status stayed WORKING forever.
+  //   2. ptyIdle — the PLATFORM's own PTY state (session.isWaitingForInput() /
+  //      onStateChange, tcgetpgrp-based on macOS): the foreground process is the
+  //      shell/CLI blocked on a tty read, i.e. sitting at its input prompt. This
+  //      is authoritative and CLI-agnostic — it does not depend on matching any
+  //      TUI's prompt glyphs. 'unsupported' (Windows) leaves ptyIdle false and
+  //      the text heuristic carries the load.
+  // While the folder-trust dialog is up the CLI is also blocked on input, so
+  // ptyIdle alone must not read as "turn complete" — the trust flow owns the
+  // keyboard until the user answers.
+  const trustBlocked = s.trustState === "pending" || s.trustState === "asking";
+  return (s.tailAtPrompt || (s.ptyIdle && !trustBlocked)) ? "IDLE" : "WORKING";
 }
 
 // Build the structured status + output block shared by read_session and
@@ -285,6 +309,12 @@ async function formatSessionStatusOutput(s, statusOverride, opts) {
       if (act === "ERROR LOOP") {
         statusLine += "\n[ERROR (seen " + (s.errorCount || 0) + "x): " + (s.lastErrorText || "(see output)") + "]" +
           "\n[Correct the RUNNING agent with send_to_session — do not replace it.]";
+      }
+      if (s.degenerate) {
+        const di = s.degenerateInfo || {};
+        statusLine += "\n[DEGENERATE OUTPUT: the terminal collapsed into a repeated-token/gibberish loop (" +
+          (di.pattern || "unknown pattern") + ", " + (di.count || "?") + "x). The app interrupted it with ctrl+c. " +
+          "It is NOT making progress — close_session and respawn a fresh agent in the same worktree (its uncommitted work is auto-committed on close).]";
       }
     }
     const dirLine = "[WORKING DIR: " + (s.cwd || "(unknown)") + "]";
@@ -1360,6 +1390,8 @@ function initHistoryBrowser() {
 // The orchestrator's start_cli_session tool awaits this; manual start too.
 let spawnPromise = null;
 let spawnResolve = null;
+// The opts the currently-open modal was opened with (batchMode support).
+let spawnModalOpts = null;
 
 // ---------- DOM refs ----------
 const $ = (id) => document.getElementById(id);
@@ -2031,6 +2063,57 @@ const ORCHESTRATOR_TOOLS = [
           projectId: { type: "string", description: "Optional. Defaults to the active project." },
           notes: { type: "string", description: "Release notes (markdown). Defaults to a one-line summary." },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "health_check",
+      description: "Check every live session for stalls: a session that is still WORKING/STARTING but has produced no output for 10+ minutes is nudged with \"are you still working? continue\" (rate-limited to one nudge per 10 min per session) and reported. Sessions with degenerate output are reported too. The app also runs this check automatically every 5 minutes. Use this to see at a glance which agents are healthy, stalled, or degenerate.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "worktree_git_status",
+      description: "Show the git state of ONE worktree: uncommitted changes (git status --porcelain), a diff stat, and the last 3 commits on its branch. Use this to see what a killed or finished agent actually changed before merging — the app also auto-commits a worktree's uncommitted work when its session is closed, so a killed agent's edits are never stranded.",
+      parameters: {
+        type: "object",
+        properties: {
+          branchName: { type: "string", description: "The worktree's branch name (from list_worktrees)." },
+          worktreePath: { type: "string", description: "Alternative: the worktree's absolute path." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "spawn_batch",
+      description: "Spawn ALL parallel subtasks in ONE call: for each task, create a git worktree and start a coding-agent session in it with the task's prompt. One launch choice applies to the whole batch (the saved default if one is pinned, otherwise ONE spawn dialog for the batch). This eliminates the 'stopped after 1-of-N' failure mode where the orchestrator spawned agents one at a time and stopped early. Returns every session id + worktree branch so you can monitor them with wait_for_session and merge with merge_worktree.",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional. Defaults to the active project." },
+          tasks: {
+            type: "array",
+            description: "The parallel subtasks to spawn (1-8). Each: { name: short kebab-case name (becomes the worktree branch), prompt: the full task brief for the agent }.",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Short kebab-case name, e.g. 'fix-idle-detection'. Becomes the worktree branch name." },
+                prompt: { type: "string", description: "The full task brief the agent receives." },
+              },
+              required: ["name", "prompt"],
+            },
+          },
+        },
+        required: ["tasks"],
       },
     },
   },
@@ -2794,6 +2877,24 @@ async function toolHandler(name, args) {
               "  • For a genuinely separate subtask, create_worktree first and pass that new worktreePath as cwd.";
           }
         }
+        // FIX: "Remember as defaults" — when the user pinned a default launch
+        // (Settings "Default agent" picker or the spawn-modal "Remember as
+        // defaults" checkbox), the spawn modal must NOT appear again. Skip it
+        // and spawn with the saved default directly. Only direct-CLI defaults
+        // ("raw:claude" etc.) map to a concrete target without further input;
+        // anything else falls through to the modal as before.
+        const defId = cliDefaultToTargetId(settings.cliDefault);
+        const defTarget = defId ? findLaunchTarget(defId) : null;
+        if (defTarget) {
+          const session = await spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", target: defId });
+          if (!session) return "Terminal permission denied. Approve it in the system prompt and try again.";
+          if (session.error) return session.error;
+          const rec = sessions.get(session.id);
+          if (rec) rec.fromOrchestrator = true;
+          return "session " + session.id + " started: " + session.label + " in " + session.cwd +
+            " (using your saved default launch — no dialog shown). The app types and submits your taskPrompt automatically once the agent is ready. " +
+            "Monitor it with wait_for_session (returns when its turn finishes) — do NOT wait for the process to exit; coding CLIs are REPLs and never do.";
+        }
         const choice = await openSpawnModal({
           source: "tool",
           cwd,
@@ -2946,6 +3047,8 @@ async function toolHandler(name, args) {
           } else if (act === "ERROR LOOP") {
             statusPart = "ERROR LOOP (" + (s.errorCount || 0) + "x) — correct it with send_to_session, do not replace it";
             q = " | ERROR: " + String(s.lastErrorText || "").slice(0, 120);
+          } else if (s.degenerate) {
+            statusPart = "DEGENERATE OUTPUT — interrupted; close_session and respawn";
           }
           return "  [" + s.id + "] " + (s.label || s.id) + " | " + statusPart + q + " | " + (s.cwd || "(unknown)");
         });
@@ -3339,6 +3442,78 @@ async function toolHandler(name, args) {
         if (upR.exitCode !== 0) return "gh release upload failed (exit " + upR.exitCode + "):\n" + upR.output;
         return "Release " + tag + " created with installable assets:\n" + aipName + "\n" + zipName + "\n\n" + rel.output + "\n" + upR.output;
       }
+      case "health_check": {
+        return await runHealthCheck();
+      }
+      case "worktree_git_status": {
+        const branch = String(args.branchName || "").trim();
+        const meta = branch ? worktreeMeta.get(branch) : null;
+        const wtPath = (meta && meta.wtPath) || String(args.worktreePath || "").trim();
+        if (!wtPath) return "Error: pass branchName (from list_worktrees) or worktreePath.";
+        const run = async (cmd) => {
+          const r = await window.chatoss.terminal.exec(loginShell(cmd), { cwd: wtPath });
+          if (r === null) return "Error: terminal permission denied (approve git to continue)";
+          return (r.output || "").trim();
+        };
+        const status = await run("git status --porcelain");
+        const diffStat = await run("git diff --stat");
+        const log = await run("git log --oneline -3");
+        return "WORKTREE " + (branch || wtPath) + " (" + wtPath + ")\n" +
+          "Uncommitted changes:\n" + (status || "(none — clean)") +
+          "\nDiff stat (uncommitted):\n" + (diffStat || "(none)") +
+          "\nLast commits on branch:\n" + (log || "(none)");
+      }
+      case "spawn_batch": {
+        const p = resolveProject(args);
+        if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
+        const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+        if (!tasks.length) return "Error: pass tasks: [{ name, prompt }, ...].";
+        if (tasks.length > 8) return "Error: at most 8 tasks per batch.";
+        const base = p.folderPath.replace(/\/+$/, "");
+        // ONE launch choice for the whole batch: the saved default if pinned,
+        // otherwise a single spawn dialog (batchMode — no session spawned yet).
+        const defId = cliDefaultToTargetId(settings.cliDefault);
+        const defTarget = defId ? findLaunchTarget(defId) : null;
+        let cli = "";
+        let target = defId || null;
+        if (!defTarget) {
+          const choice = await openSpawnModal({
+            source: "tool",
+            cwd: base,
+            prompt: "BATCH: " + tasks.length + " parallel subtasks — pick the launch to use for ALL of them.",
+            batchMode: true,
+          });
+          if (!choice) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
+          cli = choice.cli || "";
+          target = choice.target || null;
+        }
+        const results = [];
+        for (const t of tasks) {
+          const name = String(t.name || "").trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+          const prompt = String(t.prompt || "").trim();
+          if (!name || !prompt) { results.push("SKIPPED (missing name/prompt): " + JSON.stringify(t)); continue; }
+          const branch = name;
+          const wtPath = base + "/.chatoss/worktrees/" + branch;
+          const branchR = await window.chatoss.terminal.exec(loginShell("git branch --show-current"), { cwd: base });
+          const mainBranch = (branchR && branchR.output || "").trim() || "main";
+          const r = await window.chatoss.terminal.exec(
+            loginShell("git worktree add " + JSON.stringify(wtPath) + " -b " + JSON.stringify(branch) + " " + JSON.stringify(mainBranch)),
+            { cwd: base }
+          );
+          if (r === null) { results.push("FAILED " + name + ": terminal permission denied"); continue; }
+          if (r.exitCode !== 0) { results.push("FAILED " + name + ": " + (r.output || "").trim().slice(0, 200)); continue; }
+          worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
+          saveWorktrees();
+          const session = await spawnChosen({ cli, cwd: wtPath, prompt, target });
+          if (!session) { results.push("FAILED " + name + ": terminal permission denied"); continue; }
+          if (session.error) { results.push("FAILED " + name + ": " + session.error); continue; }
+          const rec = sessions.get(session.id);
+          if (rec) rec.fromOrchestrator = true;
+          results.push("STARTED " + name + " → session " + session.id + " (branch " + branch + ")");
+        }
+        return "BATCH SPAWN (" + results.length + " tasks):\n" + results.join("\n") +
+          "\n\nMonitor each with wait_for_session({ sessionId }), then merge each worktree with merge_worktree({ branchName }).";
+      }
       default:
         return "Error: unknown tool " + name;
     }
@@ -3369,10 +3544,11 @@ function buildCliOptions() {
   }
   // Direct binaries (launch the real CLI without ollama), only if installed.
   // These are a manual fallback; the model picker also offers claude/codex
-  // directly as launch targets.
+  // directly as launch targets. Order matches the default-agents spec:
+  // opencode, claude, codex.
+  if (detection.opencode) push("raw:opencode", "opencode  (direct binary)", true);
   if (detection.claude) push("raw:claude", "claude  (direct binary)", true);
   if (detection.codex) push("raw:codex", "codex  (direct binary)", true);
-  if (detection.opencode) push("raw:opencode", "opencode  (direct binary)", true);
   return opts;
 }
 
@@ -3395,6 +3571,7 @@ function openSpawnModal(opts) {
   // called the tool twice), every waiter shares the same promise.
   if (spawnPromise) return spawnPromise;
   opts = opts || {};
+  spawnModalOpts = opts;
   el.spawnStatus.textContent = "";
   el.spawnStart.disabled = false;
 
@@ -3458,6 +3635,7 @@ function closeSpawnModal(choice) {
   const r = spawnResolve;
   spawnResolve = null;
   spawnPromise = null;
+  spawnModalOpts = null;
   if (r) r(choice);
 }
 async function onSpawnStart() {
@@ -3524,6 +3702,14 @@ async function onSpawnStart() {
     settings.cliDefault = (tgt && tgt.kind === "direct") ? ("raw:" + tgt.id) : cli;
     settings.cwdDefault = cwd;
     saveSettings();
+  }
+
+  // Batch mode (spawn_batch): the modal collected ONE launch choice for a whole
+  // batch of parallel subtasks — resolve with the choice (including the target)
+  // WITHOUT spawning a session here; the batch tool spawns each task itself.
+  if (spawnModalOpts && spawnModalOpts.batchMode) {
+    closeSpawnModal({ cli, cwd, prompt, target });
+    return;
   }
 
   el.spawnStart.disabled = true;
@@ -6719,10 +6905,11 @@ async function buildSystemPrompt() {
     "",
     "STEP 3 — SPAWN a coding agent for each subtask (in parallel where possible).",
     "  • For each subtask, call start_cli_session({ cwd: <worktreePath>, taskPrompt: <the subtask instructions> }) to spin up a coding agent in that worktree.",
+    "  • PREFER spawn_batch({ tasks: [{ name, prompt }, ...] }) for parallel subtasks: ONE call creates every worktree AND spawns every agent, so you can never 'stop after 1-of-N'. One launch choice applies to the whole batch (the user's saved default, or one dialog).",
     "  • Give each agent a FOCUSED, DETAILED task prompt — exactly what files to create/modify, what behavior to implement, and any constraints. The sub-agent writes the code, not you.",
     "  • Spawn subtasks that are file-disjoint ALL AT ONCE (or in rapid succession). The app supports multiple simultaneous terminal sessions.",
     "  • Spawn subtasks that share files SEQUENTIALLY — wait for the first agent to finish and merge before spawning the next one that touches the same files.",
-    "  • Each start_cli_session returns a session id. SAVE every session id so you can monitor each agent independently.",
+    "  • Each start_cli_session / spawn_batch returns session ids. SAVE every session id so you can monitor each agent independently.",
     "",
     "STEP 4 — MONITOR each agent.",
     "",
@@ -6733,6 +6920,10 @@ async function buildSystemPrompt() {
     "  • list_sessions({}) gives every agent's status in one line each — use it to pick up state at the start of a turn.",
     "  • read_session({ sessionId: <id> }) returns the TAIL of a terminal (pass full:true for everything). Use it when you need more detail than the snapshot shows — not to check whether an agent is busy.",
     "  • When an agent reaches IDLE, its subtask is done as far as it is concerned: review its output, then MERGE its worktree. Do not call wait_for_session on it again unless you have given it new work with send_to_session.",
+    "  • IDLE is now detected by the PLATFORM's own PTY state (the foreground process sitting at its input prompt), not just by matching prompt glyphs — so opencode/codex sessions flip to IDLE reliably when they finish.",
+    "  • The app runs a HEALTH CHECK every 5 minutes: a session that is still WORKING/STARTING but has produced no output for 10+ minutes is nudged with \"are you still working? continue\" (rate-limited) and the user is notified. You can also call health_check({}) yourself to see every session's health at once.",
+    "  • A session reported as DEGENERATE OUTPUT has collapsed into a repeated-token/gibberish loop and was interrupted. Do not keep waiting on it — close_session and respawn a fresh agent in the same worktree (the app auto-commits the worktree's uncommitted work when a session closes, so nothing is lost).",
+    "  • To see what a worktree's agent actually changed (committed vs uncommitted) before merging — e.g. after a kill — call worktree_git_status({ branchName: <branch> }).",
     "  • The app AUTO-SUBMITS the taskPrompt you passed to start_cli_session (it types the text and presses Enter once the agent is ready). Do not re-send the initial task.",
     "  • If auto-follow is enabled, you will be woken automatically with a '[Term Coder] The agent … has FINISHED ITS TURN' message when an agent stops. Treat that as your cue to review, merge, and continue — you do not need to sit in a waiting loop.",
     "  • Report progress on ALL agents to the user — which are still working, which are done, which hit errors.",
@@ -7637,6 +7828,13 @@ async function registerSession(session, cmd, args, cwd, label, conversationId) {
     // useless as a completion signal (waiting for it was why monitoring felt
     // dead for minutes at a time).
     lastOutputAt: Date.now(), taskSubmittedAt: 0, bytesSinceTask: 0, tailAtPrompt: false,
+    // Platform PTY state (session.isWaitingForInput / onStateChange): true when
+    // the foreground process is the shell/CLI blocked on a tty read — the
+    // authoritative "sitting at its prompt" signal that the text heuristics kept
+    // missing for opencode/codex. 'unsupported' (Windows) leaves this false.
+    ptyIdle: false, ptyStateUnsub: null, ptyPollTimer: null,
+    // Health-check bookkeeping (stall detection + nudge).
+    lastNudgeAt: 0, nudgeCount: 0, degenerate: false, degenerateInfo: null,
     lastErrorText: "", errorCount: 0, lastErrorAt: 0, errorLoop: false,
     // Persistence metadata — used to snapshot the session to scopedData so the
     // Sessions column survives an app close/reopen. `agent` is the CLI label
@@ -7651,6 +7849,66 @@ async function registerSession(session, cmd, args, cwd, label, conversationId) {
   // before the app is closed still survives a reopen (otherwise it would never
   // reach SESSIONS_KEY until the first output chunk triggers schedulePersist).
   schedulePersistSessions();
+
+  // ---------- Platform PTY-state observation (idle detection) ----------
+  // The text heuristics (isIdlePrompt) never matched opencode/codex prompt
+  // chrome, so those sessions stayed WORKING forever and wait_for_session hung.
+  // The platform's own PTY state is CLI-agnostic: isWaitingForInput() is true
+  // exactly when the foreground process is the shell/CLI blocked on a tty read
+  // (sitting at its prompt). Wire BOTH the push (onStateChange) and a poll
+  // fallback (covers sessions restored from persistence, where the subscription
+  // is gone, and hosts where onStateChange is unavailable).
+  const applyPtyState = (busy) => {
+    if (!rec.active) return;
+    rec.ptyIdle = busy === false;
+  };
+  if (session && typeof session.onStateChange === "function") {
+    try {
+      rec.ptyStateUnsub = session.onStateChange((st) => {
+        if (st && typeof st.busy === "boolean") applyPtyState(st.busy);
+      });
+    } catch (e) { /* non-fatal */ }
+  }
+  if (session && typeof session.isWaitingForInput === "function") {
+    const pollPty = async () => {
+      if (!rec.active) return;
+      try {
+        const w = await session.isWaitingForInput();
+        // THREE states: true (at prompt), false (busy), 'unsupported' (unknown —
+        // Windows, or a dead session). Only a definite answer updates the flag.
+        if (w === true) applyPtyState(false);
+        else if (w === false) applyPtyState(true);
+      } catch (e) { /* non-fatal */ }
+    };
+    pollPty();
+    rec.ptyPollTimer = setInterval(pollPty, 10000);
+  }
+
+  // ---------- Degenerate-output recovery ----------
+  // The platform detects repeated-token / incoherent-gibberish output loops
+  // (the "codex goes silent then the terminal turns to garbage" failure). When
+  // it fires, interrupt the agent (ctrl+c) so it stops burning quota, flag the
+  // session so the orchestrator sees it, and notify the user. The orchestrator
+  // can then close_session + respawn; we do NOT auto-kill because the worktree
+  // may hold uncommitted work the user wants to inspect first.
+  if (session && typeof session.onDegenerateOutput === "function") {
+    try {
+      session.onDegenerateOutput((info) => {
+        if (!rec.active) return;
+        rec.degenerate = true;
+        rec.degenerateInfo = info || {};
+        try { session.key("ctrl+c"); } catch (e) { /* non-fatal */ }
+        try {
+          window.chatoss.notifications.send({
+            title: "Agent output degenerated",
+            body: (rec.label || "Agent") + ": repeated-token/gibberish loop detected — interrupted. Consider closing and respawning it.",
+          });
+        } catch (e) { /* non-fatal */ }
+        renderTabs();
+        renderSessionInfo();
+      });
+    } catch (e) { /* non-fatal */ }
+  }
 
   // autoDriveStartup calls this right after it sends the task, so idle detection
   // can distinguish "finished a turn" from "never started".
@@ -8055,11 +8313,79 @@ function toggleExpand(id) {
   requestAnimationFrame(() => fitTerminal(rec));
 }
 
+// ---------- Session health check ----------
+// Detects stalled sessions (quiet but still classified WORKING/STARTING) and
+// nudges them back to life, or reports them so the user can intervene. Runs on
+// a timer (HEALTH_CHECK_MS) and is also exposed to the orchestrator as the
+// health_check tool. Returns a per-session report string.
+async function runHealthCheck() {
+  const now = Date.now();
+  const report = [];
+  for (const rec of sessions.values()) {
+    if (rec.active === false) continue;
+    const act = sessionActivity(rec);
+    const quietFor = now - (rec.lastOutputAt || now);
+    const stalled = (act === "WORKING" || act === "STARTING") && quietFor >= STALL_QUIET_MS;
+    if (stalled) {
+      const canNudge = now - (rec.lastNudgeAt || 0) >= NUDGE_COOLDOWN_MS;
+      if (canNudge && rec.session && typeof rec.session.paste === "function") {
+        try {
+          await rec.session.paste(NUDGE_TEXT);
+          await rec.session.key("enter");
+          rec.lastNudgeAt = now;
+          rec.nudgeCount = (rec.nudgeCount || 0) + 1;
+          try {
+            window.chatoss.notifications.send({
+              title: "Agent appears stalled — nudged",
+              body: (rec.label || "Agent") + " was quiet for " + Math.round(quietFor / 60000) + " min. Sent: \"" + NUDGE_TEXT + "\"",
+            });
+          } catch (e) { /* non-fatal */ }
+          report.push("NUDGED " + (rec.label || rec.id) + " (quiet " + Math.round(quietFor / 60000) + " min, nudge #" + rec.nudgeCount + ")");
+        } catch (e) {
+          report.push("STALLED " + (rec.label || rec.id) + " (quiet " + Math.round(quietFor / 60000) + " min) — nudge failed: " + (e && e.message ? e.message : String(e)));
+        }
+      } else if (canNudge) {
+        report.push("STALLED " + (rec.label || rec.id) + " (quiet " + Math.round(quietFor / 60000) + " min) — no paste/key on this session handle, cannot nudge");
+      } else {
+        report.push("STALLED " + (rec.label || rec.id) + " (quiet " + Math.round(quietFor / 60000) + " min) — already nudged " + Math.round((now - rec.lastNudgeAt) / 60000) + " min ago, waiting");
+      }
+    } else if (rec.degenerate) {
+      report.push("DEGENERATE " + (rec.label || rec.id) + " — output collapsed into a repeated-token/gibberish loop; interrupted. Consider close_session + respawn.");
+    } else {
+      report.push(act + " " + (rec.label || rec.id) + " (quiet " + Math.round(quietFor / 1000) + "s)");
+    }
+  }
+  return report.length ? report.join("\n") : "No live sessions.";
+}
+
 async function closeSession(id) {
   const rec = sessions.get(id);
   if (!rec) return;
   if (rec.autoApproveUnsub) { try { rec.autoApproveUnsub(); } catch (e) { /* non-fatal */ } }
   if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
+  if (rec.ptyPollTimer) { clearInterval(rec.ptyPollTimer); rec.ptyPollTimer = null; }
+  if (rec.ptyStateUnsub) { try { rec.ptyStateUnsub(); } catch (e) { /* non-fatal */ } }
+  // Auto-commit the worktree BEFORE killing the process, so a killed agent's
+  // uncommitted edits are never stranded. A session whose cwd is a worktree
+  // (worktreeBranchForCwd returns its branch) gets a WIP commit; the merge flow
+  // later folds it into main. Nothing-to-commit is fine (exit 1, ignored).
+  const wtBranch = rec.worktreeBranch || worktreeBranchForCwd(rec.cwd);
+  if (wtBranch && rec.cwd) {
+    try {
+      const wipR = await window.chatoss.terminal.exec(
+        loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before closing " + (rec.label || rec.id))),
+        { cwd: rec.cwd }
+      );
+      if (wipR && wipR.exitCode === 0) {
+        try {
+          window.chatoss.notifications.send({
+            title: "Worktree auto-committed",
+            body: (rec.label || "Agent") + " closed — its uncommitted work was committed to branch " + wtBranch + " so it is resumable.",
+          });
+        } catch (e) { /* non-fatal */ }
+      }
+    } catch (e) { /* non-fatal — never block the close */ }
+  }
   try { if (rec.session && rec.session.kill) await rec.session.kill(); } catch (e) { /* non-fatal */ }
   // Terminal sessions now survive window close in the OS store, so a closed
   // session must be removed from the OS-persisted record too (killSession
@@ -9238,6 +9564,13 @@ async function init() {
 
   // Wake the orchestrator when a delegated agent finishes its turn.
   startAutoFollow();
+
+  // Periodic session health check: detect stalled agents (quiet but still
+  // WORKING/STARTING) and nudge them back to life, or surface them so the user
+  // can intervene. Runs every HEALTH_CHECK_MS while the app is open.
+  setInterval(() => {
+    runHealthCheck().catch((e) => console.warn("healthCheck", e));
+  }, HEALTH_CHECK_MS);
 
   // Best-effort final flush of session snapshots when the app is closed or
   // hidden, so the Sessions column survives a close/reopen with the LATEST

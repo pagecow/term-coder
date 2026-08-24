@@ -36,14 +36,18 @@ function parseOllamaLaunchTools(src) {
   return Function('"use strict"; return (' + m[1] + ');')();
 }
 
-test("D2: OLLAMA_LAUNCH_TOOLS lists exactly the 6 offered tools (no openclaw/droid)", () => {
+test("D2: OLLAMA_LAUNCH_TOOLS lists exactly the 3 offered tools, ollama launch first (no chatgpt/hermes/copilot)", () => {
   const tools = parseOllamaLaunchTools(SRC);
   const ids = tools.map((t) => t.id);
-  assert.deepStrictEqual(ids, ["claude", "codex", "chatgpt", "hermes", "opencode", "copilot"],
-    "OLLAMA_LAUNCH_TOOLS ids drifted from the 6 offered tools: " + JSON.stringify(ids));
-  // openclaw and droid were the two phantom entries the audit flagged.
-  assert(!ids.includes("openclaw"), "openclaw should have been trimmed (D2)");
-  assert(!ids.includes("droid"), "droid should have been trimmed (D2)");
+  // The default-agents spec: ONLY opencode, claude, codex — ollama launch
+  // options first, in that order (the direct-binary options follow in
+  // buildCliOptions).
+  assert.deepStrictEqual(ids, ["opencode", "claude", "codex"],
+    "OLLAMA_LAUNCH_TOOLS ids drifted from the 3 offered tools: " + JSON.stringify(ids));
+  // chatgpt/hermes/copilot were trimmed per the default-agents spec.
+  assert(!ids.includes("chatgpt"), "chatgpt should have been trimmed (default-agents spec)");
+  assert(!ids.includes("hermes"), "hermes should have been trimmed (default-agents spec)");
+  assert(!ids.includes("copilot"), "copilot should have been trimmed (default-agents spec)");
   // Every entry must have both an id and a human label.
   for (const t of tools) {
     assert(typeof t.id === "string" && t.id.length > 0, "tool missing id: " + JSON.stringify(t));
