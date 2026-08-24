@@ -2044,7 +2044,7 @@ body.is-resizing .term-mount { pointer-events: none; }
   box-shadow: 0 0 0 3px var(--accent-tint), var(--shadow-md);
 }
 .composer-input {
-  flex: 1;
+  flex: 0 0 auto;
   min-width: 0;
   resize: none;
   border: 0;
@@ -2054,7 +2054,9 @@ body.is-resizing .term-mount { pointer-events: none; }
   font: inherit;
   font-size: 14px;
   line-height: 1.55;
+  min-height: 24px;
   max-height: 160px;
+  overflow-y: auto;
   transition: height .08s ease;
 }
 .composer-input::placeholder { color: var(--muted); }
