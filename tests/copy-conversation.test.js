@@ -1,9 +1,9 @@
 // Copy-conversation verification tests for Term Coder.
 //
-// app.js is a browser module (top-level `window`/`document`/`window.chatoss`
-// references + an auto-running `init()`), so it can't be `require`d whole in
-// Node. These tests follow the same convention as tests/history-view.test.js:
-// read the REAL app.js source as text and parse the pure function out of it
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// These tests follow the same convention as tests/history-view.test.js:
+// read the REAL module source as text and parse the pure function out of it
 // (conversationToText), so the tests fail if the source drifts away from the
 // required behavior.
 //
@@ -12,17 +12,19 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { moduleSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = moduleSrc("16-attachments.js");
 
-// Pull conversationToText VERBATIM out of app.js and evaluate it in a sandbox.
-// It is pure (no DOM / window / chatoss references), so this is safe and keeps
-// the test pinned to the real source. If someone edits the function body, the
-// regex extraction fails loudly rather than testing a stale copy.
+// Pull conversationToText VERBATIM out of js/16-attachments.js and evaluate it
+// in a sandbox. It is pure (no DOM / window / chatoss references), so this is
+// safe and keeps the test pinned to the real source. If someone edits the
+// function body, the regex extraction fails loudly rather than testing a stale
+// copy.
 function extractFn(src, name) {
   const re = new RegExp("function " + name + "\\(([\\s\\S]*?)\\)\\s*\\{");
   const m = src.match(re);
-  assert(m, name + " declaration not found in app.js");
+  assert(m, name + " declaration not found in js/16-attachments.js");
   // Walk from the opening brace to its matching close brace (brace counting),
   // so nested object literals / strings with braces don't trip us up.
   const open = src.indexOf("{", m.index + m[0].length - 1);

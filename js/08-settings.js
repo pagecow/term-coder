@@ -1,20 +1,22 @@
-import { APP_VERSION, FALLBACK_MODELS, MS_KEYS, claudePath, codexPath, detection, modelSelection, models, opencodePath, trustMode } from "./00-state.js";
-import { el } from "./04-dom.js";
-import { cleanApprovalText } from "./06-tools.js";
-export const UPDATES_APP_JSON_URL = "https://raw.githubusercontent.com/pagecow/term-coder/main/app.json";
-export const UPDATES_CONTENTS_API_URL = "https://api.github.com/repos/pagecow/term-coder/contents/app.json";
-export const UPDATES_RELEASES_API_URL = "https://api.github.com/repos/pagecow/term-coder/releases/latest";
-export const UPDATES_RELEASES_PAGE_URL = "https://github.com/pagecow/term-coder/releases";
+// 08-settings.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+const UPDATES_APP_JSON_URL = "https://raw.githubusercontent.com/pagecow/term-coder/main/app.json";
+const UPDATES_CONTENTS_API_URL = "https://api.github.com/repos/pagecow/term-coder/contents/app.json";
+const UPDATES_RELEASES_API_URL = "https://api.github.com/repos/pagecow/term-coder/releases/latest";
+const UPDATES_RELEASES_PAGE_URL = "https://github.com/pagecow/term-coder/releases";
 
 // Parse "1.16.1" / "v1.16.1" into [major, minor, patch] (missing parts = 0).
 // Returns null when the string has no leading numeric version.
-export function parseVersion(v) {
+function parseVersion(v) {
   const m = String(v == null ? "" : v).trim().replace(/^v/i, "").match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
   if (!m) return null;
   return [parseInt(m[1], 10) || 0, parseInt(m[2], 10) || 0, parseInt(m[3], 10) || 0];
 }
 // >0 when a is newer than b, <0 when b is newer, 0 when equal/unparseable.
-export function compareVersions(a, b) {
+function compareVersions(a, b) {
   const pa = parseVersion(a), pb = parseVersion(b);
   if (!pa || !pb) return 0;
   for (let i = 0; i < 3; i++) {
@@ -26,7 +28,7 @@ export function compareVersions(a, b) {
 // Fetch the latest published version from GitHub. Primary source is the repo's
 // app.json on main; fallback is the latest release tag. Returns the version
 // string or null when neither source could be read.
-export async function fetchLatestVersion() {
+async function fetchLatestVersion() {
   // web.fetch returns { title, content, links } — content is the page text.
   const readJson = async (url) => {
     const page = await window.chatoss.web.fetch(url);
@@ -72,11 +74,11 @@ export async function fetchLatestVersion() {
   return null;
 }
 
-export async function checkForUpdates() {
-  const status = el.updateStatus;
+async function checkForUpdates() {
+  const status = TC.el.updateStatus;
   if (!status) return;
-  if (el.checkUpdatesBtn) el.checkUpdatesBtn.disabled = true;
-  if (el.openReleasesBtn) el.openReleasesBtn.classList.add("hidden");
+  if (TC.el.checkUpdatesBtn) TC.el.checkUpdatesBtn.disabled = true;
+  if (TC.el.openReleasesBtn) TC.el.openReleasesBtn.classList.add("hidden");
   status.textContent = "Checking…";
   status.className = "update-status";
   let remote = null;
@@ -85,23 +87,23 @@ export async function checkForUpdates() {
   } catch (e) {
     console.warn("checkForUpdates", e);
   }
-  if (el.checkUpdatesBtn) el.checkUpdatesBtn.disabled = false;
+  if (TC.el.checkUpdatesBtn) TC.el.checkUpdatesBtn.disabled = false;
   if (!remote) {
     status.textContent = "Couldn't check for updates — check your connection";
     status.className = "update-status update-status-error";
     return;
   }
-  if (compareVersions(remote, APP_VERSION) > 0) {
+  if (compareVersions(remote, TC.APP_VERSION) > 0) {
     status.textContent = "Update available: " + remote;
     status.className = "update-status update-status-available";
-    if (el.openReleasesBtn) el.openReleasesBtn.classList.remove("hidden");
+    if (TC.el.openReleasesBtn) TC.el.openReleasesBtn.classList.remove("hidden");
   } else {
-    status.textContent = "Up to date (" + APP_VERSION + ")";
+    status.textContent = "Up to date (" + TC.APP_VERSION + ")";
     status.className = "update-status update-status-ok";
   }
 }
 
-export function openReleasesPage() {
+function openReleasesPage() {
   try {
     window.chatoss.openExternal.open(UPDATES_RELEASES_PAGE_URL).catch((e) => console.warn("openReleasesPage", e));
   } catch (e) { console.warn("openReleasesPage", e); }
@@ -115,14 +117,14 @@ export function openReleasesPage() {
 // persisted snapshot), so the chat list is the authoritative superset.
 // detection.models first (terminal-verified), then chat-local models, deduped
 // by id. Falls back to FALLBACK_MODELS when both sources are empty.
-export function allOllamaModels() {
+function allOllamaModels() {
   const seen = new Set();
   const out = [];
   const push = (m) => {
     if (m && !seen.has(m)) { seen.add(m); out.push(m); }
   };
-  for (const m of (detection && detection.models) || []) push(m);
-  for (const m of models) {
+  for (const m of (TC.detection && TC.detection.models) || []) push(m);
+  for (const m of TC.models) {
     if (m && m.source === "local" && m.id) push(m.id);
   }
   return out;
@@ -130,9 +132,9 @@ export function allOllamaModels() {
 
 // Returns the auto-detected ollama model ids (a copy of allOllamaModels()),
 // falling back to FALLBACK_MODELS when detection is empty.
-export function availableOllamaModels() {
+function availableOllamaModels() {
   const m = allOllamaModels();
-  return m.length ? m : FALLBACK_MODELS.slice();
+  return m.length ? m : TC.FALLBACK_MODELS.slice();
 }
 
 // ── Direct-CLI + ollama launch targets ──
@@ -150,19 +152,19 @@ export function availableOllamaModels() {
 // Direct CLIs use ids "claude", "codex", and "opencode"; ollama models use their
 // model name. kind is derived from the id with targetKind() so a bare id
 // round-trips.
-export function availableLaunchTargets() {
+function availableLaunchTargets() {
   const out = [];
   // Direct CLIs first — these are the "I have a direct account" options and
   // are the most distinct from the ollama path, so they read as the headline
   // choices. Only listed when the binary is actually installed.
-  if (detection.claude && detection.claudePath) {
-    out.push({ kind: "direct", id: "claude", label: "claude  (Claude Code, direct)", bin: detection.claudePath });
+  if (TC.detection.claude && TC.detection.claudePath) {
+    out.push({ kind: "direct", id: "claude", label: "claude  (Claude Code, direct)", bin: TC.detection.claudePath });
   }
-  if (detection.codex && detection.codexPath) {
-    out.push({ kind: "direct", id: "codex", label: "codex  (Codex, direct)", bin: detection.codexPath });
+  if (TC.detection.codex && TC.detection.codexPath) {
+    out.push({ kind: "direct", id: "codex", label: "codex  (Codex, direct)", bin: TC.detection.codexPath });
   }
-  if (detection.opencode && detection.opencodePath) {
-    out.push({ kind: "direct", id: "opencode", label: "opencode  (OpenCode, direct)", bin: detection.opencodePath });
+  if (TC.detection.opencode && TC.detection.opencodePath) {
+    out.push({ kind: "direct", id: "opencode", label: "opencode  (OpenCode, direct)", bin: TC.detection.opencodePath });
   }
   // Ollama models — the existing launch path. Each becomes its own target so
   // picking one launches through ollama with that model.
@@ -173,7 +175,7 @@ export function availableLaunchTargets() {
 }
 
 // Look up a launch target by its stable id. Returns the target object or null.
-export function findLaunchTarget(id) {
+function findLaunchTarget(id) {
   if (!id) return null;
   return availableLaunchTargets().find((t) => t.id === id) || null;
 }
@@ -181,7 +183,7 @@ export function findLaunchTarget(id) {
 // Given a target id, return its kind ("direct" | "ollama") or null when not
 // found / not a known target. Used to route the spawn command without needing
 // the full target object.
-export function targetKind(id) {
+function targetKind(id) {
   const t = findLaunchTarget(id);
   return t ? t.kind : null;
 }
@@ -210,7 +212,7 @@ export function targetKind(id) {
 // is applied on session start instead of re-asking every time (the launch-pick
 // bug): the orchestrator kept showing the pill picker even after the user pinned
 // a default agent.
-export function cliDefaultToTargetId(value) {
+function cliDefaultToTargetId(value) {
   if (!value || value === "ask") return null;
   if (typeof value !== "string") return null;
   if (value.indexOf("raw:") === 0) {
@@ -223,7 +225,7 @@ export function cliDefaultToTargetId(value) {
 // Build the list of { label, value } options for the pill/rect askChoice picker
 // and for any <select> that should offer the same choices. value is the stable
 // target id so the picker result maps straight back to a launch target.
-export function launchTargetChoiceOptions() {
+function launchTargetChoiceOptions() {
   return availableLaunchTargets().map((t) => ({ label: t.label, value: t.id }));
 }
 
@@ -232,7 +234,7 @@ export function launchTargetChoiceOptions() {
 // empty placeholder option when nothing is available so the picker is never
 // silently blank. Direct CLIs are grouped under an optgroup so they read as a
 // distinct choice from the ollama models.
-export function populateModelSelect(selectEl, selected) {
+function populateModelSelect(selectEl, selected) {
   if (!selectEl) return;
   const targets = availableLaunchTargets();
   selectEl.innerHTML = "";
@@ -284,9 +286,9 @@ export function populateModelSelect(selectEl, selected) {
 // Read the saved effort for a launch-target id. For ollama-model targets the
 // value must be one of the model's current thinkLevels (or "" for default).
 // Direct CLI targets are restricted to the fixed low/medium/high set.
-export function effortForTarget(targetId) {
+function effortForTarget(targetId) {
   if (!targetId) return null;
-  const map = modelSelection.subAgentEffort;
+  const map = TC.modelSelection.subAgentEffort;
   const v = map && typeof map === "object" ? map[targetId] : null;
   if (v == null || v === "") return null;
   const opts = effortOptionsForTarget(targetId);
@@ -298,7 +300,7 @@ export function effortForTarget(targetId) {
 //     real flag accepts; other direct agents get guidance lines).
 //   - An ollama model id with thinkLevels → those exact levels.
 //   - Otherwise → the generic low/medium/high/extra-high/max set.
-export function effortOptionsForTarget(targetId) {
+function effortOptionsForTarget(targetId) {
   const directIds = ["claude", "codex", "opencode"];
   if (targetId && directIds.includes(targetId)) {
     return [{ value: "", label: "Model default" },
@@ -306,7 +308,7 @@ export function effortOptionsForTarget(targetId) {
       { value: "medium", label: "Medium — balanced" },
       { value: "high", label: "High — deep reasoning" }];
   }
-  const m = models.find((x) => x.id === targetId);
+  const m = TC.models.find((x) => x.id === targetId);
   if (m && m.thinkLevels && m.thinkLevels.length) {
     const opts = [{ value: "", label: "Model default" }];
     for (const lvl of m.thinkLevels) {
@@ -324,7 +326,7 @@ export function effortOptionsForTarget(targetId) {
 
 // Populate an effort select with the option list for `targetId`, selecting the
 // value saved for that target ("" = model default).
-export function populateEffortSelect(selectEl, targetId) {
+function populateEffortSelect(selectEl, targetId) {
   if (!selectEl) return;
   selectEl.innerHTML = "";
   for (const o of effortOptionsForTarget(targetId)) {
@@ -338,25 +340,25 @@ export function populateEffortSelect(selectEl, targetId) {
 
 // Reflect the per-target effort map into every Settings row. Runs whenever a
 // row's target select changes and whenever the panels are (re)populated.
-export function syncEffortRows() {
-  populateEffortSelect(el.alwaysEffort, el.alwaysModel.value);
-  populateEffortSelect(el.complexityEffortLow, el.complexityModelLow.value);
-  populateEffortSelect(el.complexityEffortMedium, el.complexityModelMedium.value);
-  populateEffortSelect(el.complexityEffortHigh, el.complexityModelHigh.value);
+function syncEffortRows() {
+  populateEffortSelect(TC.el.alwaysEffort, TC.el.alwaysModel.value);
+  populateEffortSelect(TC.el.complexityEffortLow, TC.el.complexityModelLow.value);
+  populateEffortSelect(TC.el.complexityEffortMedium, TC.el.complexityModelMedium.value);
+  populateEffortSelect(TC.el.complexityEffortHigh, TC.el.complexityModelHigh.value);
 }
 
 // Wire one effort select: changing it stores the level against the CURRENT
 // target of its sibling model select, and persists immediately ("" deletes the
 // entry so a target returns to its model default).
-export function bindEffortSelect(effortSel, modelSel) {
+function bindEffortSelect(effortSel, modelSel) {
   if (!effortSel || !modelSel) return;
   effortSel.addEventListener("change", () => {
     const targetId = modelSel.value;
     if (!targetId) return; // empty picker ("nothing detected") — nothing to attach the effort to
-    if (!modelSelection.subAgentEffort || typeof modelSelection.subAgentEffort !== "object") modelSelection.subAgentEffort = {};
+    if (!TC.modelSelection.subAgentEffort || typeof TC.modelSelection.subAgentEffort !== "object") TC.modelSelection.subAgentEffort = {};
     const v = effortSel.value;
-    if (v) modelSelection.subAgentEffort[targetId] = v;
-    else delete modelSelection.subAgentEffort[targetId];
+    if (v) TC.modelSelection.subAgentEffort[targetId] = v;
+    else delete TC.modelSelection.subAgentEffort[targetId];
     persistModelSelection();
   });
 }
@@ -364,7 +366,7 @@ export function bindEffortSelect(effortSel, modelSel) {
 // The task-brief guidance line appended when an effort level is set but the
 // target has no real effort flag (claude / opencode / ollama launches). Direct
 // Codex instead gets the verified --config model_reasoning_effort flag.
-export const EFFORT_BRIEF = {
+const EFFORT_BRIEF = {
   low: "Effort level: LOW. Work fast and pragmatically — minimal analysis, no over-engineering; prefer the simplest correct solution.",
   medium: "Effort level: MEDIUM. Balance speed and care — think through the important decisions, but don't over-engineer routine parts.",
   high: "Effort level: HIGH. Work with maximum care — reason deeply, consider edge cases and trade-offs, and verify your work before calling it done.",
@@ -373,108 +375,108 @@ export const EFFORT_BRIEF = {
 };
 
 // Show only the picker panel matching the active radio mode.
-export function showModelModePanel(mode) {
-  el.modelModeManual.classList.toggle("hidden", mode !== "manual");
-  el.modelModeAlways.classList.toggle("hidden", mode !== "always");
-  el.modelModeComplexity.classList.toggle("hidden", mode !== "complexity");
+function showModelModePanel(mode) {
+  TC.el.modelModeManual.classList.toggle("hidden", mode !== "manual");
+  TC.el.modelModeAlways.classList.toggle("hidden", mode !== "always");
+  TC.el.modelModeComplexity.classList.toggle("hidden", mode !== "complexity");
 }
 
 // Reflect the persisted model-selection config into the settings UI.
 // Called on openSettings() (UI open) and after a Re-scan refreshes models.
-export function applyModelSelectionModeToUi() {
-  let mode = modelSelection.modelSelectionMode || "manual";
-  const radio = el.modelModeRadios.querySelector(`input[name="model-mode"][value="${mode}"]`);
+function applyModelSelectionModeToUi() {
+  let mode = TC.modelSelection.modelSelectionMode || "manual";
+  const radio = TC.el.modelModeRadios.querySelector(`input[name="model-mode"][value="${mode}"]`);
   if (radio) {
     radio.checked = true;
   } else {
     // Corrupted/legacy persisted mode — fall back to Manual so the UI is never
     // left with no radio checked and every mode panel hidden.
     mode = "manual";
-    const fallback = el.modelModeRadios.querySelector('input[name="model-mode"][value="manual"]');
+    const fallback = TC.el.modelModeRadios.querySelector('input[name="model-mode"][value="manual"]');
     if (fallback) fallback.checked = true;
   }
-  populateModelSelect(el.alwaysModel, modelSelection.alwaysModel);
-  populateModelSelect(el.complexityModelLow, modelSelection.complexityModelLow);
-  populateModelSelect(el.complexityModelMedium, modelSelection.complexityModelMedium);
-  populateModelSelect(el.complexityModelHigh, modelSelection.complexityModelHigh);
+  populateModelSelect(TC.el.alwaysModel, TC.modelSelection.alwaysModel);
+  populateModelSelect(TC.el.complexityModelLow, TC.modelSelection.complexityModelLow);
+  populateModelSelect(TC.el.complexityModelMedium, TC.modelSelection.complexityModelMedium);
+  populateModelSelect(TC.el.complexityModelHigh, TC.modelSelection.complexityModelHigh);
   syncEffortRows();
   showModelModePanel(mode);
 }
 
 // Read the current settings-UI values back into `modelSelection` and persist
 // each field to its own scopedData key immediately (live persistence).
-export function saveModelSelectionMode() {
-  const checked = el.modelModeRadios.querySelector('input[name="model-mode"]:checked');
-  modelSelection.modelSelectionMode = checked ? checked.value : "manual";
-  modelSelection.alwaysModel = el.alwaysModel.value || "";
-  modelSelection.complexityModelLow = el.complexityModelLow.value || "";
-  modelSelection.complexityModelMedium = el.complexityModelMedium.value || "";
-  modelSelection.complexityModelHigh = el.complexityModelHigh.value || "";
+function saveModelSelectionMode() {
+  const checked = TC.el.modelModeRadios.querySelector('input[name="model-mode"]:checked');
+  TC.modelSelection.modelSelectionMode = checked ? checked.value : "manual";
+  TC.modelSelection.alwaysModel = TC.el.alwaysModel.value || "";
+  TC.modelSelection.complexityModelLow = TC.el.complexityModelLow.value || "";
+  TC.modelSelection.complexityModelMedium = TC.el.complexityModelMedium.value || "";
+  TC.modelSelection.complexityModelHigh = TC.el.complexityModelHigh.value || "";
   persistModelSelection();
 }
 
 // Persist every model-selection field to its own scopedData key.
-export function persistModelSelection() {
-  for (const key of MS_KEYS) {
+function persistModelSelection() {
+  for (const key of TC.MS_KEYS) {
     try {
-      window.chatoss.scopedData.set(key, modelSelection[key]).catch((e) => console.warn("persistModelSelection", key, e));
+      window.chatoss.scopedData.set(key, TC.modelSelection[key]).catch((e) => console.warn("persistModelSelection", key, e));
     } catch (e) { console.warn("persistModelSelection", key, e); }
   }
 }
 
 // On app load: read each model-selection field from its own scopedData key and
 // restore the in-memory config + UI. Missing keys keep their defaults.
-export async function loadModelSelection() {
-  for (const key of MS_KEYS) {
+async function loadModelSelection() {
+  for (const key of TC.MS_KEYS) {
     try {
       const v = await window.chatoss.scopedData.get(key);
-      if (v !== undefined && v !== null) modelSelection[key] = v;
+      if (v !== undefined && v !== null) TC.modelSelection[key] = v;
     } catch (e) { console.warn("loadModelSelection", key, e); }
   }
   // Sanitize: the effort map must be a plain object of targetId → level.
-  if (!modelSelection.subAgentEffort || typeof modelSelection.subAgentEffort !== "object" || Array.isArray(modelSelection.subAgentEffort)) {
-    modelSelection.subAgentEffort = {};
+  if (!TC.modelSelection.subAgentEffort || typeof TC.modelSelection.subAgentEffort !== "object" || Array.isArray(TC.modelSelection.subAgentEffort)) {
+    TC.modelSelection.subAgentEffort = {};
   }
   applyModelSelectionModeToUi();
 }
 
 // ---------- Folder-trust policy ----------
 // Persist + restore trustMode ("ask" | "always") to its own scopedData key.
-export async function loadTrustMode() {
+async function loadTrustMode() {
   try {
     const v = await window.chatoss.scopedData.get("trustMode");
-    if (v === "ask" || v === "always") trustMode = v;
+    if (v === "ask" || v === "always") TC.setTrustMode(v);
   } catch (e) { console.warn("loadTrustMode", e); }
 }
-export function persistTrustMode() {
-  try { window.chatoss.scopedData.set("trustMode", trustMode).catch((e) => console.warn("persistTrustMode", e)); }
+function persistTrustMode() {
+  try { window.chatoss.scopedData.set("trustMode", TC.trustMode).catch((e) => console.warn("persistTrustMode", e)); }
   catch (e) { console.warn("persistTrustMode", e); }
 }
 // Reflect the persisted trustMode into the settings UI radio group.
-export function applyTrustModeToUi() {
-  if (!el.trustModeRadios) return;
-  const radio = el.trustModeRadios.querySelector(`input[name="trust-mode"][value="${trustMode || "ask"}"]`);
+function applyTrustModeToUi() {
+  if (!TC.el.trustModeRadios) return;
+  const radio = TC.el.trustModeRadios.querySelector(`input[name="trust-mode"][value="${trustMode || "ask"}"]`);
   if (radio) radio.checked = true;
 }
 // Read the settings-UI trust radio back into trustMode and persist it.
-export function saveTrustMode() {
-  if (!el.trustModeRadios) return;
-  const checked = el.trustModeRadios.querySelector('input[name="trust-mode"]:checked');
-  trustMode = checked ? checked.value : "ask";
+function saveTrustMode() {
+  if (!TC.el.trustModeRadios) return;
+  const checked = TC.el.trustModeRadios.querySelector('input[name="trust-mode"]:checked');
+  TC.setTrustMode(checked ? checked.value : "ask");
   persistTrustMode();
 }
 
 // Ask the user (IN CHAT, via the askChoice pill picker) whether to approve a
 // potentially dangerous command the coding agent wants to run. Resolves true
 // for "approve", false for "deny". Used by the persistent auto-approve watcher.
-export async function askCommandApproval(rec, commandText) {
+async function askCommandApproval(rec, commandText) {
   try {
     // Clean again here as a belt-and-suspenders measure: classifyApprovalPrompt
     // already cleaned verdict.command, but this is the final gate before the
     // text reaches the overlay, so any stray spinner glyph / status frame that
     // slipped through another path is stripped here too. Fall back to a short
     // generic label if cleaning left nothing usable.
-    const cleaned = cleanApprovalText(commandText) || "(command text unavailable)";
+    const cleaned = TC.cleanApprovalText(commandText) || "(command text unavailable)";
     const short = cleaned.length > 200 ? cleaned.slice(0, 200) + "…" : cleaned;
     const v = await window.termCoder.askChoice({
       prompt: "A coding agent wants to run a command that looks potentially destructive:\n\n" + short,
@@ -494,7 +496,7 @@ export async function askCommandApproval(rec, commandText) {
 // Ask the user (IN CHAT, via the askChoice pill picker) whether to trust the
 // folder a CLI agent is prompting about. Resolves true for "trust", false for
 // "don't trust" or if dismissed. Used by autoDriveStartup when trustMode=ask.
-export async function askTrustInChat(folderLabel) {
+async function askTrustInChat(folderLabel) {
   try {
     const v = await window.termCoder.askChoice({
       prompt: "A coding agent wants to trust this folder before it can run:\n\n" + (folderLabel || "(this folder)"),
@@ -513,3 +515,39 @@ export async function askTrustInChat(folderLabel) {
 
 // Shared read helper for other code (e.g. the session-startup integration).
 // Always returns a plain object with the current config + detected models.
+// --- exports ---
+Object.defineProperty(TC, "UPDATES_APP_JSON_URL", { get: () => UPDATES_APP_JSON_URL, configurable: true });
+Object.defineProperty(TC, "UPDATES_CONTENTS_API_URL", { get: () => UPDATES_CONTENTS_API_URL, configurable: true });
+Object.defineProperty(TC, "UPDATES_RELEASES_API_URL", { get: () => UPDATES_RELEASES_API_URL, configurable: true });
+Object.defineProperty(TC, "UPDATES_RELEASES_PAGE_URL", { get: () => UPDATES_RELEASES_PAGE_URL, configurable: true });
+Object.defineProperty(TC, "EFFORT_BRIEF", { get: () => EFFORT_BRIEF, configurable: true });
+TC.parseVersion = parseVersion;
+TC.compareVersions = compareVersions;
+TC.fetchLatestVersion = fetchLatestVersion;
+TC.checkForUpdates = checkForUpdates;
+TC.openReleasesPage = openReleasesPage;
+TC.allOllamaModels = allOllamaModels;
+TC.availableOllamaModels = availableOllamaModels;
+TC.availableLaunchTargets = availableLaunchTargets;
+TC.findLaunchTarget = findLaunchTarget;
+TC.targetKind = targetKind;
+TC.cliDefaultToTargetId = cliDefaultToTargetId;
+TC.launchTargetChoiceOptions = launchTargetChoiceOptions;
+TC.populateModelSelect = populateModelSelect;
+TC.effortForTarget = effortForTarget;
+TC.effortOptionsForTarget = effortOptionsForTarget;
+TC.populateEffortSelect = populateEffortSelect;
+TC.syncEffortRows = syncEffortRows;
+TC.bindEffortSelect = bindEffortSelect;
+TC.showModelModePanel = showModelModePanel;
+TC.applyModelSelectionModeToUi = applyModelSelectionModeToUi;
+TC.saveModelSelectionMode = saveModelSelectionMode;
+TC.persistModelSelection = persistModelSelection;
+TC.loadModelSelection = loadModelSelection;
+TC.loadTrustMode = loadTrustMode;
+TC.persistTrustMode = persistTrustMode;
+TC.applyTrustModeToUi = applyTrustModeToUi;
+TC.saveTrustMode = saveTrustMode;
+TC.askCommandApproval = askCommandApproval;
+TC.askTrustInChat = askTrustInChat;
+})();

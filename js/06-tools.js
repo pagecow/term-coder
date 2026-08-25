@@ -1,11 +1,9 @@
-import { APP_VERSION, loginShell, running, sessions, settings, state, trustMode } from "./00-state.js";
-import { formatSessionStatusOutput, persistSessions, saveWorktrees, sessionActivity, worktreeMeta } from "./01-sessions.js";
-import { $ } from "./04-dom.js";
-import { activeConversation, getProject } from "./05-util.js";
-import { openSpawnModal, spawnChosen } from "./07-spawn.js";
-import { askTrustInChat, cliDefaultToTargetId, findLaunchTarget, loadTrustMode } from "./08-settings.js";
-import { closeSession, renderSessionInfo, renderTabs, runHealthCheck } from "./20-terminal.js";
-export const ORCHESTRATOR_TOOLS = [
+// 06-tools.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+const ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     function: {
@@ -444,17 +442,17 @@ export const ORCHESTRATOR_TOOLS = [
 //
 // Feature-detected: on a host older than 1.8.4 these methods are absent, so fall
 // back to raw write() with the bytes the host would have sent.
-export const LEGACY_KEY_BYTES = {
+const LEGACY_KEY_BYTES = {
   enter: "\r", escape: "\x1b", tab: "\t", space: " ", backspace: "\x7f",
   up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
   "ctrl+c": "\x03", "ctrl+d": "\x04", "ctrl+u": "\x15", "ctrl+l": "\x0c",
   home: "\x1b[H", end: "\x1b[F", delete: "\x1b[3~",
   "shift+tab": "\x1b[Z", pageup: "\x1b[5~", pagedown: "\x1b[6~",
 };
-export function hasNativeInput(session) {
+function hasNativeInput(session) {
   return !!(session && typeof session.key === "function" && typeof session.paste === "function");
 }
-export async function sendKey(session, name) {
+async function sendKey(session, name) {
   const key = String(name || "").trim().toLowerCase();
   if (session && typeof session.key === "function") {
     try { await session.key(key); return true; } catch (e) { console.warn("session.key", key, e); return false; }
@@ -467,7 +465,7 @@ export async function sendKey(session, name) {
 }
 // Send text as CONTENT. Returns true when the host bracketed it (newlines are
 // then literal and safe); false when it went through as plain bytes.
-export async function sendText(session, text) {
+async function sendText(session, text) {
   if (session && typeof session.paste === "function") {
     try { return (await session.paste(text)) === true; } catch (e) { console.warn("session.paste", e); }
   }
@@ -479,7 +477,7 @@ export async function sendText(session, text) {
 // Does the child have bracketed-paste mode on? Decides whether a multi-line
 // payload is safe to send in one piece: WITHOUT bracketing every \n acts as a
 // submit and would split the prompt into many broken messages.
-export async function bracketedPasteOn(session) {
+async function bracketedPasteOn(session) {
   if (!session || typeof session.modes !== "function") return false;
   try {
     const m = await session.modes();
@@ -499,7 +497,7 @@ export async function bracketedPasteOn(session) {
 // them into real control bytes before writing to the PTY, or the CLI sees the
 // literal characters typed into its input box instead of keypresses. This was
 // the core bug: Claude Code's TUI showed the prompt text but Enter never fired.
-export function parseTerminalEscapes(s) {
+function parseTerminalEscapes(s) {
   if (typeof s !== "string") return s;
   // Normalize the common backslash-escape sequences used in the tool docs.
   let out = "";
@@ -529,7 +527,7 @@ export function parseTerminalEscapes(s) {
 
 // Strip ANSI escape sequences (colors, cursor moves, etc.) from raw terminal
 // output so the orchestrator reads readable text instead of escape noise.
-export function stripAnsi(s) {
+function stripAnsi(s) {
   if (typeof s !== "string") return s;
   // Order matters: longest/most-specific sequence forms first, because the
   // catch-alls at the end would otherwise eat an escape's introducer and leave
@@ -578,7 +576,7 @@ export function stripAnsi(s) {
 // text (spinner dingbats, "Baking…", repeated "still thinking" lines mixed
 // into the command). We drop the decoration glyphs and discard any line that
 // is *only* a status frame, keeping the real command line intact.
-export function cleanApprovalText(text) {
+function cleanApprovalText(text) {
   if (typeof text !== "string") return text;
   // Unicode ranges TUIs paint as plain (non-ANSI) spinner / box / braille
   // glyphs every frame: Box Drawing, Block Elements, Braille Patterns,
@@ -624,7 +622,7 @@ export function cleanApprovalText(text) {
 // Strategy: watch onData chunks for known dialog signatures. When the trust
 // dialog appears, handle it per trustMode. When the CLI's real input box is
 // ready (welcome line / `❯` prompt), send the task. Safety timeout = 12s.
-export async function autoDriveStartup(session, prompt, label, cwd) {
+async function autoDriveStartup(session, prompt, label, cwd) {
   if (!prompt) return;
   const safe = (fn) => { try { return fn(); } catch (_) { return null; } };
   const folderLabel = cwd || label || "(this folder)";
@@ -692,10 +690,10 @@ export async function autoDriveStartup(session, prompt, label, cwd) {
   // assigned later inside the onData try-block; only its DECLARATION moves here.
   // Update the session registry so read_session can mask the trust dialog from
   // the orchestrator and avoid tempting it to send bypass keystrokes.
-  const rec = sessions.get(session.id);
+  const rec = TC.sessions.get(session.id);
   if (rec) {
     rec.trustState = "pending";
-    rec.trustMode = trustMode;
+    rec.trustMode = TC.trustMode;
   }
   let unsub = null;
 
@@ -800,12 +798,12 @@ export async function autoDriveStartup(session, prompt, label, cwd) {
   const handleTrust = async () => {
     trustBusy = true;
     if (rec) rec.trustState = "asking";
-    try { await loadTrustMode(); } catch (_) {}
+    try { await TC.loadTrustMode(); } catch (_) {}
     // R3: capture the just-loaded mode into a LOCAL so the ask/always branch
     // below can't observe a concurrent change of the shared `trustMode`
     // variable between this await and the check (e.g. the user toggling it in
     // Settings while a second trust dialog is in flight). Behavior unchanged.
-    const mode = trustMode;
+    const mode = TC.trustMode;
     if (mode === "always") {
       if (rec) rec.trustMode = "always";
       await confirmTrust();
@@ -815,7 +813,7 @@ export async function autoDriveStartup(session, prompt, label, cwd) {
     }
     if (rec) rec.trustMode = "ask";
     // mode === "ask" — ask in chat, wait for the answer.
-    const ok = await askTrustInChat(folderLabel);
+    const ok = await TC.askTrustInChat(folderLabel);
     if (settled) { trustBusy = false; return; } // safety timeout fired while waiting
     if (ok) {
       if (rec) rec.trustState = "confirmed";
@@ -935,16 +933,16 @@ export async function autoDriveStartup(session, prompt, label, cwd) {
 // ---------- Tool handlers (async, always return a string) ----------
 // Resolve the project the model means: the id it passed, else the ACTIVE project.
 // This makes tools work even when the model calls them with {} (the common case).
-export function resolveProject(args) {
-  return getProject(args && args.projectId) || getProject(state.activeProjectId) || state.projects[0] || null;
+function resolveProject(args) {
+  return TC.getProject(args && args.projectId) || TC.getProject(TC.state.activeProjectId) || TC.state.projects[0] || null;
 }
 // Resolve the board the model means: the id it passed, else the conversation's attached board.
-export function resolveBoardId(args) {
-  const c = activeConversation();
+function resolveBoardId(args) {
+  const c = TC.activeConversation();
   return (args && args.boardId) || (c && c.boardId) || null;
 }
 
-export async function toolHandler(name, args) {
+async function toolHandler(name, args) {
   args = args || {};
   try {
     switch (name) {
@@ -968,7 +966,7 @@ export async function toolHandler(name, args) {
         // Auto-initialize + make an initial commit so worktrees can branch off it.
         // This is idempotent: if a repo already exists, the init/commit are no-ops.
         const checkRepo = await window.chatoss.terminal.exec(
-          loginShell("git rev-parse --is-inside-work-tree 2>/dev/null"),
+          TC.loginShell("git rev-parse --is-inside-work-tree 2>/dev/null"),
           { cwd: base }
         );
         if (checkRepo === null) return "Error: terminal permission denied (approve git to continue)";
@@ -977,7 +975,7 @@ export async function toolHandler(name, args) {
           // Initialize the repo, add everything, and make an initial commit so
           // there's a HEAD for worktree branches to branch from.
           const initCmd = "git init && git add -A && git commit -m \"initial commit (auto-created by Term Coder for worktree isolation)\"";
-          const initR = await window.chatoss.terminal.exec(loginShell(initCmd), { cwd: base });
+          const initR = await window.chatoss.terminal.exec(TC.loginShell(initCmd), { cwd: base });
           if (initR === null) return "Error: terminal permission denied (approve git to continue)";
           if (initR.exitCode !== 0) {
             return "Failed to auto-initialize git repo (exit " + initR.exitCode + "):\n" + initR.output +
@@ -987,19 +985,19 @@ export async function toolHandler(name, args) {
         }
 
         // Make sure the parent directory for the worktree exists.
-        await window.chatoss.terminal.exec(loginShell("mkdir -p \"" + base + "/.chatoss/worktrees\""), { cwd: base });
+        await window.chatoss.terminal.exec(TC.loginShell("mkdir -p \"" + base + "/.chatoss/worktrees\""), { cwd: base });
 
         // Determine the current (main) branch so we can branch the worktree off it
         // and later merge it back. We stash this in the session record's project
         // metadata so merge_worktree knows where to merge to.
         const branchR = await window.chatoss.terminal.exec(
-          loginShell("git branch --show-current"),
+          TC.loginShell("git branch --show-current"),
           { cwd: base }
         );
         const mainBranch = (branchR && branchR.output || "").trim() || "main";
 
         const r = await window.chatoss.terminal.exec(
-          loginShell("git worktree add " + JSON.stringify(wtPath) + " -b " + JSON.stringify(branch) + " " + JSON.stringify(mainBranch)),
+          TC.loginShell("git worktree add " + JSON.stringify(wtPath) + " -b " + JSON.stringify(branch) + " " + JSON.stringify(mainBranch)),
           { cwd: base }
         );
         if (r === null) return "Error: terminal permission denied (approve git to continue)";
@@ -1007,8 +1005,8 @@ export async function toolHandler(name, args) {
 
         // Track worktree metadata so merge_worktree can find the parent branch.
         // Persisted — the merge almost always happens in a LATER turn.
-        worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
-        saveWorktrees();
+        TC.worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
+        TC.saveWorktrees();
         return JSON.stringify({ worktreePath: wtPath, branch: branch, parentBranch: mainBranch });
       }
       case "merge_worktree": {
@@ -1019,7 +1017,7 @@ export async function toolHandler(name, args) {
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
         const base = p.folderPath.replace(/\/+$/, "");
         const branch = args.branchName || "";
-        const meta = branch ? worktreeMeta.get(branch) : null;
+        const meta = branch ? TC.worktreeMeta.get(branch) : null;
         const wtPath = (meta && meta.wtPath) || (args.worktreePath || "").trim();
         const parentBranch = (meta && meta.parentBranch) || args.parentBranch || "main";
         if (!wtPath && !branch) return "Error: pass branchName or worktreePath so I know which worktree to merge.";
@@ -1035,7 +1033,7 @@ export async function toolHandler(name, args) {
         if (wtPath) {
           const commitMsg = "worktree work: " + (branch || "merge");
           const commitR = await window.chatoss.terminal.exec(
-            loginShell("git add -A && git commit -m " + JSON.stringify(commitMsg) + " --allow-empty"),
+            TC.loginShell("git add -A && git commit -m " + JSON.stringify(commitMsg) + " --allow-empty"),
             { cwd: wtPath }
           );
           if (commitR === null) return "Error: terminal permission denied (approve git to continue)";
@@ -1048,13 +1046,13 @@ export async function toolHandler(name, args) {
         // commit it first — otherwise every merge fails with "local changes
         // would be overwritten" and the worktree is stranded.
         const dirtyR = await window.chatoss.terminal.exec(
-          loginShell("git status --porcelain"),
+          TC.loginShell("git status --porcelain"),
           { cwd: base }
         );
         if (dirtyR === null) return "Error: terminal permission denied (approve git to continue)";
         if ((dirtyR.output || "").trim()) {
           const wipR = await window.chatoss.terminal.exec(
-            loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before merging " + branch)),
+            TC.loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before merging " + branch)),
             { cwd: base }
           );
           if (wipR === null) return "Error: terminal permission denied (approve git to continue)";
@@ -1063,7 +1061,7 @@ export async function toolHandler(name, args) {
         // Switch to the parent branch in the MAIN project folder and merge.
         const mergeMsg = "Merge worktree branch " + branch + " into " + parentBranch;
         const mergeR = await window.chatoss.terminal.exec(
-          loginShell("git checkout " + JSON.stringify(parentBranch) + " && git merge --no-ff " + JSON.stringify(branch) + " -m " + JSON.stringify(mergeMsg)),
+          TC.loginShell("git checkout " + JSON.stringify(parentBranch) + " && git merge --no-ff " + JSON.stringify(branch) + " -m " + JSON.stringify(mergeMsg)),
           { cwd: base }
         );
         if (mergeR === null) return "Error: terminal permission denied (approve git to continue)";
@@ -1080,11 +1078,11 @@ export async function toolHandler(name, args) {
 
         // Clean up: remove the worktree directory and delete the branch.
         if (wtPath) {
-          await window.chatoss.terminal.exec(loginShell("git worktree remove \"" + wtPath + "\" --force"), { cwd: base });
+          await window.chatoss.terminal.exec(TC.loginShell("git worktree remove \"" + wtPath + "\" --force"), { cwd: base });
         }
-        await window.chatoss.terminal.exec(loginShell("git branch -D \"" + branch + "\""), { cwd: base });
-        worktreeMeta.delete(branch);
-        saveWorktrees();
+        await window.chatoss.terminal.exec(TC.loginShell("git branch -D \"" + branch + "\""), { cwd: base });
+        TC.worktreeMeta.delete(branch);
+        TC.saveWorktrees();
 
         // ---- Part 2: ask whether to delete the finished terminal session ----
         // The merge is done, so the worktree is gone. If a terminal session was
@@ -1099,17 +1097,17 @@ export async function toolHandler(name, args) {
         // worktreeBranch (derived from the cwd at registration) equaling the just-
         // merged branch. If the app doesn't track a merge state per session, this
         // branch-match is the proxy (noted here intentionally).
-        const matchedSession = [...sessions.values()].find(
+        const matchedSession = [...TC.sessions.values()].find(
           (s) => s.worktreeBranch === branch || (wtPath && String(s.cwd || "") === wtPath)
         );
         let deletedNote = "";
         if (matchedSession) {
-          const act = sessionActivity(matchedSession);
+          const act = TC.sessionActivity(matchedSession);
           const finished = (act === "IDLE" || act === "EXITED");
           // Mark the session's worktree as merged regardless, so its persisted
           // snapshot (if it survives a reopen) shows the merged state.
           matchedSession.merged = true;
-          persistSessions().catch((e) => console.warn("persistSessions merge", e));
+          TC.persistSessions().catch((e) => console.warn("persistSessions merge", e));
           if (finished) {
             try {
               const v = await window.termCoder.askChoice({
@@ -1124,7 +1122,7 @@ export async function toolHandler(name, args) {
                 style: "pill",
               });
               if (v === "yes") {
-                await closeSession(matchedSession.id);
+                await TC.closeSession(matchedSession.id);
                 deletedNote = "\nThe finished terminal session was deleted at your request.";
               } else {
                 deletedNote = "\nThe terminal session was kept (left as finished in the Sessions column).";
@@ -1141,24 +1139,24 @@ export async function toolHandler(name, args) {
         return "Merged branch " + branch + " into " + parentBranch + " successfully. Worktree cleaned up." + deletedNote + "\n" + mergeOut;
       }
       case "close_session": {
-        const s = args.sessionId ? sessions.get(args.sessionId) : null;
+        const s = args.sessionId ? TC.sessions.get(args.sessionId) : null;
         if (!s) return "Error: no such session " + (args.sessionId || "(none given)") + ". Call list_sessions to see what exists.";
         const label = s.label || s.id;
         const wasCwd = s.cwd || "(unknown)";
-        await closeSession(s.id);
+        await TC.closeSession(s.id);
         return "Closed session " + args.sessionId + " (" + label + ") in " + wasCwd + "." +
           (args.reason ? " Reason recorded: " + args.reason : "") +
           " Its context and any unsaved work are gone. If that worktree still needs work, you may now start a fresh agent in it.";
       }
       case "list_worktrees": {
-        if (!worktreeMeta.size) return "No open worktrees. Create one with create_worktree before spawning a coding agent.";
+        if (!TC.worktreeMeta.size) return "No open worktrees. Create one with create_worktree before spawning a coding agent.";
         // Flag stale entries (directory gone) so the orchestrator can prune them.
         const lines = [];
-        for (const [branch, m] of [...worktreeMeta.entries()]) {
+        for (const [branch, m] of [...TC.worktreeMeta.entries()]) {
           let stale = false;
           if (m.wtPath) {
             const t = await window.chatoss.terminal.exec(
-              loginShell("test -d " + JSON.stringify(m.wtPath) + " && echo yes || echo no"),
+              TC.loginShell("test -d " + JSON.stringify(m.wtPath) + " && echo yes || echo no"),
               { cwd: (m.projectPath || undefined) }
             );
             stale = !(t && (t.output || "").trim() === "yes");
@@ -1166,7 +1164,7 @@ export async function toolHandler(name, args) {
           lines.push("  branch " + branch + " | parent " + (m.parentBranch || "main") + " | path " + (m.wtPath || "(unknown)") +
             (stale ? "  [STALE: directory gone — purge with prune_worktrees or delete_worktree]" : ""));
         }
-        return "OPEN WORKTREES (" + worktreeMeta.size + "):\n" + lines.join("\n") +
+        return "OPEN WORKTREES (" + TC.worktreeMeta.size + "):\n" + lines.join("\n") +
           "\n\nMerge each one with merge_worktree({ branchName: <branch> }) once its agent has finished. " +
           "Delete abandoned ones with delete_worktree({ branchName }) and purge stale bookkeeping with prune_worktrees({}).";
       }
@@ -1186,11 +1184,11 @@ export async function toolHandler(name, args) {
         // alongside it — both then editing the same file.
         if (cwd && !args.force) {
           const norm = (p) => String(p || "").replace(/\/+$/, "");
-          const existing = [...sessions.values()].find(
+          const existing = [...TC.sessions.values()].find(
             (s) => s.active !== false && norm(s.cwd) === norm(cwd)
           );
           if (existing) {
-            const act = sessionActivity(existing);
+            const act = TC.sessionActivity(existing);
             return "Refused: session " + existing.id + " (" + (existing.label || existing.id) +
               ") is ALREADY running in " + cwd + " — status " + act + ".\n\n" +
               "Two agents in one working directory edit the same files and will clobber each other.\n" +
@@ -1209,19 +1207,19 @@ export async function toolHandler(name, args) {
         // and spawn with the saved default directly. Only direct-CLI defaults
         // ("raw:claude" etc.) map to a concrete target without further input;
         // anything else falls through to the modal as before.
-        const defId = cliDefaultToTargetId(settings.cliDefault);
-        const defTarget = defId ? findLaunchTarget(defId) : null;
+        const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
+        const defTarget = defId ? TC.findLaunchTarget(defId) : null;
         if (defTarget) {
-          const session = await spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", target: defId });
+          const session = await TC.spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", target: defId });
           if (!session) return "Terminal permission denied. Approve it in the system prompt and try again.";
           if (session.error) return session.error;
-          const rec = sessions.get(session.id);
+          const rec = TC.sessions.get(session.id);
           if (rec) rec.fromOrchestrator = true;
           return "session " + session.id + " started: " + session.label + " in " + session.cwd +
             " (using your saved default launch — no dialog shown). The app types and submits your taskPrompt automatically once the agent is ready. " +
             "Monitor it with wait_for_session (returns when its turn finishes) — do NOT wait for the process to exit; coding CLIs are REPLs and never do.";
         }
-        const choice = await openSpawnModal({
+        const choice = await TC.openSpawnModal({
           source: "tool",
           cwd,
           prompt: args.taskPrompt || "",
@@ -1232,7 +1230,7 @@ export async function toolHandler(name, args) {
         if (choice.session && choice.session.id) {
           // Mark it as delegated so auto-follow wakes us when it finishes. A
           // terminal the USER opened by hand is theirs and never triggers a turn.
-          const rec = sessions.get(choice.session.id);
+          const rec = TC.sessions.get(choice.session.id);
           if (rec) rec.fromOrchestrator = true;
           return "session " + choice.session.id + " started: " + choice.session.label + " in " + choice.session.cwd +
             ". The app types and submits your taskPrompt automatically once the agent is ready. " +
@@ -1242,8 +1240,8 @@ export async function toolHandler(name, args) {
       }
       case "send_to_session": {
         // Default to the most recently started session if no sessionId given.
-        let s = args.sessionId ? sessions.get(args.sessionId) : null;
-        if (!s && sessions.size) { s = [...sessions.values()].pop(); }
+        let s = args.sessionId ? TC.sessions.get(args.sessionId) : null;
+        if (!s && TC.sessions.size) { s = [...TC.sessions.values()].pop(); }
         if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
         // HARD GUARD: if the session is waiting on a "trust this folder?" prompt
         // and the user chose "Ask each time", ignore any keystrokes from the
@@ -1333,8 +1331,8 @@ export async function toolHandler(name, args) {
             s.pendingQuestion = "";
             s.autoApproveBusy = false;
             if (s._busyTimer) { clearTimeout(s._busyTimer); s._busyTimer = null; }
-            renderTabs();
-            renderSessionInfo();
+            TC.renderTabs();
+            TC.renderSessionInfo();
           }
         } catch (e) {
           return "Error: " + (e && e.message ? e.message : String(e));
@@ -1346,19 +1344,19 @@ export async function toolHandler(name, args) {
         // Now returns a structured header (status + exit code + working dir)
         // above the clean terminal text, so the orchestrator can tell at a
         // glance whether the session is still RUNNING or has EXITED.
-        let s = args.sessionId ? sessions.get(args.sessionId) : null;
-        if (!s && sessions.size) { s = [...sessions.values()].pop(); }
+        let s = args.sessionId ? TC.sessions.get(args.sessionId) : null;
+        if (!s && TC.sessions.size) { s = [...TC.sessions.values()].pop(); }
         if (!s) return "Error: no active sessions. Start one with start_cli_session first.";
-        return await formatSessionStatusOutput(s, null, { full: !!args.full, maxChars: args.maxChars });
+        return await TC.formatSessionStatusOutput(s, null, { full: !!args.full, maxChars: args.maxChars });
       }
       case "list_sessions": {
         // Summarize every coding-agent session at a glance so the orchestrator
         // can coordinate parallel work without guessing from raw screen text.
-        if (!sessions.size) return "No active sessions. Start one with start_cli_session first.";
-        const recs = [...sessions.values()];
+        if (!TC.sessions.size) return "No active sessions. Start one with start_cli_session first.";
+        const recs = [...TC.sessions.values()];
         const tally = { WORKING: 0, IDLE: 0, "NEEDS INPUT": 0, STARTING: 0, EXITED: 0 };
         const lines = recs.map((s) => {
-          const act = sessionActivity(s);
+          const act = TC.sessionActivity(s);
           tally[act] = (tally[act] || 0) + 1;
           let statusPart = act;
           if (act === "EXITED") {
@@ -1396,8 +1394,8 @@ export async function toolHandler(name, args) {
         //   • the agent is blocked needing input (a question, or a prompt the app
         //     couldn't classify)
         //   • the process really did exit
-        let s = args.sessionId ? sessions.get(args.sessionId) : null;
-        if (!s && sessions.size) { s = [...sessions.values()].pop(); }
+        let s = args.sessionId ? TC.sessions.get(args.sessionId) : null;
+        if (!s && TC.sessions.size) { s = [...TC.sessions.values()].pop(); }
         if (!s) return "Error: no such session.";
         const timeout = Math.max(1000, args.timeoutMs || 300000);
         const waitFor = args.waitFor === "exit" ? "exit" : "idle";
@@ -1411,7 +1409,7 @@ export async function toolHandler(name, args) {
         const settledNow = () => {
           if (s.active === false) return "EXITED";
           if (waitFor === "exit") return null;
-          const act = sessionActivity(s);
+          const act = TC.sessionActivity(s);
           // An error loop must break the wait. A retrying agent keeps producing
           // output, so it reads as WORKING indefinitely and this call would
           // otherwise run to its full timeout while nothing progressed.
@@ -1427,15 +1425,15 @@ export async function toolHandler(name, args) {
           reason = settledNow();
         }
         if (reason === "STALLED") {
-          return await formatSessionStatusOutput(
+          return await TC.formatSessionStatusOutput(
             s,
             "[SESSION: " + (s.label || s.id) + " | STATUS: STALLED — the agent has produced almost no output since it was launched]\n" +
             "[LIKELY CAUSE: the task text is sitting in the agent's input box without having been submitted, or the CLI is still on a startup screen. Look at the output below: if you can see the task text next to the input prompt, call send_to_session({ sessionId: \"" + s.id + "\", key: \"enter\" }) to press Enter. If the CLI is showing a menu or dialog, tell the user what it says instead of keystroking it.]"
           );
         }
-        if (s.active === false) return await formatSessionStatusOutput(s);
+        if (s.active === false) return await TC.formatSessionStatusOutput(s);
         if (reason === "IDLE") {
-          return await formatSessionStatusOutput(
+          return await TC.formatSessionStatusOutput(
             s,
             "[SESSION: " + (s.label || s.id) + " | STATUS: RUNNING | AGENT TURN COMPLETE — it has been idle at its input prompt for " +
             Math.round((Date.now() - (s.lastOutputAt || Date.now())) / 1000) + "s]\n" +
@@ -1443,16 +1441,16 @@ export async function toolHandler(name, args) {
           );
         }
         if (reason === "ERROR LOOP") {
-          return await formatSessionStatusOutput(
+          return await TC.formatSessionStatusOutput(
             s,
             "[SESSION: " + (s.label || s.id) + " | STATUS: STUCK ON A REPEATING ERROR (" + (s.errorCount || 0) + "x)]\n" +
             "[ERROR: " + (s.lastErrorText || "(see output)") + "]\n" +
             "[WHAT TO DO: this agent is retrying something that will keep failing. TALK TO IT — call send_to_session({ sessionId: \"" + s.id + "\", text: \"<a plain-language correction>\", key: \"enter\" }) telling it what to do differently. For example, if the error is about image input, tell it that its model cannot read images and it should work from the code instead. Do NOT close this session and do NOT start a second agent in the same worktree — correcting the running agent keeps its context and its work.]"
           );
         }
-        if (reason === "NEEDS INPUT") return await formatSessionStatusOutput(s);
+        if (reason === "NEEDS INPUT") return await TC.formatSessionStatusOutput(s);
         // Timed out while the agent was still actively working.
-        return await formatSessionStatusOutput(
+        return await TC.formatSessionStatusOutput(
           s,
           "[SESSION: " + (s.label || s.id) + " | STATUS: STILL WORKING (timed out after " + timeout + "ms without going idle)]"
         );
@@ -1460,7 +1458,7 @@ export async function toolHandler(name, args) {
       case "list_project_files": {
         const p = resolveProject(args);
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
-        const r = await window.chatoss.terminal.exec(loginShell("ls -la"), { cwd: p.folderPath });
+        const r = await window.chatoss.terminal.exec(TC.loginShell("ls -la"), { cwd: p.folderPath });
         if (r === null) return "Error: terminal permission denied";
         return r.output || "(empty)";
       }
@@ -1543,7 +1541,7 @@ export async function toolHandler(name, args) {
       case "get_current_git_branch": {
         const p = resolveProject(args);
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
-        const r = await window.chatoss.terminal.exec(loginShell("git branch --show-current"), { cwd: p.folderPath });
+        const r = await window.chatoss.terminal.exec(TC.loginShell("git branch --show-current"), { cwd: p.folderPath });
         if (r === null) return "Error: terminal permission denied";
         return (r.output || "").trim() || "(no branch)";
       }
@@ -1618,7 +1616,7 @@ export async function toolHandler(name, args) {
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
         const base = p.folderPath.replace(/\/+$/, "");
         const run = async (cmd) => {
-          const r = await window.chatoss.terminal.exec(loginShell(cmd), { cwd: base });
+          const r = await window.chatoss.terminal.exec(TC.loginShell(cmd), { cwd: base });
           if (r === null) return "Error: terminal permission denied (approve git to continue)";
           return (r.output || "").trim();
         };
@@ -1639,7 +1637,7 @@ export async function toolHandler(name, args) {
         const msg = String(args.message || "").trim();
         if (!msg) return "Error: pass a commit message.";
         const r = await window.chatoss.terminal.exec(
-          loginShell("git add -A && git commit -m " + JSON.stringify(msg)),
+          TC.loginShell("git add -A && git commit -m " + JSON.stringify(msg)),
           { cwd: p.folderPath }
         );
         if (r === null) return "Error: terminal permission denied (approve git to continue)";
@@ -1649,10 +1647,10 @@ export async function toolHandler(name, args) {
       case "git_push": {
         const p = resolveProject(args);
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
-        let r = await window.chatoss.terminal.exec(loginShell("git push"), { cwd: p.folderPath });
+        let r = await window.chatoss.terminal.exec(TC.loginShell("git push"), { cwd: p.folderPath });
         if (r === null) return "Error: terminal permission denied (approve git to continue)";
         if (r.exitCode !== 0 && /no upstream branch|--set-upstream/i.test(r.output || "")) {
-          r = await window.chatoss.terminal.exec(loginShell("git push -u origin HEAD"), { cwd: p.folderPath });
+          r = await window.chatoss.terminal.exec(TC.loginShell("git push -u origin HEAD"), { cwd: p.folderPath });
           if (r === null) return "Error: terminal permission denied (approve git to continue)";
         }
         if (r.exitCode !== 0) return "git push failed (exit " + r.exitCode + "):\n" + r.output;
@@ -1681,30 +1679,38 @@ export async function toolHandler(name, args) {
         const newV = ma + "." + mi + "." + pa;
         appJson.version = newV;
         await window.chatoss.files.writeFile(appJsonPath, JSON.stringify(appJson, null, 2) + "\n");
-        // Keep any matching APP_VERSION constant in root-level JS files in sync.
+        // Keep any matching APP_VERSION constant in root-level JS files (and the
+        // js/ module folder) in sync.
         const updatedFiles = [];
-        try {
-          const entries = await window.chatoss.files.listDir(base);
-          for (const ent of (entries || [])) {
-            if (!ent || ent.kind === "dir") continue;
-            const name = ent.name || "";
-            if (!/\.(js|mjs|cjs)$/.test(name)) continue;
-            const fpath = base + "/" + name;
-            try {
-              const text = await window.chatoss.files.readFile(fpath);
-              if (typeof text !== "string") continue;
-              let changed = false;
-              const updated = text.replace(/(APP_VERSION\s*=\s*["'])([^"']+)(["'])/g, (all, pre, v, post) => {
-                if (v === oldV) { changed = true; return pre + newV + post; }
-                return all;
-              });
-              if (changed) {
-                await window.chatoss.files.writeFile(fpath, updated);
-                updatedFiles.push(name);
+        const scanDir = async (dir, prefix) => {
+          try {
+            const entries = await window.chatoss.files.listDir(dir);
+            for (const ent of (entries || [])) {
+              if (!ent) continue;
+              const name = ent.name || "";
+              if (ent.kind === "dir") {
+                if (name === "js") await scanDir(dir + "/" + name, prefix + name + "/");
+                continue;
               }
-            } catch (e) { /* skip unreadable files */ }
-          }
-        } catch (e) { /* listDir unavailable — app.json alone is still bumped */ }
+              if (!/\.(js|mjs|cjs)$/.test(name)) continue;
+              const fpath = dir + "/" + name;
+              try {
+                const text = await window.chatoss.files.readFile(fpath);
+                if (typeof text !== "string") continue;
+                let changed = false;
+                const updated = text.replace(/(APP_VERSION\s*=\s*["'])([^"']+)(["'])/g, (all, pre, v, post) => {
+                  if (v === oldV) { changed = true; return pre + newV + post; }
+                  return all;
+                });
+                if (changed) {
+                  await window.chatoss.files.writeFile(fpath, updated);
+                  updatedFiles.push(prefix + name);
+                }
+              } catch (e) { /* skip unreadable files */ }
+            }
+          } catch (e) { /* listDir unavailable — app.json alone is still bumped */ }
+        };
+        await scanDir(base, "");
         return "Version bumped " + oldV + " → " + newV + " in app.json" +
           (updatedFiles.length ? " and APP_VERSION in: " + updatedFiles.join(", ") : "") +
           ".\nNext: git_commit, then git_push, then create_release.";
@@ -1728,7 +1734,7 @@ export async function toolHandler(name, args) {
         const appName = appJson.name || p.name || "app";
         const notes = String(args.notes || "").trim() || appName + " " + tag;
         const run = async (cmd) => {
-          const r = await window.chatoss.terminal.exec(loginShell(cmd), { cwd: base });
+          const r = await window.chatoss.terminal.exec(TC.loginShell(cmd), { cwd: base });
           if (r === null) return { denied: true };
           return { denied: false, exitCode: r.exitCode, output: r.output || "" };
         };
@@ -1751,7 +1757,7 @@ export async function toolHandler(name, args) {
             files.push(name);
           }
         } catch (e) {
-          files = ["app.json", "index.html", "app.js", "style.css", "icon.svg", "libs"];
+          files = ["app.json", "index.html", "js", "style.css", "icon.svg", "libs"];
         }
         if (!files.length) return "Error: no app files found to package.";
         const aipName = String(p.name || "app").toLowerCase().replace(/[^a-z0-9._-]+/g, "-") + "-" + tag + ".aip";
@@ -1769,15 +1775,15 @@ export async function toolHandler(name, args) {
         return "Release " + tag + " created with installable assets:\n" + aipName + "\n" + zipName + "\n\n" + rel.output + "\n" + upR.output;
       }
       case "health_check": {
-        return await runHealthCheck();
+        return await TC.runHealthCheck();
       }
       case "worktree_git_status": {
         const branch = String(args.branchName || "").trim();
-        const meta = branch ? worktreeMeta.get(branch) : null;
+        const meta = branch ? TC.worktreeMeta.get(branch) : null;
         const wtPath = (meta && meta.wtPath) || String(args.worktreePath || "").trim();
         if (!wtPath) return "Error: pass branchName (from list_worktrees) or worktreePath.";
         const run = async (cmd) => {
-          const r = await window.chatoss.terminal.exec(loginShell(cmd), { cwd: wtPath });
+          const r = await window.chatoss.terminal.exec(TC.loginShell(cmd), { cwd: wtPath });
           if (r === null) return "Error: terminal permission denied (approve git to continue)";
           return (r.output || "").trim();
         };
@@ -1798,12 +1804,12 @@ export async function toolHandler(name, args) {
         const base = p.folderPath.replace(/\/+$/, "");
         // ONE launch choice for the whole batch: the saved default if pinned,
         // otherwise a single spawn dialog (batchMode — no session spawned yet).
-        const defId = cliDefaultToTargetId(settings.cliDefault);
-        const defTarget = defId ? findLaunchTarget(defId) : null;
+        const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
+        const defTarget = defId ? TC.findLaunchTarget(defId) : null;
         let cli = "";
         let target = defId || null;
         if (!defTarget) {
-          const choice = await openSpawnModal({
+          const choice = await TC.openSpawnModal({
             source: "tool",
             cwd: base,
             prompt: "BATCH: " + tasks.length + " parallel subtasks — pick the launch to use for ALL of them.",
@@ -1820,20 +1826,20 @@ export async function toolHandler(name, args) {
           if (!name || !prompt) { results.push("SKIPPED (missing name/prompt): " + JSON.stringify(t)); continue; }
           const branch = name;
           const wtPath = base + "/.chatoss/worktrees/" + branch;
-          const branchR = await window.chatoss.terminal.exec(loginShell("git branch --show-current"), { cwd: base });
+          const branchR = await window.chatoss.terminal.exec(TC.loginShell("git branch --show-current"), { cwd: base });
           const mainBranch = (branchR && branchR.output || "").trim() || "main";
           const r = await window.chatoss.terminal.exec(
-            loginShell("git worktree add " + JSON.stringify(wtPath) + " -b " + JSON.stringify(branch) + " " + JSON.stringify(mainBranch)),
+            TC.loginShell("git worktree add " + JSON.stringify(wtPath) + " -b " + JSON.stringify(branch) + " " + JSON.stringify(mainBranch)),
             { cwd: base }
           );
           if (r === null) { results.push("FAILED " + name + ": terminal permission denied"); continue; }
           if (r.exitCode !== 0) { results.push("FAILED " + name + ": " + (r.output || "").trim().slice(0, 200)); continue; }
-          worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
-          saveWorktrees();
-          const session = await spawnChosen({ cli, cwd: wtPath, prompt, target });
+          TC.worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
+          TC.saveWorktrees();
+          const session = await TC.spawnChosen({ cli, cwd: wtPath, prompt, target });
           if (!session) { results.push("FAILED " + name + ": terminal permission denied"); continue; }
           if (session.error) { results.push("FAILED " + name + ": " + session.error); continue; }
-          const rec = sessions.get(session.id);
+          const rec = TC.sessions.get(session.id);
           if (rec) rec.fromOrchestrator = true;
           results.push("STARTED " + name + " → session " + session.id + " (branch " + branch + ")");
         }
@@ -1845,7 +1851,7 @@ export async function toolHandler(name, args) {
         if (!p) return "Error: no project selected. Ask the user to add a project folder first.";
         const base = p.folderPath.replace(/\/+$/, "");
         const branch = String(args.branchName || "").trim();
-        const meta = branch ? worktreeMeta.get(branch) : null;
+        const meta = branch ? TC.worktreeMeta.get(branch) : null;
         const wtPath = (meta && meta.wtPath) || String(args.worktreePath || "").trim();
         if (!wtPath && !branch) return "Error: pass branchName or worktreePath of the worktree to delete.";
         const parentBranch = (meta && meta.parentBranch) || "main";
@@ -1854,7 +1860,7 @@ export async function toolHandler(name, args) {
         // branch is deleted — nothing is lost silently.
         if (wtPath) {
           const commitR = await window.chatoss.terminal.exec(
-            loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before deleting " + (branch || wtPath)) + " --allow-empty"),
+            TC.loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before deleting " + (branch || wtPath)) + " --allow-empty"),
             { cwd: wtPath }
           );
           if (commitR === null) return "Error: terminal permission denied (approve git to continue)";
@@ -1863,7 +1869,7 @@ export async function toolHandler(name, args) {
         let discardNote = "";
         if (branch) {
           const logR = await window.chatoss.terminal.exec(
-            loginShell("git log --oneline " + JSON.stringify(parentBranch) + ".." + JSON.stringify(branch)),
+            TC.loginShell("git log --oneline " + JSON.stringify(parentBranch) + ".." + JSON.stringify(branch)),
             { cwd: base }
           );
           if (logR && (logR.output || "").trim()) {
@@ -1871,20 +1877,20 @@ export async function toolHandler(name, args) {
           }
         }
         if (wtPath) {
-          const rmR = await window.chatoss.terminal.exec(loginShell("git worktree remove " + JSON.stringify(wtPath) + " --force"), { cwd: base });
+          const rmR = await window.chatoss.terminal.exec(TC.loginShell("git worktree remove " + JSON.stringify(wtPath) + " --force"), { cwd: base });
           if (rmR === null) return "Error: terminal permission denied (approve git to continue)";
           if (rmR.exitCode !== 0) return "git worktree remove failed (exit " + rmR.exitCode + "):\n" + rmR.output;
         }
         if (branch) {
-          const brR = await window.chatoss.terminal.exec(loginShell("git branch -D " + JSON.stringify(branch)), { cwd: base });
+          const brR = await window.chatoss.terminal.exec(TC.loginShell("git branch -D " + JSON.stringify(branch)), { cwd: base });
           if (brR === null) return "Error: terminal permission denied (approve git to continue)";
           if (brR.exitCode !== 0) return "git branch -D failed (exit " + brR.exitCode + "):\n" + brR.output;
         }
-        if (branch) { worktreeMeta.delete(branch); saveWorktrees(); }
+        if (branch) { TC.worktreeMeta.delete(branch); TC.saveWorktrees(); }
         return "Deleted worktree " + (branch || wtPath) + " (directory removed, branch deleted, bookkeeping purged)." + discardNote;
       }
       case "prune_worktrees": {
-        const entries = [...worktreeMeta.entries()];
+        const entries = [...TC.worktreeMeta.entries()];
         if (!entries.length) return "No worktree bookkeeping entries to prune.";
         const purged = [];
         const kept = [];
@@ -1894,38 +1900,38 @@ export async function toolHandler(name, args) {
           let dirExists = false, branchExists = false;
           if (wtPath) {
             const t = await window.chatoss.terminal.exec(
-              loginShell("test -d " + JSON.stringify(wtPath) + " && echo yes || echo no"),
+              TC.loginShell("test -d " + JSON.stringify(wtPath) + " && echo yes || echo no"),
               { cwd: proj || undefined }
             );
             dirExists = !!(t && (t.output || "").trim() === "yes");
           }
           if (proj && branch) {
             const b = await window.chatoss.terminal.exec(
-              loginShell("git branch --list " + JSON.stringify(branch)),
+              TC.loginShell("git branch --list " + JSON.stringify(branch)),
               { cwd: proj }
             );
             branchExists = !!(b && (b.output || "").trim());
           }
           if (!dirExists && !branchExists) {
-            worktreeMeta.delete(branch);
+            TC.worktreeMeta.delete(branch);
             purged.push(branch + " (dir gone, branch gone)");
           } else {
             kept.push(branch + (dirExists ? "" : " [dir gone]") + (branchExists ? "" : " [branch gone]"));
           }
         }
-        if (purged.length) saveWorktrees();
+        if (purged.length) TC.saveWorktrees();
         // Report real git worktrees on disk that are NOT in bookkeeping.
         let orphans = "";
         const p = resolveProject(args);
         if (p) {
           const base = p.folderPath.replace(/\/+$/, "");
-          const wl = await window.chatoss.terminal.exec(loginShell("git worktree list --porcelain"), { cwd: base });
+          const wl = await window.chatoss.terminal.exec(TC.loginShell("git worktree list --porcelain"), { cwd: base });
           if (wl && wl.output) {
             const real = new Set();
             for (const line of wl.output.split("\n")) {
               if (line.startsWith("worktree ")) real.add(line.slice(9).trim());
             }
-            const known = new Set([...worktreeMeta.values()].map((x) => x && x.wtPath).filter(Boolean));
+            const known = new Set([...TC.worktreeMeta.values()].map((x) => x && x.wtPath).filter(Boolean));
             const orphanPaths = [...real].filter((wp) => wp !== base && !known.has(wp));
             if (orphanPaths.length) {
               orphans = "\nReal git worktrees NOT in bookkeeping (delete with delete_worktree({ worktreePath }) if stale):\n  " + orphanPaths.join("\n  ");
@@ -1951,3 +1957,18 @@ export async function toolHandler(name, args) {
 // ollama model from that picker; picking "claude"/"codex" there launches the
 // real binary directly regardless of this dropdown. The raw:<bin> entries
 // below are a manual fallback for direct launching from the dropdown itself.
+// --- exports ---
+Object.defineProperty(TC, "ORCHESTRATOR_TOOLS", { get: () => ORCHESTRATOR_TOOLS, configurable: true });
+Object.defineProperty(TC, "LEGACY_KEY_BYTES", { get: () => LEGACY_KEY_BYTES, configurable: true });
+TC.hasNativeInput = hasNativeInput;
+TC.sendKey = sendKey;
+TC.sendText = sendText;
+TC.bracketedPasteOn = bracketedPasteOn;
+TC.parseTerminalEscapes = parseTerminalEscapes;
+TC.stripAnsi = stripAnsi;
+TC.cleanApprovalText = cleanApprovalText;
+TC.autoDriveStartup = autoDriveStartup;
+TC.resolveProject = resolveProject;
+TC.resolveBoardId = resolveBoardId;
+TC.toolHandler = toolHandler;
+})();

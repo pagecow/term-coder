@@ -7,8 +7,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const APP_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "app.json"), "utf8"));
 
 // ---------------------------------------------------------------------------
@@ -111,9 +112,9 @@ test("app.json declares terminalCommandPrefixes for the release flow", () => {
   }
 });
 
-test("APP_VERSION in app.js matches app.json's version", () => {
+test("APP_VERSION in js/00-state.js matches app.json's version", () => {
   const m = SRC.match(/const APP_VERSION = "([^"]+)";/);
-  assert(m, "APP_VERSION constant not found in app.js");
+  assert(m, "APP_VERSION constant not found in js/00-state.js");
   assert.strictEqual(m[1], APP_JSON.version,
     "APP_VERSION (" + m[1] + ") drifted from app.json version (" + APP_JSON.version + ")");
 });

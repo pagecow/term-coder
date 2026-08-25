@@ -1,11 +1,11 @@
-import { _lastSystemPrompt, sessions, state, trustMode } from "./00-state.js";
-import { sessionActivity, worktreeMeta } from "./01-sessions.js";
-import { $ } from "./04-dom.js";
-import { activeConversation, getProject } from "./05-util.js";
-import { stripAnsi } from "./06-tools.js";
-export async function buildSystemPrompt() {
-  const c = activeConversation();
-  const p = getProject(state.activeProjectId);
+// 17-system-prompt.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+async function buildSystemPrompt() {
+  const c = TC.activeConversation();
+  const p = TC.getProject(TC.state.activeProjectId);
   let sys = [
     "You are Term Coder, an autonomous software-building orchestrator (like a coding agent).",
     "You build software by DECOMPOSING the user's request into independent parallel subtasks, spawning a sub-agent CLI coding session (claude, codex, etc.) for EACH subtask in its own isolated git worktree, monitoring all of them, and merging the results back together.",
@@ -172,15 +172,15 @@ export async function buildSystemPrompt() {
   sys.push("", "═══════════════════════════════════════════════════════════════",
     "LIVE APP STATE (regenerated every turn — trust this over your memory)",
     "═══════════════════════════════════════════════════════════════", "");
-  if (sessions.size) {
+  if (TC.sessions.size) {
     // LIVE TERMINAL SNAPSHOT. This is the orchestrator's actual view into the
     // terminals: status plus the tail of what each one is showing right now,
     // refreshed every turn with no tool call needed. Before this, the only way to
     // see a terminal was to spend a tool call on read_session, so in practice the
     // orchestrator was flying blind between explicit reads.
-    sys.push("CURRENT SESSIONS (" + sessions.size + ") — live snapshot, refreshed this turn:");
-    for (const s of sessions.values()) {
-      const act = sessionActivity(s);
+    sys.push("CURRENT SESSIONS (" + TC.sessions.size + ") — live snapshot, refreshed this turn:");
+    for (const s of TC.sessions.values()) {
+      const act = TC.sessionActivity(s);
       let status = act;
       if (act === "EXITED") {
         status = "EXITED (code " + ((s.exitCode !== undefined && s.exitCode !== null) ? s.exitCode : "killed") + ")";
@@ -203,7 +203,7 @@ export async function buildSystemPrompt() {
       try {
         if (s.session && typeof s.session.getOutput === "function") {
           const raw = await s.session.getOutput();
-          tail = raw ? stripAnsi(raw) : "";
+          tail = raw ? TC.stripAnsi(raw) : "";
         }
       } catch (e) { /* a dead session just gets no snapshot */ }
       if ((s.trustState === "pending" || s.trustState === "asking") && s.trustMode !== "always" &&
@@ -229,9 +229,9 @@ export async function buildSystemPrompt() {
     sys.push("CURRENT SESSIONS: (none running — nothing has been spawned yet, or all were closed)");
   }
   sys.push("");
-  if (worktreeMeta.size) {
-    sys.push("OPEN WORKTREES (" + worktreeMeta.size + " — created and NOT yet merged):");
-    for (const [branch, m] of worktreeMeta.entries()) {
+  if (TC.worktreeMeta.size) {
+    sys.push("OPEN WORKTREES (" + TC.worktreeMeta.size + " — created and NOT yet merged):");
+    for (const [branch, m] of TC.worktreeMeta.entries()) {
       sys.push("- branch " + branch + " | parent " + (m.parentBranch || "main") + " | path " + (m.wtPath || "(unknown)"));
     }
     sys.push("Merge each of these with merge_worktree({ branchName: <branch> }) once its agent has finished.");
@@ -260,7 +260,7 @@ export async function buildSystemPrompt() {
     sys.push("", "(No Kanban board attached to this conversation. You can still list_boards to see what exists.)");
   }
   const joined = sys.join("\n");
-  _lastSystemPrompt = joined;
+  TC.setLastSystemPrompt(joined);
   return joined;
 }
 
@@ -270,3 +270,6 @@ export async function buildSystemPrompt() {
 // user's patience — either way the orchestrator used to sit there with chips
 // reading "running 6m 05s" and an empty result, unable to make progress. A raced
 // timeout guarantees the engine always gets a string back and the chip resolves.
+// --- exports ---
+TC.buildSystemPrompt = buildSystemPrompt;
+})();

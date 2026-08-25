@@ -5,8 +5,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 test("delete_worktree tool is defined and handled", () => {
   assert(/name: "delete_worktree"/.test(SRC), "delete_worktree schema missing");

@@ -1,11 +1,10 @@
-import { AGENT_ERROR_PATTERNS, MIN_WORK_BYTES, SESSIONS_KEY, TURN_IDLE_MS, WORKTREES_KEY, deadSessions, sessions, state, trustMode } from "./00-state.js";
-import { sqliteDeleteTerminalSession, sqliteHydrateWorktrees, sqliteSyncTerminalSessions, sqliteSyncWorktrees } from "./02-sqlite.js";
-import { $, el } from "./04-dom.js";
-import { basename, saveState } from "./05-util.js";
-import { stripAnsi } from "./06-tools.js";
-import { ensureEmptyHint, renderSessionInfo, renderTabs, selectSession } from "./20-terminal.js";
-export function detectAgentError(text) {
-  for (const re of AGENT_ERROR_PATTERNS) {
+// 01-sessions.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+function detectAgentError(text) {
+  for (const re of TC.AGENT_ERROR_PATTERNS) {
     const m = text.match(re);
     if (!m) continue;
     // Return the whole line for context — the orchestrator needs to know WHAT
@@ -19,7 +18,7 @@ export function detectAgentError(text) {
 
 // Classify what a session is doing right now, without touching the PTY.
 // Returns: "EXITED" | "ERROR LOOP" | "NEEDS INPUT" | "WORKING" | "IDLE" | "STARTING".
-export function sessionActivity(s) {
+function sessionActivity(s) {
   if (!s) return "EXITED";
   if (s.active === false) return "EXITED";
   // Ranked above NEEDS INPUT: an agent stuck retrying a failing call needs
@@ -28,9 +27,9 @@ export function sessionActivity(s) {
   if (s.errorLoop) return "ERROR LOOP";
   if (s.waitingForInput) return "NEEDS INPUT";
   const quietFor = Date.now() - (s.lastOutputAt || 0);
-  if (!s.taskSubmittedAt) return quietFor >= TURN_IDLE_MS ? "IDLE" : "STARTING";
-  if (s.bytesSinceTask < MIN_WORK_BYTES) return "STARTING";
-  if (quietFor < TURN_IDLE_MS) return "WORKING";
+  if (!s.taskSubmittedAt) return quietFor >= TC.TURN_IDLE_MS ? "IDLE" : "STARTING";
+  if (s.bytesSinceTask < TC.MIN_WORK_BYTES) return "STARTING";
+  if (quietFor < TC.TURN_IDLE_MS) return "WORKING";
   // IDLE = quiet at a prompt. Two independent signals, either one suffices:
   //   1. tailAtPrompt — the text heuristic (prompt glyph / idle chrome in the
   //      output tail). This is what opencode/codex sessions kept failing: their
@@ -54,7 +53,7 @@ export function sessionActivity(s) {
 // followed by the clean terminal screen text. Preserves the trust-dialog
 // masking so the orchestrator never sees raw "Do you trust..." text it would
 // try to keystroke past.
-export async function formatSessionStatusOutput(s, statusOverride, opts) {
+async function formatSessionStatusOutput(s, statusOverride, opts) {
   const o = opts || {};
   // Default to the TAIL of the screen. Returning the whole ~64KB scrollback on
   // every read was slow and burned a large chunk of the turn's context for
@@ -64,7 +63,7 @@ export async function formatSessionStatusOutput(s, statusOverride, opts) {
     let clean = "(terminal is empty — no output yet)";
     if (s.session && typeof s.session.getOutput === "function") {
       const text = await s.session.getOutput();
-      clean = text ? stripAnsi(text) : "(terminal is empty — no output yet)";
+      clean = text ? TC.stripAnsi(text) : "(terminal is empty — no output yet)";
       if (clean.length > maxChars) {
         clean = "…(earlier output trimmed — pass full:true to read_session for everything)…\n" + clean.slice(-maxChars);
       }
@@ -139,18 +138,18 @@ export async function formatSessionStatusOutput(s, statusOverride, opts) {
 // may straddle an app restart). Keeping this in memory only made every worktree
 // unmergeable the moment the turn ended. buildSystemPrompt surfaces the live
 // contents to the model, and list_worktrees lets it enumerate them explicitly.
-export const worktreeMeta = new Map();
-export function saveWorktrees() {
+const worktreeMeta = new Map();
+function saveWorktrees() {
   try {
     const arr = [...worktreeMeta.entries()].map(([branch, m]) => Object.assign({ branch }, m));
-    window.chatoss.scopedData.set(WORKTREES_KEY, arr).catch((e) => console.warn("saveWorktrees", e));
+    window.chatoss.scopedData.set(TC.WORKTREES_KEY, arr).catch((e) => console.warn("saveWorktrees", e));
     // Mirror into SQLite so worktrees survive even if scopedData is lost.
-    sqliteSyncWorktrees(arr);
+    TC.sqliteSyncWorktrees(arr);
   } catch (e) { console.warn("saveWorktrees", e); }
 }
-export async function loadWorktrees() {
+async function loadWorktrees() {
   try {
-    const arr = await window.chatoss.scopedData.get(WORKTREES_KEY);
+    const arr = await window.chatoss.scopedData.get(TC.WORKTREES_KEY);
     if (Array.isArray(arr)) {
       for (const m of arr) {
         if (m && m.branch) {
@@ -160,7 +159,7 @@ export async function loadWorktrees() {
     }
   } catch (e) { console.warn("loadWorktrees", e); }
   // Merge in any worktrees recorded in SQLite but missing from scopedData.
-  await sqliteHydrateWorktrees();
+  await TC.sqliteHydrateWorktrees();
 }
 
 // Derive the worktree branch a session's cwd belongs to. Worktrees created by
@@ -168,7 +167,7 @@ export async function loadWorktrees() {
 // path segment is the branch. We also cross-check against worktreeMeta (which
 // records the wtPath per branch) so a branch recorded at creation wins over a
 // guess. Returns null for a cwd that isn't one of our worktrees.
-export function worktreeBranchForCwd(cwd) {
+function worktreeBranchForCwd(cwd) {
   const c = String(cwd || "").replace(/\/+$/, "");
   if (!c) return null;
   // Exact match against a known worktree path — authoritative.
@@ -199,12 +198,12 @@ export function worktreeBranchForCwd(cwd) {
 
 // Build a plain snapshot of one live session record for persistence. Captures the
 // clean tail of its current output so reopening shows what happened.
-export async function snapshotLiveSession(rec) {
+async function snapshotLiveSession(rec) {
   let output = "";
   try {
     if (rec.session && typeof rec.session.getOutput === "function") {
       const raw = await rec.session.getOutput();
-      output = raw ? stripAnsi(raw) : "";
+      output = raw ? TC.stripAnsi(raw) : "";
     }
   } catch (e) { /* a dead session just gets no output */ }
   // Keep the tail manageable — a full ~64KB scrollback per session would bloat
@@ -237,28 +236,33 @@ export async function snapshotLiveSession(rec) {
 // Persist the union of live + dead sessions to scopedData. Fire-and-forget but
 // never leaves an unhandled rejection. Called debounced during a live run and
 // eagerly on exit/close/delete.
-export let _persistSessionsTimer = null;
-export function schedulePersistSessions() {
+let _persistSessionsTimer = null;
+// Other modules (the init flush handler) must cancel a pending debounce
+// without touching the timer binding itself — it is exported read-only.
+function cancelPendingPersistSessions() {
+  if (_persistSessionsTimer) { clearTimeout(_persistSessionsTimer); _persistSessionsTimer = null; }
+}
+function schedulePersistSessions() {
   if (_persistSessionsTimer) return;
   _persistSessionsTimer = setTimeout(() => {
     _persistSessionsTimer = null;
     persistSessions().catch((e) => console.warn("schedulePersistSessions", e));
   }, 1500);
 }
-export async function persistSessions() {
+async function persistSessions() {
   try {
     // Live sessions need an async output read; dead sessions are already plain.
     const liveSnaps = [];
-    for (const rec of sessions.values()) {
+    for (const rec of TC.sessions.values()) {
       try { liveSnaps.push(await snapshotLiveSession(rec)); } catch (e) { /* skip */ }
     }
-    const deadSnaps = [...deadSessions.values()];
+    const deadSnaps = [...TC.deadSessions.values()];
     // Live ones first (most recent activity on top), then dead ones, newest first.
     const all = liveSnaps.concat(deadSnaps);
     // Mirror into the SQLite metadata table (History browser) alongside the
     // scopedData blob. The OS terminal store is the real durable record.
-    sqliteSyncTerminalSessions(all);
-    await window.chatoss.scopedData.set(SESSIONS_KEY, all);
+    TC.sqliteSyncTerminalSessions(all);
+    await window.chatoss.scopedData.set(TC.SESSIONS_KEY, all);
   } catch (e) { console.warn("persistSessions", e); }
 }
 
@@ -266,15 +270,15 @@ export async function persistSessions() {
 // ended cards. Called once at init, BEFORE the UI renders, so the Sessions column
 // shows prior terminals immediately. A snapshot whose status was "working" at the
 // last save is shown as "ended" (the PTY is necessarily gone across a reopen).
-export async function loadPersistedSessions() {
+async function loadPersistedSessions() {
   try {
-    const arr = await window.chatoss.scopedData.get(SESSIONS_KEY);
+    const arr = await window.chatoss.scopedData.get(TC.SESSIONS_KEY);
     if (!Array.isArray(arr)) return;
     for (const s of arr) {
       if (!s || !s.id) continue;
       // If a live session with the same id somehow already exists this run, don't
       // shadow it with a dead card.
-      if (sessions.has(s.id)) continue;
+      if (TC.sessions.has(s.id)) continue;
       // Anything persisted across a reopen is, by definition, no longer live.
       const snap = {
         id: s.id,
@@ -291,7 +295,7 @@ export async function loadPersistedSessions() {
         output: s.output || "",
         merged: !!s.merged,
       };
-      deadSessions.set(snap.id, snap);
+      TC.deadSessions.set(snap.id, snap);
     }
   } catch (e) { console.warn("loadPersistedSessions", e); }
 }
@@ -299,7 +303,7 @@ export async function loadPersistedSessions() {
 // Render the read-only "ended" card for a dead/persisted session into the grid.
 // Shows the agent, working dir, an ended indicator, and the captured output tail.
 // NOT live — there is no xterm mount, no input. Has only a Dismiss (✕) button.
-export function renderDeadSessionCard(snap) {
+function renderDeadSessionCard(snap) {
   const square = document.createElement("div");
   square.className = "term-square term-square-ended";
   square.dataset.deadId = snap.id;
@@ -315,7 +319,7 @@ export function renderDeadSessionCard(snap) {
   lab.textContent = snap.label + (snap.status === "exited" ? " (exited)" : " (ended)");
   const cwdEl = document.createElement("span");
   cwdEl.className = "term-cwd";
-  cwdEl.textContent = basename(snap.cwd);
+  cwdEl.textContent = TC.basename(snap.cwd);
   cwdEl.title = snap.cwd;
   const dismissBtn = document.createElement("button");
   dismissBtn.className = "term-head-btn term-close-btn";
@@ -365,13 +369,13 @@ export function renderDeadSessionCard(snap) {
   square.appendChild(resizeY);
 
   // insert before the empty-state card so the grid stays clean
-  if (el.termEmpty && el.termEmpty.parentNode === el.termGrid) el.termGrid.insertBefore(square, el.termEmpty);
-  else el.termGrid.appendChild(square);
+  if (TC.el.termEmpty && TC.el.termEmpty.parentNode === TC.el.termGrid) TC.el.termGrid.insertBefore(square, TC.el.termEmpty);
+  else TC.el.termGrid.appendChild(square);
 
   // clicking selects it (highlights); dismiss removes it
   square.addEventListener("click", (e) => {
     if (e.target === dismissBtn) return;
-    selectSession(snap.id);
+    TC.selectSession(snap.id);
   });
   dismissBtn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -382,23 +386,23 @@ export function renderDeadSessionCard(snap) {
 }
 
 // Remove a dead/persisted session from the UI + memory + scopedData.
-export async function dismissDeadSession(id) {
-  const snap = deadSessions.get(id);
+async function dismissDeadSession(id) {
+  const snap = TC.deadSessions.get(id);
   if (!snap) return;
-  deadSessions.delete(id);
+  TC.deadSessions.delete(id);
   // Remove the card from the DOM.
-  const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
+  const card = TC.el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
   if (card) card.remove();
-  if (state.activeSessionId === id) {
-    state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
+  if (TC.state.activeSessionId === id) {
+    TC.state.activeSessionId = TC.sessions.size ? TC.sessions.keys().next().value : null;
   }
-  saveState();
-  ensureEmptyHint();
-  renderTabs();
-  renderSessionInfo();
+  TC.saveState();
+  TC.ensureEmptyHint();
+  TC.renderTabs();
+  TC.renderSessionInfo();
   // Also delete the OS-persisted record + SQLite metadata row.
   try { await window.chatoss.terminal.killSession(id); } catch (e) { /* non-fatal */ }
-  await sqliteDeleteTerminalSession(id);
+  await TC.sqliteDeleteTerminalSession(id);
   await persistSessions();
 }
 
@@ -436,4 +440,20 @@ export async function dismissDeadSession(id) {
 //   sendMessage.onToolCall -> sqlitePersistToolCall(c.id, entry)
 //   init()                 -> hydrateFromSqlite(), loadPlatformSessions(),
 //                             initHistoryBrowser()
-
+// --- exports ---
+Object.defineProperty(TC, "worktreeMeta", { get: () => worktreeMeta, configurable: true });
+Object.defineProperty(TC, "_persistSessionsTimer", { get: () => _persistSessionsTimer, set: (v) => { _persistSessionsTimer = v; }, configurable: true });
+TC.detectAgentError = detectAgentError;
+TC.sessionActivity = sessionActivity;
+TC.formatSessionStatusOutput = formatSessionStatusOutput;
+TC.saveWorktrees = saveWorktrees;
+TC.loadWorktrees = loadWorktrees;
+TC.worktreeBranchForCwd = worktreeBranchForCwd;
+TC.snapshotLiveSession = snapshotLiveSession;
+TC.cancelPendingPersistSessions = cancelPendingPersistSessions;
+TC.schedulePersistSessions = schedulePersistSessions;
+TC.persistSessions = persistSessions;
+TC.loadPersistedSessions = loadPersistedSessions;
+TC.renderDeadSessionCard = renderDeadSessionCard;
+TC.dismissDeadSession = dismissDeadSession;
+})();

@@ -1,11 +1,11 @@
 // History-view fix verification tests for Term Coder (Tasks 1, 2, 3).
 //
-// app.js is a browser module (top-level `window`/`document`/`window.chatoss`
-// references + an auto-running `init()`), so it can't be `require`d whole in
-// Node. These tests follow the same convention as tests/audit-fixes.test.js:
-//   1. Read the REAL app.js source as text and parse the pure functions out of
-//      it (sqliteInterpolate / sqliteLiteral) so the tests fail if the source
-//      drifts away from the required behavior.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// These tests follow the same convention as tests/audit-fixes.test.js:
+//   1. Read the REAL module sources as text and parse the pure functions out
+//      of them (sqliteInterpolate / sqliteLiteral) so the tests fail if the
+//      source drifts away from the required behavior.
 //   2. Replicate the verbatim decision logic of historyViewTerminal's output
 //      fallback (with source-line citations) and assert it never surfaces a raw
 //      "no such terminal session" error to the user.
@@ -15,8 +15,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 // ---------------------------------------------------------------------------
 // Helpers: pull sqliteInterpolate + sqliteLiteral VERBATIM out of app.js and

@@ -14,24 +14,26 @@
 //      DETAILED prompts naming exact files, so a trivial "create a component +
 //      wire it + test it" brief that named 4 files landed on "high".
 //
-// These tests extract the REAL assessComplexity() body from app.js and execute
-// it against controlled prompts, following the audit-fixes / default-launch
-// test pattern (app.js is a browser module and can't be require()d whole).
+// These tests extract the REAL assessComplexity() body from js/09-complexity.js
+// and execute it against controlled prompts, following the audit-fixes /
+// default-launch test pattern (the app is split into classic scripts under js/
+// and can't be require()d whole).
 //
 // Run: node tests/complexity-assessment.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { moduleSrc, makeTC } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = moduleSrc("09-complexity.js");
 
 // Brace-balance extract the body of a top-level `function name(...)` and make
 // it callable (mirrors default-launch-apply.test.js).
 function extractCallable(src, name, paramNames) {
   const header = new RegExp("function " + name + "\\s*\\([^)]*\\)\\s*\\{");
   const m = header.exec(src);
-  assert(m, "function " + name + " not found in app.js");
+  assert(m, "function " + name + " not found in js/09-complexity.js");
   let i = m.index + m[0].length;
   let depth = 1;
   while (i < src.length && depth > 0) {
@@ -45,7 +47,8 @@ function extractCallable(src, name, paramNames) {
   return Function(...paramNames, src.slice(m.index + m[0].length, i - 1));
 }
 
-const assessComplexity = extractCallable(SRC, "assessComplexity", ["taskPrompt"]);
+const assessComplexity = extractCallable(SRC, "assessComplexity", ["taskPrompt", "TC"]);
+const TC = makeTC();
 
 test("keyword matching uses word boundaries, not raw substring includes", () => {
   // The fix must not use text.includes for the HIGH/MED loops (that is the

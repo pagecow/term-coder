@@ -11,16 +11,19 @@
 //      (persisted per project in state.sectionCollapsed).
 //   6. Cmd/Ctrl+N starts a new chat in the current project.
 //
-// app.js is a browser module, so these tests grep the real source/HTML/CSS for
-// the wiring and replicate the decision predicates verbatim.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so these tests grep the real module
+// sources/HTML/CSS for the wiring and replicate the decision predicates
+// verbatim.
 //
 // Run: node tests/sidebar-new-chat.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const HTML = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const CSS = fs.readFileSync(path.join(__dirname, "..", "style.css"), "utf8");
 
@@ -104,7 +107,7 @@ test("first post: the sidebar re-renders on a conversation's first real message"
   // sendMessage must reveal the formerly-hidden chat even when the name was
   // not a 'Conversation N' placeholder (renamedConv false).
   const fn = SRC.slice(SRC.indexOf("async function sendMessage("), SRC.indexOf("async function runOrchestratorTurn"));
-  assert(/if \(renamedConv \|\| \(wasFirstUserMsg && !o\.event\)\) \{ renderProjects\(\); renderSessionInfo\(\); \}/.test(fn),
+  assert(/if \(renamedConv \|\| \(wasFirstUserMsg && !o\.event\)\) \{ TC\.renderProjects\(\); TC\.renderSessionInfo\(\); \}/.test(fn),
     "sendMessage must renderProjects on the first post, not only on rename");
 });
 
@@ -117,7 +120,7 @@ test("sections: Files and Sessions default to collapsed (false means expanded)",
   assert(/sec\.sessions !== false/.test(SRC), "Sessions collapse must default to collapsed");
   assert(/function toggleProjSection\(pid, key\)/.test(SRC), "toggleProjSection missing");
   assert(/state\.sectionCollapsed\[pid\] = Object\.assign/.test(SRC), "toggle must persist per project");
-  assert(/sectionCollapsed: \{\}/.test(SRC), "sectionCollapsed must be in the init defaults");
+  assert(/if \(!TC\.state\.sectionCollapsed\) TC\.state\.sectionCollapsed = \{\};/.test(SRC), "sectionCollapsed must be in the init defaults");
 });
 
 test("sections: heads are toggles with a chevron; bodies hide when collapsed", () => {
@@ -146,7 +149,7 @@ test("shortcut: Cmd/Ctrl+N starts a new chat in the current project", () => {
   const i = SRC.indexOf('e.code === "KeyN"');
   assert(i >= 0, "Cmd/Ctrl+N handler missing");
   const block = SRC.slice(i, i + 400);
-  assert(/e\.preventDefault\(\);\s*newChatFromTopbar\(\);/.test(block),
+  assert(/e\.preventDefault\(\);\s*TC\.newChatFromTopbar\(\);/.test(block),
     "Cmd/Ctrl+N must preventDefault and call newChatFromTopbar()");
   assert(/metaKey \|\| e\.ctrlKey/.test(SRC.slice(Math.max(0, i - 300), i)),
     "combo must require meta/ctrl so a plain 'n' never triggers it");

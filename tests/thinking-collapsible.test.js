@@ -9,25 +9,27 @@
 // streaming, the widget STAYS collapsed (the word count ticks up in the header)
 // and never auto-expands.
 //
-// app.js is a browser module, so it can't be `require`d whole in Node. Same
-// approach as the other test files: read the REAL app.js source, extract the
-// real `createThinkingWidget` function, and EXECUTE it against a tiny DOM mock
-// so we assert the actual runtime behavior (not just source strings).
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// Same approach as the other test files: read the REAL module sources, extract
+// the real `createThinkingWidget` function, and EXECUTE it against a tiny DOM
+// mock so we assert the actual runtime behavior (not just source strings).
 //
 // Run: node tests/thinking-collapsible.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 // Extract a top-level `function NAME(...) { ... }` whose closing brace sits at
 // column 0, and return a factory that evaluates it in a sandbox.
 function extractFunction(src, name) {
   const re = new RegExp("(?:async )?function " + name + "\\([^)]*\\) \\{[\\s\\S]*?\\n\\}");
   const m = src.match(re);
-  assert(m, name + " not found in app.js");
+  assert(m, name + " not found in the modules");
   // eslint-disable-next-line no-new-func
   return new Function("sandbox", "with (sandbox) { " + m[0] + " return " + name + "; }");
 }

@@ -1,20 +1,11 @@
-import { abortController, defaultModelId, models, running } from "./00-state.js";
-import { sqlitePersistToolCall } from "./02-sqlite.js";
-import { $, el } from "./04-dom.js";
-import { activeConversation, normalizeToolCall, saveState, setStatus, uuid } from "./05-util.js";
-import { ORCHESTRATOR_TOOLS, toolHandler } from "./06-tools.js";
-import { nameFromFirstMessage, renderProjects } from "./11-projects.js";
-import { renderMarkdown } from "./12-markdown.js";
-import { chatAutoScroll, createActivityCard, createThinkingWidget, createToolChip, createTypingIndicator, maybeScrollChatBottom, renderMessage, scrollChatBottom, updateChatEmpty } from "./13-chat.js";
-import { selectedEffort, selectedModel } from "./14-models.js";
-import { renderTokenEstimator } from "./15-tokens.js";
-import { buildMessageContent, clearAttachments } from "./16-attachments.js";
-import { buildSystemPrompt } from "./17-system-prompt.js";
-import { renderSessionInfo } from "./20-terminal.js";
-import { pendingChoices } from "./21-askchoice.js";
-export const TOOL_TIMEOUT_MS = 90 * 1000;
-export const TOOL_TIMEOUT_OVERRIDES = { wait_for_session: 15 * 60 * 1000 };
-export async function runToolWithTimeout(name, args, signal) {
+// 18-send.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+const TOOL_TIMEOUT_MS = 90 * 1000;
+const TOOL_TIMEOUT_OVERRIDES = { wait_for_session: 15 * 60 * 1000 };
+async function runToolWithTimeout(name, args, signal) {
   const limit = TOOL_TIMEOUT_OVERRIDES[name] || TOOL_TIMEOUT_MS;
   let timer = null;
   let onAbort = null;
@@ -33,7 +24,7 @@ export async function runToolWithTimeout(name, args, signal) {
   });
   try {
     return await Promise.race([
-      toolHandler(name, args),
+      TC.toolHandler(name, args),
       abortPromise,
       new Promise((resolve) => {
         timer = setTimeout(() => resolve(
@@ -50,58 +41,58 @@ export async function runToolWithTimeout(name, args, signal) {
   }
 }
 
-export function setRunning(r) {
-  running = r;
+function setRunning(r) {
+  TC.updateRunning(r);
   syncSendButton();
   // The composer stays ENABLED while a turn runs so the user can interrupt the
   // orchestrator with a new message (see interruptAndSend). Only the placeholder
   // changes to advertise that.
   if (r) {
-    el.chatInput.placeholder = "Type to interrupt the orchestrator…";
+    TC.el.chatInput.placeholder = "Type to interrupt the orchestrator…";
   } else {
-    el.chatInput.placeholder = activeConversation() ? "Ask the orchestrator to build something…" : "Select or create a conversation…";
+    TC.el.chatInput.placeholder = TC.activeConversation() ? "Ask the orchestrator to build something…" : "Select or create a conversation…";
   }
 }
 
 // The send button doubles as Stop while a turn runs. When the user has typed a
 // message, the button flips back to Send — submitting it interrupts the current
 // turn and delivers the message (see interruptAndSend).
-export function syncSendButton() {
-  const hasText = !!(el.chatInput && el.chatInput.value && el.chatInput.value.trim());
-  const isStop = running && !hasText;
-  el.sendBtn.classList.toggle("is-running", isStop);
-  el.sendBtn.title = isStop ? "Stop" : "Send";
-  el.sendBtn.setAttribute("aria-label", isStop ? "Stop" : "Send");
-  if (el.sendIcon) el.sendIcon.classList.toggle("hidden", isStop);
-  if (el.stopIcon) el.stopIcon.classList.toggle("hidden", !isStop);
+function syncSendButton() {
+  const hasText = !!(TC.el.chatInput && TC.el.chatInput.value && TC.el.chatInput.value.trim());
+  const isStop = TC.running && !hasText;
+  TC.el.sendBtn.classList.toggle("is-running", isStop);
+  TC.el.sendBtn.title = isStop ? "Stop" : "Send";
+  TC.el.sendBtn.setAttribute("aria-label", isStop ? "Stop" : "Send");
+  if (TC.el.sendIcon) TC.el.sendIcon.classList.toggle("hidden", isStop);
+  if (TC.el.stopIcon) TC.el.stopIcon.classList.toggle("hidden", !isStop);
 }
 
 // textOverride lets the app itself start a turn (see autoFollowTick). opts.event
 // marks the message as an app-generated event so it renders distinctly from
 // something the user actually typed.
-export async function sendMessage(textOverride, opts) {
+async function sendMessage(textOverride, opts) {
   const o = opts || {};
-  const c = activeConversation();
-  if (!c) { setStatus("Select or create a conversation first."); return; }
-  if (running) return;
+  const c = TC.activeConversation();
+  if (!c) { TC.setStatus("Select or create a conversation first."); return; }
+  if (TC.running) return;
   // An app-generated/event turn (e.g. an auto-follow wake) must NOT start
   // while a permission/choice prompt is awaiting the user — it would create a
   // fresh streaming UI on top of the active prompt. Drop it; the next
   // autoFollowTick retries once the prompt is answered. This guard only
   // applies to event (automatic) sends, so a user who deliberately types
   // while a prompt is up can still send.
-  if (o.event && pendingChoices > 0) return;
-  const text = textOverride != null ? String(textOverride).trim() : el.chatInput.value.trim();
+  if (o.event && TC.pendingChoices > 0) return;
+  const text = textOverride != null ? String(textOverride).trim() : TC.el.chatInput.value.trim();
   if (!text) return;
-  if (textOverride == null) el.chatInput.value = "";
+  if (textOverride == null) TC.el.chatInput.value = "";
 
   // Build the user message content: if there are attachments, embed file
   // contents and pass images as multimodal parts; otherwise just the text.
-  const content = buildMessageContent(text);
+  const content = TC.buildMessageContent(text);
   const userMsg = { role: "user", content };
   if (o.event) userMsg.event = true;
   // Clear the attachment strip after the message is consumed.
-  if (textOverride == null) clearAttachments();
+  if (textOverride == null) TC.clearAttachments();
   // Name the conversation from the user's first real (non-event) message,
   // replacing the "Conversation N" placeholder — but only if the user hasn't
   // already renamed it by hand. This covers every conversation regardless of
@@ -109,17 +100,17 @@ export async function sendMessage(textOverride, opts) {
   const wasFirstUserMsg = !c.messages.some((m) => m.role === "user" && !m.event);
   let renamedConv = false;
   if (wasFirstUserMsg && !o.event && /^Conversation \d+$/.test(c.name)) {
-    c.name = nameFromFirstMessage(text, c.name);
+    c.name = TC.nameFromFirstMessage(text, c.name);
     renamedConv = true;
   }
   c.messages.push(userMsg);
-  saveState();
+  TC.saveState();
   // The conversation is hidden from the sidebar until its first post — reveal
   // it now (also renames the "Conversation N" placeholder on that same post).
-  if (renamedConv || (wasFirstUserMsg && !o.event)) { renderProjects(); renderSessionInfo(); }
-  renderMessage(userMsg);
-  scrollChatBottom(false);
-  updateChatEmpty();
+  if (renamedConv || (wasFirstUserMsg && !o.event)) { TC.renderProjects(); TC.renderSessionInfo(); }
+  TC.renderMessage(userMsg);
+  TC.scrollChatBottom(false);
+  TC.updateChatEmpty();
 
   await runOrchestratorTurn(c);
 }
@@ -128,29 +119,29 @@ export async function sendMessage(textOverride, opts) {
 // executes tool calls, and persists the assistant message. Extracted from
 // sendMessage so interruptAndSend can start a fresh turn after aborting an
 // in-flight one. Callers must have already pushed the user message.
-export async function runOrchestratorTurn(c) {
+async function runOrchestratorTurn(c) {
   setRunning(true);
-  setStatus("Generating…");
-  abortController = new AbortController();
-  chatAutoScroll = true;
+  TC.setStatus("Generating…");
+  TC.setAbortController(new AbortController());
+  TC.setChatAutoScroll(true);
 
   // Snapshot the picker choices onto the conversation so history replays
   // with the same model/effort that was actually used.
-  const modelId = selectedModel() || defaultModelId;
-  const modelInfo = models.find((m) => m.id === modelId);
+  const modelId = TC.selectedModel() || TC.defaultModelId;
+  const modelInfo = TC.models.find((m) => m.id === modelId);
   const canThink = !!(modelInfo && modelInfo.capabilities && modelInfo.capabilities.includes("reasoning"));
-  const effort = selectedEffort();
+  const effort = TC.selectedEffort();
   if (modelId) { c.modelId = modelId; }
   // Persist the effort if one was chosen, even if the model doesn't explicitly
   // advertise "reasoning" in capabilities — many cloud models accept an effort
   // override even when listModels() doesn't enumerate the levels.
   c.effort = effort || null;
-  saveState();
+  TC.saveState();
 
   // Typing indicator — shown until the first content token streams in.
-  const typingRow = createTypingIndicator();
-  el.chatLog.appendChild(typingRow);
-  maybeScrollChatBottom();
+  const typingRow = TC.createTypingIndicator();
+  TC.el.chatLog.appendChild(typingRow);
+  TC.maybeScrollChatBottom();
 
   // Live assistant row — MUST be in the DOM before streaming so tokens are
   // visible and tool chips can be inserted before it. Hidden until first token.
@@ -171,7 +162,7 @@ export async function runOrchestratorTurn(c) {
   liveCol.appendChild(liveBody);
   liveRow.appendChild(liveAvatar);
   liveRow.appendChild(liveCol);
-  el.chatLog.appendChild(liveRow);
+  TC.el.chatLog.appendChild(liveRow);
 
   let liveThink = null;
   let accContent = "";
@@ -191,8 +182,8 @@ export async function runOrchestratorTurn(c) {
   let activityCard = null;
   const ensureActivityCard = () => {
     if (!activityCard) {
-      activityCard = createActivityCard();
-      el.chatLog.insertBefore(activityCard, liveRow);
+      activityCard = TC.createActivityCard();
+      TC.el.chatLog.insertBefore(activityCard, liveRow);
     }
     return activityCard;
   };
@@ -203,8 +194,8 @@ export async function runOrchestratorTurn(c) {
   let rafId = 0;
   const flushContent = () => {
     rafId = 0;
-    liveBody.innerHTML = renderMarkdown(accContent) + '<span class="md-stream-cursor" aria-hidden="true"></span>';
-    maybeScrollChatBottom();
+    liveBody.innerHTML = TC.renderMarkdown(accContent) + '<span class="md-stream-cursor" aria-hidden="true"></span>';
+    TC.maybeScrollChatBottom();
   };
   const scheduleFlush = () => {
     if (rafId) return;
@@ -212,7 +203,7 @@ export async function runOrchestratorTurn(c) {
   };
 
   try {
-    const systemPrompt = await buildSystemPrompt();
+    const systemPrompt = await TC.buildSystemPrompt();
     const msgs = [{ role: "system", content: systemPrompt }];
     for (const m of c.messages) {
       if (m.role === "user" || m.role === "assistant") {
@@ -223,7 +214,7 @@ export async function runOrchestratorTurn(c) {
     const result = await window.chatoss.chat.runTurn({
       model: modelId,
       messages: msgs,
-      tools: ORCHESTRATOR_TOOLS,
+      tools: TC.ORCHESTRATOR_TOOLS,
       onToken: (t) => {
         if (!t) return;
         if (!firstTokenSeen) {
@@ -250,20 +241,20 @@ export async function runOrchestratorTurn(c) {
           typingRow.remove();
         }
         if (!liveThink) {
-          liveThink = createThinkingWidget("", { streaming: true });
+          liveThink = TC.createThinkingWidget("", { streaming: true });
           ensureActivityCard()._addThinking(liveThink);
-          maybeScrollChatBottom();
+          TC.maybeScrollChatBottom();
         }
         accThink += t;
         liveThink._update(accThink);
       },
       onToolCall: async (call) => {
-        const { name, args } = normalizeToolCall(call);
-        const entry = { id: uuid(), name, args, result: undefined, error: undefined };
+        const { name, args } = TC.normalizeToolCall(call);
+        const entry = { id: TC.uuid(), name, args, result: undefined, error: undefined };
         liveToolCalls.push(entry);
         // Persist the tool call to SQLite as it happens (result updated below),
         // so tool history survives even if the app dies mid-turn.
-        sqlitePersistToolCall(c.id, entry);
+        TC.sqlitePersistToolCall(c.id, entry);
         if (!firstTokenSeen) {
           firstTokenSeen = true;
           typingRow.remove();
@@ -271,42 +262,42 @@ export async function runOrchestratorTurn(c) {
         }
         // Add a compact chip inside the stable activity card (fixed height,
         // internal scroll) so the layout never jumps as tools fire.
-        const chip = createToolChip(name, args);
+        const chip = TC.createToolChip(name, args);
         liveChips.push(chip);
         ensureActivityCard()._addChip(chip);
         if (accContent) segmentBreakPending = true;
-        maybeScrollChatBottom();
+        TC.maybeScrollChatBottom();
         try {
-          const res = await runToolWithTimeout(name, args, abortController.signal);
+          const res = await runToolWithTimeout(name, args, TC.abortController.signal);
           entry.result = res;
-          sqlitePersistToolCall(c.id, entry);
+          TC.sqlitePersistToolCall(c.id, entry);
           chip._setResult(res);
           return res; // string result feeds back into the engine's tool loop
         } catch (e) {
           const err = "Error: " + (e && e.message ? e.message : String(e));
           entry.error = err;
-          sqlitePersistToolCall(c.id, entry);
+          TC.sqlitePersistToolCall(c.id, entry);
           chip._setError(err);
           return err;
         }
       },
       think: canThink || !!effort,            // request reasoning if the model supports it OR the user asked for an effort level
       thinkLevel: effort || undefined,         // pass the chosen level when set; undefined lets the model use its default
-      signal: abortController.signal,
+      signal: TC.abortController.signal,
     });
 
     // Flush any tail content that was queued behind a rAF, then drop the cursor.
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
-    liveBody.innerHTML = renderMarkdown(accContent);
+    liveBody.innerHTML = TC.renderMarkdown(accContent);
     if (liveThink) liveThink._finalize();
 
     const content = result && result.content ? result.content : accContent;
     const thinking = result && result.thinking ? result.thinking : accThink;
 
     if (result && result.aborted) {
-      setStatus(interruptDeliveryActive ? "Interrupted — continuing…" : "Stopped");
+      TC.setStatus(interruptDeliveryActive ? "Interrupted — continuing…" : "Stopped");
     } else {
-      setStatus("");
+      TC.setStatus("");
     }
 
     typingRow.remove();
@@ -324,7 +315,7 @@ export async function runOrchestratorTurn(c) {
       // result, so replayed chips had nothing to show and rendered as unfinished.
       // Merge instead: consume live entries in order, matched by tool name.
       const pending = liveToolCalls.slice();
-      storedToolCalls = result.toolCalls.map(normalizeToolCall).map((tc) => {
+      storedToolCalls = result.toolCalls.map(TC.normalizeToolCall).map((tc) => {
         const i = pending.findIndex((p) => p.name === tc.name);
         if (i === -1) return tc;
         const live = pending.splice(i, 1)[0];
@@ -342,9 +333,9 @@ export async function runOrchestratorTurn(c) {
         thinking: thinking || undefined,
         toolCalls: storedToolCalls,
       });
-      saveState();
-      renderMessage(c.messages[c.messages.length - 1]);
-      maybeScrollChatBottom();
+      TC.saveState();
+      TC.renderMessage(c.messages[c.messages.length - 1]);
+      TC.maybeScrollChatBottom();
     }
   } catch (e) {
     typingRow.remove();
@@ -352,7 +343,7 @@ export async function runOrchestratorTurn(c) {
     // On error there is no saved assistant message to rebuild the card from, so
     // KEEP the live card (collapsed) — it's the only record of what ran.
     if (activityCard) activityCard._finish();
-    setStatus("");
+    TC.setStatus("");
     if (interruptDeliveryActive) {
       // The abort was an interrupt-and-continue delivery: the user's new message
       // is already in history and a fresh turn starts right after this unwinds.
@@ -360,9 +351,9 @@ export async function runOrchestratorTurn(c) {
     } else {
       const msg = "Error: " + (e && e.message ? e.message : String(e));
       c.messages.push({ role: "system", content: msg });
-      saveState();
-      renderMessage({ role: "system", content: msg });
-      maybeScrollChatBottom();
+      TC.saveState();
+      TC.renderMessage({ role: "system", content: msg });
+      TC.maybeScrollChatBottom();
     }
   } finally {
     // Nothing may be left spinning. If the turn ended (normally, by error, or by
@@ -372,8 +363,8 @@ export async function runOrchestratorTurn(c) {
       if (ch.classList.contains("is-running") && typeof ch._setInterrupted === "function") ch._setInterrupted();
     }
     setRunning(false);
-    abortController = null;
-    renderTokenEstimator();
+    TC.setAbortController(null);
+    TC.renderTokenEstimator();
   }
 }
 
@@ -388,20 +379,20 @@ export async function runOrchestratorTurn(c) {
 // so "deliver to the orchestrator" = abort the in-flight runTurn and start the
 // next one. (Sub-agent CLI sessions are driven by the orchestrator's own
 // send_to_session tool, which already uses paste() + key('enter').)
-export let midRunDeliveryInFlight = false;   // double-submission guard
-export let interruptDeliveryActive = false;   // set while aborting for a delivery, so the
+let midRunDeliveryInFlight = false;   // double-submission guard
+let interruptDeliveryActive = false;   // set while aborting for a delivery, so the
                                       // interrupted turn skips saving a partial reply
 
 // Resolves when the in-flight orchestrator turn has fully unwound (its finally
 // clears `running`). The abort signal makes the engine end the turn promptly;
 // the timeout is a safety net so a stuck turn can never wedge the composer.
-export function waitForTurnEnd(timeoutMs) {
+function waitForTurnEnd(timeoutMs) {
   const limit = timeoutMs || 30000;
   return new Promise((resolve) => {
-    if (!running) { resolve(); return; }
+    if (!TC.running) { resolve(); return; }
     const started = Date.now();
     const iv = setInterval(() => {
-      if (!running || Date.now() - started >= limit) {
+      if (!TC.running || Date.now() - started >= limit) {
         clearInterval(iv);
         resolve();
       }
@@ -409,13 +400,13 @@ export function waitForTurnEnd(timeoutMs) {
   });
 }
 
-export async function interruptAndSend(text) {
+async function interruptAndSend(text) {
   if (midRunDeliveryInFlight) {
-    setStatus("Already delivering your previous message — one moment…");
+    TC.setStatus("Already delivering your previous message — one moment…");
     return;
   }
-  const c = activeConversation();
-  if (!c) { setStatus("Select or create a conversation first."); return; }
+  const c = TC.activeConversation();
+  if (!c) { TC.setStatus("Select or create a conversation first."); return; }
   midRunDeliveryInFlight = true;
   try {
     // 1. Show the user message immediately (same naming logic as sendMessage).
@@ -423,33 +414,33 @@ export async function interruptAndSend(text) {
     const wasFirstUserMsg = !c.messages.some((m) => m.role === "user" && !m.event);
     let renamedConv = false;
     if (wasFirstUserMsg && /^Conversation \d+$/.test(c.name)) {
-      c.name = nameFromFirstMessage(text, c.name);
+      c.name = TC.nameFromFirstMessage(text, c.name);
       renamedConv = true;
     }
     c.messages.push(userMsg);
-    saveState();
+    TC.saveState();
     // Reveal in the sidebar on first post (see sendMessage).
-    if (renamedConv || wasFirstUserMsg) { renderProjects(); renderSessionInfo(); }
-    const userRow = renderMessage(userMsg);
-    scrollChatBottom(false);
-    updateChatEmpty();
-    el.chatInput.value = "";
-    el.chatInput.style.height = "auto"; // reset the auto-resized composer
+    if (renamedConv || wasFirstUserMsg) { TC.renderProjects(); TC.renderSessionInfo(); }
+    const userRow = TC.renderMessage(userMsg);
+    TC.scrollChatBottom(false);
+    TC.updateChatEmpty();
+    TC.el.chatInput.value = "";
+    TC.el.chatInput.style.height = "auto"; // reset the auto-resized composer
     syncSendButton();                   // empty composer + running → back to Stop
 
     // 2. Interrupt the in-flight turn.
     interruptDeliveryActive = true;
-    if (abortController) abortController.abort();
+    if (TC.abortController) TC.abortController.abort();
 
     // 3. Wait for the old turn to fully unwind (its finally clears `running`).
     await waitForTurnEnd();
-    if (running) {
+    if (TC.running) {
       // Safety net: the turn ignored the abort (shouldn't happen — tool calls
       // race the abort signal). Leave the message in history; the user can
       // retry once the turn ends.
       interruptDeliveryActive = false;
       midRunDeliveryInFlight = false;
-      setStatus("The current step is still finishing — try again in a moment.");
+      TC.setStatus("The current step is still finishing — try again in a moment.");
       return;
     }
 
@@ -461,8 +452,8 @@ export async function interruptAndSend(text) {
     if (idx !== -1 && idx < c.messages.length - 1) {
       c.messages.splice(idx, 1);
       c.messages.push(userMsg);
-      saveState();
-      if (userRow && userRow.parentNode === el.chatLog) el.chatLog.appendChild(userRow);
+      TC.saveState();
+      if (userRow && userRow.parentNode === TC.el.chatLog) TC.el.chatLog.appendChild(userRow);
     }
 
     // 5. Continue with the new message. Clear the delivery markers FIRST so this
@@ -473,7 +464,7 @@ export async function interruptAndSend(text) {
   } catch (e) {
     interruptDeliveryActive = false;
     midRunDeliveryInFlight = false;
-    setStatus("Interrupt failed: " + (e && e.message ? e.message : String(e)));
+    TC.setStatus("Interrupt failed: " + (e && e.message ? e.message : String(e)));
   }
 }
 
@@ -484,3 +475,16 @@ export async function interruptAndSend(text) {
 // the whole loop feel like it had stalled. This watcher notices a delegated
 // session finishing its turn (or exiting, or getting blocked) and starts one
 // orchestrator turn so it can review, merge, and move the plan forward.
+// --- exports ---
+Object.defineProperty(TC, "TOOL_TIMEOUT_MS", { get: () => TOOL_TIMEOUT_MS, configurable: true });
+Object.defineProperty(TC, "TOOL_TIMEOUT_OVERRIDES", { get: () => TOOL_TIMEOUT_OVERRIDES, configurable: true });
+Object.defineProperty(TC, "midRunDeliveryInFlight", { get: () => midRunDeliveryInFlight, set: (v) => { midRunDeliveryInFlight = v; }, configurable: true });
+Object.defineProperty(TC, "interruptDeliveryActive", { get: () => interruptDeliveryActive, set: (v) => { interruptDeliveryActive = v; }, configurable: true });
+TC.runToolWithTimeout = runToolWithTimeout;
+TC.setRunning = setRunning;
+TC.syncSendButton = syncSendButton;
+TC.sendMessage = sendMessage;
+TC.runOrchestratorTurn = runOrchestratorTurn;
+TC.waitForTurnEnd = waitForTurnEnd;
+TC.interruptAndSend = interruptAndSend;
+})();

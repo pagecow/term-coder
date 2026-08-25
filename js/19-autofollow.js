@@ -1,28 +1,26 @@
-import { running, sessions, settings } from "./00-state.js";
-import { sessionActivity } from "./01-sessions.js";
-import { el } from "./04-dom.js";
-import { activeConversation } from "./05-util.js";
-import { paintProjSessions } from "./11-projects.js";
-import { sendMessage } from "./18-send.js";
-import { pendingChoices } from "./21-askchoice.js";
-export let autoFollowTimer = null;
-export let statusRefreshTimer = null; // D3: handle for the sidebar status-refresh interval, cleared together with autoFollowTimer
-export let lastAutoFollowAt = 0;
-export const AUTO_FOLLOW_COOLDOWN_MS = 8000;
+// 19-autofollow.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+let autoFollowTimer = null;
+let statusRefreshTimer = null; // D3: handle for the sidebar status-refresh interval, cleared together with autoFollowTimer
+let lastAutoFollowAt = 0;
+const AUTO_FOLLOW_COOLDOWN_MS = 8000;
 
-export function autoFollowTick() {
-  if (settings.autoFollow === false) return;
-  if (running) return;                                  // orchestrator is already busy
+function autoFollowTick() {
+  if (TC.settings.autoFollow === false) return;
+  if (TC.running) return;                                  // orchestrator is already busy
   // Don't start a new orchestrator turn while a permission/choice prompt is
   // awaiting the user — a fresh streaming turn would spin up a whole new set
   // of "still thinking" indicators on top of the active prompt. Wait for the
   // user to answer first; the next tick (2.5s) picks up once it's cleared.
-  if (pendingChoices > 0) return;
+  if (TC.pendingChoices > 0) return;
   if (Date.now() - lastAutoFollowAt < AUTO_FOLLOW_COOLDOWN_MS) return;
-  if (!activeConversation()) return;
+  if (!TC.activeConversation()) return;
 
-  for (const rec of sessions.values()) {
-    const act = sessionActivity(rec);
+  for (const rec of TC.sessions.values()) {
+    const act = TC.sessionActivity(rec);
     // Only report a CHANGE, and only the states that mean "your turn".
     if (act === rec._lastReportedActivity) continue;
     const wasReported = rec._lastReportedActivity;
@@ -49,12 +47,12 @@ export function autoFollowTick() {
     }
     note += " Check the live snapshot in your context, then continue the plan: merge its worktree if the subtask is done, answer it if it asked something, or spawn the next subtask. Do not wait on this agent again unless you have given it new work.";
     lastAutoFollowAt = Date.now();
-    sendMessage(note, { event: true });
+    TC.sendMessage(note, { event: true });
     return; // one wake-up per tick; the next tick picks up any others
   }
 }
 
-export function startAutoFollow() {
+function startAutoFollow() {
   if (autoFollowTimer) return;
   autoFollowTimer = setInterval(autoFollowTick, 2500);
   // Lightweight status refresh: bump activity markers + count in the sidebar
@@ -65,14 +63,14 @@ export function startAutoFollow() {
   // handle was discarded, so this interval could never be stopped.
   if (statusRefreshTimer) clearInterval(statusRefreshTimer);
   statusRefreshTimer = setInterval(() => {
-    if (el.projSessionsBody && el.projSessionsBody.isConnected) paintProjSessions();
+    if (TC.el.projSessionsBody && TC.el.projSessionsBody.isConnected) TC.paintProjSessions();
   }, 2000);
 }
 
 // D3: tear down both auto-follow intervals. Called if/when auto-follow is ever
 // disabled (e.g. a future "disable auto-follow" setting). Safe to call even
 // when nothing is running.
-export function stopAutoFollow() {
+function stopAutoFollow() {
   if (autoFollowTimer) { clearInterval(autoFollowTimer); autoFollowTimer = null; }
   if (statusRefreshTimer) { clearInterval(statusRefreshTimer); statusRefreshTimer = null; }
 }
@@ -83,3 +81,12 @@ export function stopAutoFollow() {
 // badge in sync with the visible total. Sessions are scoped per conversation
 // (rec.conversationId), so switching conversations shows only that
 // conversation's terminals and a fresh chat starts with an empty grid.
+// --- exports ---
+Object.defineProperty(TC, "AUTO_FOLLOW_COOLDOWN_MS", { get: () => AUTO_FOLLOW_COOLDOWN_MS, configurable: true });
+Object.defineProperty(TC, "autoFollowTimer", { get: () => autoFollowTimer, set: (v) => { autoFollowTimer = v; }, configurable: true });
+Object.defineProperty(TC, "statusRefreshTimer", { get: () => statusRefreshTimer, set: (v) => { statusRefreshTimer = v; }, configurable: true });
+Object.defineProperty(TC, "lastAutoFollowAt", { get: () => lastAutoFollowAt, set: (v) => { lastAutoFollowAt = v; }, configurable: true });
+TC.autoFollowTick = autoFollowTick;
+TC.startAutoFollow = startAutoFollow;
+TC.stopAutoFollow = stopAutoFollow;
+})();

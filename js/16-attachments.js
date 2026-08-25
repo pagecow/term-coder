@@ -1,22 +1,25 @@
-import { el } from "./04-dom.js";
-import { activeConversation, basename, saveState, setStatus, uuid } from "./05-util.js";
-export function getAttachments() {
-  const c = activeConversation();
+// 16-attachments.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+function getAttachments() {
+  const c = TC.activeConversation();
   if (!c) return [];
   if (!c.attachments) c.attachments = [];
   return c.attachments;
 }
-export function setAttachments(arr) {
-  const c = activeConversation();
+function setAttachments(arr) {
+  const c = TC.activeConversation();
   if (!c) return;
   c.attachments = arr || [];
-  saveState();
+  TC.saveState();
   renderAttachmentStrip();
 }
 
 // Render the attachment thumbnails above the composer.
-export function renderAttachmentStrip() {
-  const strip = el.attachmentStrip;
+function renderAttachmentStrip() {
+  const strip = TC.el.attachmentStrip;
   if (!strip) return;
   const atts = getAttachments();
   if (!atts.length) { strip.classList.add("hidden"); strip.innerHTML = ""; return; }
@@ -56,38 +59,38 @@ export function renderAttachmentStrip() {
   }
 }
 
-export function removeAttachment(id) {
+function removeAttachment(id) {
   const atts = getAttachments().filter((a) => a.id !== id);
   setAttachments(atts);
 }
 
 // Open the full-size image preview modal.
-export function openImagePreview(dataUrl) {
-  if (!el.imagePreviewModal || !el.imagePreviewImg) return;
-  el.imagePreviewImg.src = dataUrl;
-  el.imagePreviewModal.classList.remove("hidden");
+function openImagePreview(dataUrl) {
+  if (!TC.el.imagePreviewModal || !TC.el.imagePreviewImg) return;
+  TC.el.imagePreviewImg.src = dataUrl;
+  TC.el.imagePreviewModal.classList.remove("hidden");
 }
-export function closeImagePreview() {
-  if (!el.imagePreviewModal) return;
-  el.imagePreviewModal.classList.add("hidden");
-  el.imagePreviewImg.src = "";
+function closeImagePreview() {
+  if (!TC.el.imagePreviewModal) return;
+  TC.el.imagePreviewModal.classList.add("hidden");
+  TC.el.imagePreviewImg.src = "";
 }
 
 // Add a file via the file picker (fileAccess openDialog).
-export async function addFileFromPicker() {
+async function addFileFromPicker() {
   try {
     const path = await window.chatoss.files.openDialog({ multiple: false });
     if (!path) return; // cancelled/denied
     await addFileByPath(path);
   } catch (e) {
     console.warn("addFileFromPicker", e);
-    setStatus("Could not open that file: " + (e && e.message ? e.message : String(e)));
+    TC.setStatus("Could not open that file: " + (e && e.message ? e.message : String(e)));
   }
 }
 
 // Add a file from a known path: read its bytes, detect if it's an image.
-export async function addFileByPath(path) {
-  const name = basename(path);
+async function addFileByPath(path) {
+  const name = TC.basename(path);
   const ext = name.split(".").pop().toLowerCase();
   const imageExts = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
   if (imageExts.includes(ext)) {
@@ -96,27 +99,27 @@ export async function addFileByPath(path) {
       const b64 = await window.chatoss.files.readFile(path, { binary: true });
       const mime = ext === "svg" ? "image/svg+xml" : ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/" + ext;
       const dataUrl = "data:" + mime + ";base64," + b64;
-      addAttachment({ id: uuid(), name, kind: "image", dataUrl });
+      addAttachment({ id: TC.uuid(), name, kind: "image", dataUrl });
     } catch (e) {
       console.warn("readFile image", e);
-      setStatus("Could not read that image: " + (e && e.message ? e.message : String(e)));
+      TC.setStatus("Could not read that image: " + (e && e.message ? e.message : String(e)));
     }
   } else {
     // Text/code file: read as text and store for embedding in the message.
     try {
       const text = await window.chatoss.files.readFile(path);
-      addAttachment({ id: uuid(), name, kind: "file", text, path });
+      addAttachment({ id: TC.uuid(), name, kind: "file", text, path });
     } catch (e) {
       // Binary non-image file: store just the path/name as context.
       console.warn("readFile", e);
-      addAttachment({ id: uuid(), name, kind: "file", text: null, path });
+      addAttachment({ id: TC.uuid(), name, kind: "file", text: null, path });
     }
   }
 }
 
 // Add a dropped file (from fileDrop onDrop). The drop callback gives file
 // objects with .text() and .arrayBuffer() methods, NOT paths.
-export async function addDroppedFile(file) {
+async function addDroppedFile(file) {
   const name = file.name || "dropped-file";
   const type = file.type || "";
   if (type.startsWith("image/")) {
@@ -124,27 +127,27 @@ export async function addDroppedFile(file) {
       const buf = await file.arrayBuffer();
       const b64 = arrayBufferToBase64(buf);
       const dataUrl = "data:" + type + ";base64," + b64;
-      addAttachment({ id: uuid(), name, kind: "image", dataUrl });
+      addAttachment({ id: TC.uuid(), name, kind: "image", dataUrl });
     } catch (e) { console.warn("dropped image", e); }
   } else {
     try {
       const text = await file.text();
-      addAttachment({ id: uuid(), name, kind: "file", text });
+      addAttachment({ id: TC.uuid(), name, kind: "file", text });
     } catch (e) {
-      addAttachment({ id: uuid(), name, kind: "file", text: null });
+      addAttachment({ id: TC.uuid(), name, kind: "file", text: null });
     }
   }
 }
 
-export function addAttachment(att) {
+function addAttachment(att) {
   const atts = getAttachments();
   atts.push(att);
-  saveState();
+  TC.saveState();
   renderAttachmentStrip();
 }
 
 // Convert an ArrayBuffer to a base64 string (for dropped image data URLs).
-export function arrayBufferToBase64(buf) {
+function arrayBufferToBase64(buf) {
   const bytes = new Uint8Array(buf);
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -153,7 +156,7 @@ export function arrayBufferToBase64(buf) {
 
 // Build the content for runTurn: if there are image attachments, return an
 // array of text + image parts (multimodal); otherwise return the plain string.
-export function buildMessageContent(userText) {
+function buildMessageContent(userText) {
   const atts = getAttachments();
   const images = atts.filter((a) => a.kind === "image" && a.dataUrl);
   const files = atts.filter((a) => a.kind === "file");
@@ -184,14 +187,14 @@ export function buildMessageContent(userText) {
 }
 
 // Clear attachments after a message is sent.
-export function clearAttachments() {
+function clearAttachments() {
   setAttachments([]);
 }
 
 // ---------- Copy conversation ----------
 // Serialize a conversation's full message history (user + assistant + system,
 // including thinking and tool-call activity) into readable plain text.
-export function conversationToText(c) {
+function conversationToText(c) {
   if (!c || !c.messages || !c.messages.length) return "";
   const parts = [];
   for (const m of c.messages) {
@@ -213,12 +216,12 @@ export function conversationToText(c) {
   return parts.join("\n\n");
 }
 
-export let copyConvTimer = null;
+let copyConvTimer = null;
 // Enable/disable the toolbar button to match whether a conversation is loaded.
-export function syncCopyConvBtn() {
-  const btn = el.copyConvBtn;
+function syncCopyConvBtn() {
+  const btn = TC.el.copyConvBtn;
   if (!btn) return;
-  const c = activeConversation();
+  const c = TC.activeConversation();
   const hasContent = !!(c && c.messages && c.messages.length);
   btn.disabled = !hasContent;
   if (!hasContent) {
@@ -229,8 +232,8 @@ export function syncCopyConvBtn() {
 }
 // Copy the ENTIRE active conversation to the clipboard, with a brief
 // "Copied!" confirmation on the button. No-op when no conversation is loaded.
-export async function copyConversation() {
-  const c = activeConversation();
+async function copyConversation() {
+  const c = TC.activeConversation();
   if (!c || !c.messages || !c.messages.length) return; // no conversation → no-op
   const text = conversationToText(c);
   if (!text) return;
@@ -238,10 +241,10 @@ export async function copyConversation() {
     await window.chatoss.clipboard.writeText(text);
   } catch (e) {
     console.warn("clipboard write", e);
-    setStatus("Clipboard unavailable — enable it in Permissions.");
+    TC.setStatus("Clipboard unavailable — enable it in Permissions.");
     return;
   }
-  const btn = el.copyConvBtn;
+  const btn = TC.el.copyConvBtn;
   if (!btn) return;
   const lab = btn.querySelector(".copy-conv-label");
   if (lab) lab.textContent = "Copied!";
@@ -256,3 +259,22 @@ export async function copyConversation() {
 }
 
 // ---------- Build system prompt ----------
+// --- exports ---
+Object.defineProperty(TC, "copyConvTimer", { get: () => copyConvTimer, set: (v) => { copyConvTimer = v; }, configurable: true });
+TC.getAttachments = getAttachments;
+TC.setAttachments = setAttachments;
+TC.renderAttachmentStrip = renderAttachmentStrip;
+TC.removeAttachment = removeAttachment;
+TC.openImagePreview = openImagePreview;
+TC.closeImagePreview = closeImagePreview;
+TC.addFileFromPicker = addFileFromPicker;
+TC.addFileByPath = addFileByPath;
+TC.addDroppedFile = addDroppedFile;
+TC.addAttachment = addAttachment;
+TC.arrayBufferToBase64 = arrayBufferToBase64;
+TC.buildMessageContent = buildMessageContent;
+TC.clearAttachments = clearAttachments;
+TC.conversationToText = conversationToText;
+TC.syncCopyConvBtn = syncCopyConvBtn;
+TC.copyConversation = copyConversation;
+})();

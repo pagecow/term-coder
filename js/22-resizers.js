@@ -1,14 +1,14 @@
-import { sessions, settings } from "./00-state.js";
-import { $, el } from "./04-dom.js";
-import { saveSettings } from "./05-util.js";
-import { editorState } from "./11-projects.js";
-import { fitTerminal } from "./20-terminal.js";
-export const RZ_W = 5; // keep in sync with --rz-width in style.css
-export const COL_MIN = { projects: 180, chat: 360, terminals: 300 };
+// 22-resizers.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+const RZ_W = 5; // keep in sync with --rz-width in style.css
+const COL_MIN = { projects: 180, chat: 360, terminals: 300 };
 
-export function shellEl() { return document.querySelector(".app-shell"); }
+function shellEl() { return document.querySelector(".app-shell"); }
 
-export function currentColWidths() {
+function currentColWidths() {
   const shell = shellEl();
   const proj = document.querySelector(".col-projects");
   const chat = document.querySelector(".col-chat");
@@ -22,14 +22,14 @@ export function currentColWidths() {
 // Set both track widths at once, clamped so no column can be crushed below its
 // minimum — including after the window itself has been made smaller than the
 // widths that were saved.
-export function applyColWidths(projects, chat, opts) {
+function applyColWidths(projects, chat, opts) {
   const o = opts || {};
   const shell = shellEl();
   if (!shell) return;
   const cur = currentColWidths();
-  const editorOpen = !el.editor.classList.contains("hidden");
+  const editorOpen = !TC.el.editor.classList.contains("hidden");
   const editorW = editorOpen
-    ? (parseFloat(getComputedStyle(shell).getPropertyValue("--col-editor")) || editorState.size)
+    ? (parseFloat(getComputedStyle(shell).getPropertyValue("--col-editor")) || TC.editorState.size)
     : 0;
   const resizerW = editorOpen ? 3 * RZ_W : 2 * RZ_W;
   const avail = cur.total - resizerW - editorW;
@@ -41,25 +41,25 @@ export function applyColWidths(projects, chat, opts) {
   c = Math.min(c, Math.max(COL_MIN.chat, avail - p - COL_MIN.terminals));
   shell.style.setProperty("--col-projects", p + "px");
   shell.style.setProperty("--col-chat", c + "px");
-  if (o.persist) { settings.layout = { projects: p, chat: c }; saveSettings(); }
+  if (o.persist) { TC.settings.layout = { projects: p, chat: c }; TC.saveSettings(); }
   // Refitting the PTY is relatively expensive, so only do it when the drag ends.
-  if (o.fit) { for (const rec of sessions.values()) fitTerminal(rec); }
+  if (o.fit) { for (const rec of TC.sessions.values()) TC.fitTerminal(rec); }
 }
 
 // Drop back to the responsive defaults in style.css.
-export function resetColWidths() {
+function resetColWidths() {
   const shell = shellEl();
   if (!shell) return;
   shell.style.removeProperty("--col-projects");
   shell.style.removeProperty("--col-chat");
-  delete settings.layout;
-  saveSettings();
-  for (const rec of sessions.values()) fitTerminal(rec);
+  delete TC.settings.layout;
+  TC.saveSettings();
+  for (const rec of TC.sessions.values()) TC.fitTerminal(rec);
 }
 
-export function initColumnResizers() {
+function initColumnResizers() {
   // Restore a saved layout (clamped to the current window).
-  const L = settings.layout;
+  const L = TC.settings.layout;
   if (L && L.projects && L.chat) applyColWidths(L.projects, L.chat, { fit: false });
 
   const bind = (handle, which) => {
@@ -106,8 +106,8 @@ export function initColumnResizers() {
     handle.addEventListener("dblclick", resetColWidths);
     handle.title = "Drag to resize · double-click to reset";
   };
-  bind($("rz-projects"), "projects");
-  bind($("rz-chat"), "chat");
+  bind(TC.$("rz-projects"), "projects");
+  bind(TC.$("rz-chat"), "chat");
 }
 
 // ---------- Terminal resize (columns width / rows height) ----------
@@ -117,11 +117,11 @@ export function initColumnResizers() {
 // only that one is draggable. Sizes are applied as inline CSS variables
 // (--term-w / --term-h) so they survive view switches; the live PTY refits
 // automatically via each mount's ResizeObserver as the box changes.
-export const TERM_MIN_W = 200; // min column width (px)
-export const TERM_MIN_H = 120; // min row height (px)
+const TERM_MIN_W = 200; // min column width (px)
+const TERM_MIN_H = 120; // min row height (px)
 
-export function initTermResize() {
-  if (!el.termGrid) return;
+function initTermResize() {
+  if (!TC.el.termGrid) return;
   let drag = null;
 
   const onMove = (e) => {
@@ -142,7 +142,7 @@ export function initTermResize() {
     window.removeEventListener("pointercancel", onUp);
   };
 
-  el.termGrid.addEventListener("pointerdown", (e) => {
+  TC.el.termGrid.addEventListener("pointerdown", (e) => {
     const handle = e.target.closest && e.target.closest(".term-resize-handle");
     if (!handle) return;
     const square = handle.closest(".term-square");
@@ -150,8 +150,8 @@ export function initTermResize() {
     const axis = handle.classList.contains("term-resize-handle-x") ? "x" : "y";
     // Only the handle matching the current view is active (the other is hidden
     // by CSS, but guard against a stale handle during a view transition).
-    if (axis === "x" && !el.termGrid.classList.contains("view-columns")) return;
-    if (axis === "y" && !el.termGrid.classList.contains("view-rows")) return;
+    if (axis === "x" && !TC.el.termGrid.classList.contains("view-columns")) return;
+    if (axis === "y" && !TC.el.termGrid.classList.contains("view-rows")) return;
     if (square.classList.contains("expanded")) return;
 
     e.preventDefault();
@@ -173,7 +173,7 @@ export function initTermResize() {
 
   // A click on a handle (no drag) must not select the session — swallow it in
   // the capture phase so it never reaches the square's click listener.
-  el.termGrid.addEventListener("click", (e) => {
+  TC.el.termGrid.addEventListener("click", (e) => {
     if (e.target.closest && e.target.closest(".term-resize-handle")) {
       e.stopPropagation();
       e.preventDefault();
@@ -194,3 +194,15 @@ export function initTermResize() {
 // drawer can restore its open state and size across app restarts, but the live
 // PTY itself is gone after a restart (terminals are not portable across boots),
 // so on reopen we respawn a fresh shell if the drawer was open.
+// --- exports ---
+Object.defineProperty(TC, "RZ_W", { get: () => RZ_W, configurable: true });
+Object.defineProperty(TC, "COL_MIN", { get: () => COL_MIN, configurable: true });
+Object.defineProperty(TC, "TERM_MIN_W", { get: () => TERM_MIN_W, configurable: true });
+Object.defineProperty(TC, "TERM_MIN_H", { get: () => TERM_MIN_H, configurable: true });
+TC.shellEl = shellEl;
+TC.currentColWidths = currentColWidths;
+TC.applyColWidths = applyColWidths;
+TC.resetColWidths = resetColWidths;
+TC.initColumnResizers = initColumnResizers;
+TC.initTermResize = initTermResize;
+})();

@@ -1,12 +1,9 @@
-import { fmtTime } from "./03-history.js";
-import { el } from "./04-dom.js";
-import { activeConversation, esc } from "./05-util.js";
-import { syncTopNewButtons } from "./11-projects.js";
-import { renderBoardChip, renderMarkdown } from "./12-markdown.js";
-import { renderEffortPicker, renderModelPicker } from "./14-models.js";
-import { renderTokenEstimator } from "./15-tokens.js";
-import { renderAttachmentStrip, syncCopyConvBtn } from "./16-attachments.js";
-export function createThinkingWidget(text, opts) {
+// 13-chat.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+function createThinkingWidget(text, opts) {
   const o = opts || {};
   const wrap = document.createElement("div");
   wrap.className = "msg-thinking-collapsible" + (o.streaming ? " is-streaming" : "");
@@ -73,7 +70,7 @@ export function createThinkingWidget(text, opts) {
 // during a run. It has a FIXED max height with an internally-scrolling list, so
 // the chat layout never grows or jumps as tools fire — the area stays one
 // consistent card. On completion it collapses to a compact "N tools used" pill.
-export function createActivityCard() {
+function createActivityCard() {
   const card = document.createElement("div");
   card.className = "activity-card is-live";
 
@@ -157,7 +154,7 @@ export function createActivityCard() {
 // chips into .msg-tools — so every completed turn showed its tools twice, and a
 // reload showed them in a completely different shape than the run had. Same
 // component both ways now.
-export function buildActivityRecord(m) {
+function buildActivityRecord(m) {
   const card = createActivityCard();
   if (m.thinking) card._addThinking(createThinkingWidget(m.thinking, { streaming: false }));
   for (const t of (m.toolCalls || [])) {
@@ -175,7 +172,7 @@ export function buildActivityRecord(m) {
 // Creates a compact inline chip with a status icon (spinner while running,
 // green check when done, red x on error) plus a live elapsed-time readout so
 // long-running tools never look "stuck". Clicking expands args/result detail.
-export function createToolChip(name, args, opts) {
+function createToolChip(name, args, opts) {
   const o = opts || {};
   const chip = document.createElement("div");
   chip.className = "tool-chip is-running";
@@ -304,26 +301,29 @@ export function createToolChip(name, args, opts) {
 // autoScroll tracks whether we should keep the log pinned to the bottom while
 // streaming. It is set false when the user scrolls up and re-enabled on
 // jump-to-latest / new conversation render.
-export let chatAutoScroll = true;
-export function chatScrollListener() {
-  if (!el.chatScroll) return;
-  const sc = el.chatScroll;
+let chatAutoScroll = true;
+// chatAutoScroll is exported (read by other modules); only this module may
+// REBIND it, so other modules set it through this mutator.
+function setChatAutoScroll(v) { chatAutoScroll = v; }
+function chatScrollListener() {
+  if (!TC.el.chatScroll) return;
+  const sc = TC.el.chatScroll;
   const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60;
   chatAutoScroll = atBottom;
-  if (el.chatJumpBtn) el.chatJumpBtn.classList.toggle("hidden", atBottom);
+  if (TC.el.chatJumpBtn) TC.el.chatJumpBtn.classList.toggle("hidden", atBottom);
 }
-export function scrollChatBottom(smooth) {
-  if (!el.chatScroll) { if (el.chatLog) el.chatLog.scrollTop = el.chatLog.scrollHeight; return; }
-  const sc = el.chatScroll;
+function scrollChatBottom(smooth) {
+  if (!TC.el.chatScroll) { if (TC.el.chatLog) TC.el.chatLog.scrollTop = TC.el.chatLog.scrollHeight; return; }
+  const sc = TC.el.chatScroll;
   if (smooth) { sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" }); }
   else { sc.scrollTop = sc.scrollHeight; }
   chatAutoScroll = true;
-  if (el.chatJumpBtn) el.chatJumpBtn.classList.add("hidden");
+  if (TC.el.chatJumpBtn) TC.el.chatJumpBtn.classList.add("hidden");
 }
-export function maybeScrollChatBottom() { if (chatAutoScroll) scrollChatBottom(false); }
+function maybeScrollChatBottom() { if (chatAutoScroll) scrollChatBottom(false); }
 
 // ---------- Typing indicator ----------
-export function createTypingIndicator() {
+function createTypingIndicator() {
   const row = document.createElement("div");
   row.className = "msg assistant typing-row";
   const dots = document.createElement("div");
@@ -338,32 +338,32 @@ export function createTypingIndicator() {
 }
 
 // ---------- Render: middle column (chat) ----------
-export function updateChatEmpty() {
-  const c = activeConversation();
+function updateChatEmpty() {
+  const c = TC.activeConversation();
   const hasMessages = !!(c && c.messages && c.messages.length);
-  if (el.chatEmpty) el.chatEmpty.classList.toggle("hidden", hasMessages || !c);
+  if (TC.el.chatEmpty) TC.el.chatEmpty.classList.toggle("hidden", hasMessages || !c);
 }
-export function renderChat() {
-  const c = activeConversation();
-  el.chatLog.innerHTML = "";
-  syncCopyConvBtn();
-  syncTopNewButtons();
+function renderChat() {
+  const c = TC.activeConversation();
+  TC.el.chatLog.innerHTML = "";
+  TC.syncCopyConvBtn();
+  TC.syncTopNewButtons();
   if (!c) {
-    el.chatInput.placeholder = "Select or create a conversation…";
-    renderModelPicker();
-    renderEffortPicker();
-    renderBoardChip();
-    renderAttachmentStrip();
+    TC.el.chatInput.placeholder = "Select or create a conversation…";
+    TC.renderModelPicker();
+    TC.renderEffortPicker();
+    TC.renderBoardChip();
+    TC.renderAttachmentStrip();
     chatAutoScroll = true;
-    if (el.chatJumpBtn) el.chatJumpBtn.classList.add("hidden");
+    if (TC.el.chatJumpBtn) TC.el.chatJumpBtn.classList.add("hidden");
     updateChatEmpty();
     return;
   }
-  el.chatInput.placeholder = "Ask the orchestrator to build something…";
-  renderModelPicker();
-  renderEffortPicker();
-  renderBoardChip();
-  renderAttachmentStrip();
+  TC.el.chatInput.placeholder = "Ask the orchestrator to build something…";
+  TC.renderModelPicker();
+  TC.renderEffortPicker();
+  TC.renderBoardChip();
+  TC.renderAttachmentStrip();
 
   for (const m of c.messages) {
     renderMessage(m);
@@ -372,14 +372,14 @@ export function renderChat() {
   chatAutoScroll = true;
   scrollChatBottom(false);
   updateChatEmpty();
-  renderTokenEstimator();
+  TC.renderTokenEstimator();
 }
-export function renderMessage(m) {
+function renderMessage(m) {
   const role = m.role || "system";
   // Thinking + tool chips live together in ONE collapsed activity card above the
   // message body — the same component the live run uses.
   if (m.thinking || (m.toolCalls && m.toolCalls.length)) {
-    el.chatLog.appendChild(buildActivityRecord(m));
+    TC.el.chatLog.appendChild(buildActivityRecord(m));
   }
   const row = document.createElement("div");
   row.className = "msg " + role + (m.event ? " is-event" : "");
@@ -406,17 +406,17 @@ export function renderMessage(m) {
   const body = document.createElement("div");
   body.className = "msg-body";
   if (role === "assistant") {
-    body.innerHTML = renderMarkdown(m.content || "");
+    body.innerHTML = TC.renderMarkdown(m.content || "");
   } else if (role === "user") {
-    body.innerHTML = renderMarkdown(m.content || "");
+    body.innerHTML = TC.renderMarkdown(m.content || "");
   } else {
     // System messages: keep plain (escaped) text, no markdown.
-    body.innerHTML = m.content ? m.content.split(/\n\n+/).map((p) => "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>").join("") : "";
+    body.innerHTML = m.content ? m.content.split(/\n\n+/).map((p) => "<p>" + TC.esc(p).replace(/\n/g, "<br>") + "</p>").join("") : "";
   }
   col.appendChild(body);
   if (role !== "system") { row.appendChild(avatar); }
   row.appendChild(col);
-  el.chatLog.appendChild(row);
+  TC.el.chatLog.appendChild(row);
   return row;
 }
 
@@ -424,3 +424,18 @@ export function renderMessage(m) {
 // models is populated ONLY here. Callers re-render the pickers when it arrives
 // so a list that lands late (fresh install warm-up) fills the dropdown without
 // an app restart.
+// --- exports ---
+Object.defineProperty(TC, "chatAutoScroll", { get: () => chatAutoScroll, set: (v) => { chatAutoScroll = v; }, configurable: true });
+TC.createThinkingWidget = createThinkingWidget;
+TC.createActivityCard = createActivityCard;
+TC.buildActivityRecord = buildActivityRecord;
+TC.createToolChip = createToolChip;
+TC.setChatAutoScroll = setChatAutoScroll;
+TC.chatScrollListener = chatScrollListener;
+TC.scrollChatBottom = scrollChatBottom;
+TC.maybeScrollChatBottom = maybeScrollChatBottom;
+TC.createTypingIndicator = createTypingIndicator;
+TC.updateChatEmpty = updateChatEmpty;
+TC.renderChat = renderChat;
+TC.renderMessage = renderMessage;
+})();

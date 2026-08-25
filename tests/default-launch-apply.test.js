@@ -32,8 +32,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 // ---------------------------------------------------------------------------
 // Helpers: brace-balance extract a top-level `function name(...)` body, and
@@ -87,13 +88,14 @@ function extractRememberBlock(src) {
 }
 
 // Build a callable from the remember block. The block references: remember,
-// target, cli, cwd, findLaunchTarget, settings, saveSettings. We append a
-// `return settings;` so the runner exposes what got written.
+// target, cli, cwd, and the namespace TC (findLaunchTarget, settings,
+// saveSettings). We append a `return TC.settings;` so the runner exposes what
+// got written.
 function makeRememberRunner(block) {
   // eslint-disable-next-line no-new-func
   return new Function(
-    "remember", "target", "cli", "cwd", "findLaunchTarget", "settings", "saveSettings",
-    block + "\nreturn settings;"
+    "remember", "target", "cli", "cwd", "TC",
+    block + "\nreturn TC.settings;"
   );
 }
 
@@ -145,15 +147,15 @@ test("cliDefaultToTargetId returns null for bare ollama-tool names + non-strings
 test("resolveSessionModel source consults cliDefault before the mode branches", () => {
   // The guard: const defId = cliDefaultToTargetId(cfg.cliDefault);
   //            if (defId && ids.includes(defId)) return defId;
-  assert(/cliDefaultToTargetId\(cfg\.cliDefault\)/.test(SRC),
+  assert(/TC\.cliDefaultToTargetId\(cfg\.cliDefault\)/.test(SRC),
     "resolveSessionModel must map cfg.cliDefault via cliDefaultToTargetId");
   assert(/if \(defId && ids\.includes\(defId\)\) return defId;/.test(SRC),
     "resolveSessionModel must short-circuit return the default target when available");
   // getModelSelectionConfig must expose cliDefault so the guard has it.
-  assert(/cliDefault: settings\.cliDefault \|\| "ask"/.test(SRC),
+  assert(/cliDefault: TC\.settings\.cliDefault \|\| "ask"/.test(SRC),
     "getModelSelectionConfig must expose settings.cliDefault as cfg.cliDefault");
   // The guard must appear BEFORE the first mode branch (cfg.mode === "always").
-  const guardIdx = SRC.indexOf("cliDefaultToTargetId(cfg.cliDefault)");
+  const guardIdx = SRC.indexOf("TC.cliDefaultToTargetId(cfg.cliDefault)");
   const firstModeIdx = SRC.indexOf('if (cfg.mode === "always")');
   assert(guardIdx !== -1 && firstModeIdx !== -1 && guardIdx < firstModeIdx,
     "the default-launch guard must run BEFORE the Model Selection Mode branches (guard=" +
@@ -238,7 +240,7 @@ test("Remember as default source writes the chosen target, not the dropdown tool
 test("Remember as default writes raw:<id> for a DIRECT launch target", () => {
   const settings = {};
   const saveSettings = recordingSave();
-  const out = REMEMBER_RUNNER(true, "claude", "claude", "/proj", stubFindLaunchTarget, settings, saveSettings);
+  const out = REMEMBER_RUNNER(true, "claude", "claude", "/proj", { findLaunchTarget: stubFindLaunchTarget, settings, saveSettings });
   assert.strictEqual(out.cliDefault, "raw:claude",
     "direct claude launch + Remember must save 'raw:claude' (not the dropdown 'claude'), got: " + JSON.stringify(out.cliDefault));
   assert.strictEqual(out.cwdDefault, "/proj", "Remember must also persist the cwd");
@@ -252,7 +254,7 @@ test("Remember as default writes the spawn-dropdown tool for an OLLAMA model tar
   // so the block falls back to the spawn-dropdown tool id ("codex") — which IS
   // a valid set-cli option, keeping the Settings picker and the remembered
   // default consistent.
-  const out = REMEMBER_RUNNER(true, "qwen3:30b", "codex", "/proj", stubFindLaunchTarget, settings, saveSettings);
+  const out = REMEMBER_RUNNER(true, "qwen3:30b", "codex", "/proj", { findLaunchTarget: stubFindLaunchTarget, settings, saveSettings });
   assert.strictEqual(out.cliDefault, "codex",
     "ollama model target + Remember must fall back to the spawn-dropdown tool 'codex', got: " + JSON.stringify(out.cliDefault));
   assert(saveSettings._called, "ollama Remember must still call saveSettings()");
@@ -261,7 +263,7 @@ test("Remember as default writes the spawn-dropdown tool for an OLLAMA model tar
 test("Remember as default does not write anything when the checkbox is unchecked", () => {
   const settings = { cliDefault: "ask", cwdDefault: "" };
   const saveSettings = recordingSave();
-  const out = REMEMBER_RUNNER(false, "claude", "claude", "/proj", stubFindLaunchTarget, settings, saveSettings);
+  const out = REMEMBER_RUNNER(false, "claude", "claude", "/proj", { findLaunchTarget: stubFindLaunchTarget, settings, saveSettings });
   assert.strictEqual(out.cliDefault, "ask", "unchecked Remember must not overwrite the existing default");
   assert.strictEqual(out.cwdDefault, "", "unchecked Remember must not overwrite the cwd");
   assert(!saveSettings._called, "unchecked Remember must not call saveSettings()");
@@ -275,7 +277,7 @@ test("round-trip: a direct launch remembered this session is auto-applied next s
   // Session 1: user picks DIRECT claude in the pill picker and checks Remember.
   const settings = { cliDefault: "ask" };
   const saveSettings = recordingSave();
-  const persisted = REMEMBER_RUNNER(true, "claude", "claude", "/proj", stubFindLaunchTarget, settings, saveSettings);
+  const persisted = REMEMBER_RUNNER(true, "claude", "claude", "/proj", { findLaunchTarget: stubFindLaunchTarget, settings, saveSettings });
   assert.strictEqual(persisted.cliDefault, "raw:claude",
     "session 1 should persist 'raw:claude', got: " + JSON.stringify(persisted.cliDefault));
 

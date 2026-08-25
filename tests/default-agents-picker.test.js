@@ -2,10 +2,11 @@
 // DIRECT launch options (in addition to the ollama-launch entries), and opencode
 // is wired end-to-end as a direct-CLI launch target.
 //
-// app.js is a browser module (top-level window/document/window.chatoss + an
-// auto-running init()), so it can't be `require`d whole in Node. Following the
-// audit-fixes test pattern (tests/audit-fixes.test.js), these tests:
-//   1. Parse the REAL app.js source as text.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// Following the audit-fixes test pattern (tests/audit-fixes.test.js), these
+// tests:
+//   1. Parse the REAL module sources as text.
 //   2. For the pure functions (buildCliOptions, availableLaunchTargets) the
 //      function body is EXTRACTED from the real source with a brace-balancing
 //      parser and EXECUTED in a sandbox against controlled `detection` objects,
@@ -22,8 +23,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const HTML = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 
 // ---------------------------------------------------------------------------
@@ -85,7 +87,7 @@ test("buildCliOptions offers raw:claude / raw:codex / raw:opencode when detected
   const tools = parseOllamaLaunchTools(SRC);
   const body = extractFunctionBody(SRC, "buildCliOptions");
   const detectionAll = { ollama: true, claude: true, codex: true, opencode: true };
-  const opts = makeFn(body, { OLLAMA_LAUNCH_TOOLS: tools, detection: detectionAll });
+  const opts = makeFn(body, { TC: { OLLAMA_LAUNCH_TOOLS: tools, detection: detectionAll } });
   const values = opts.map((o) => o.value);
   assert(values.includes("raw:claude"), "raw:claude missing from buildCliOptions: " + JSON.stringify(values));
   assert(values.includes("raw:codex"), "raw:codex missing from buildCliOptions: " + JSON.stringify(values));
@@ -99,7 +101,7 @@ test("buildCliOptions omits raw:opencode when opencode is NOT detected", () => {
   const tools = parseOllamaLaunchTools(SRC);
   const body = extractFunctionBody(SRC, "buildCliOptions");
   const detectionNone = { ollama: false, claude: false, codex: false, opencode: false };
-  const opts = makeFn(body, { OLLAMA_LAUNCH_TOOLS: tools, detection: detectionNone });
+  const opts = makeFn(body, { TC: { OLLAMA_LAUNCH_TOOLS: tools, detection: detectionNone } });
   const values = opts.map((o) => o.value);
   assert(!values.includes("raw:opencode"), "raw:opencode should NOT appear when opencode undetected: " + JSON.stringify(values));
   assert(!values.includes("raw:claude"), "raw:claude should NOT appear when claude undetected");
@@ -114,18 +116,18 @@ test("detectTools resolves the opencode binary (which opencode + OPENCODE_GUESSE
   assert(/const OPENCODE_GUESSES = \[/.test(SRC), "OPENCODE_GUESSES constant not declared");
   assert(/let opencodePath = null;/.test(SRC), "opencodePath module-level var not declared");
   // detectTools must run `which opencode` through resolveCliPath.
-  assert(/resolveCliPath\("opencode", OPENCODE_GUESSES\)/.test(SRC),
-    "detectTools should call resolveCliPath(\"opencode\", OPENCODE_GUESSES)");
+  assert(/resolveCliPath\("opencode", TC\.OPENCODE_GUESSES\)/.test(SRC),
+    "detectTools should call resolveCliPath(\"opencode\", TC.OPENCODE_GUESSES)");
   // The opencode flag + path must be carried onto the `fresh` detection object
   // and persisted into settings.detected.
-  assert(/fresh\.opencode = !!opencodePath;/.test(SRC), "fresh.opencode flag not set in detectTools");
-  assert(/fresh\.opencodePath = opencodePath;/.test(SRC), "fresh.opencodePath not set in detectTools");
-  assert(/opencode: detection\.opencode,/.test(SRC), "settings.detected.opencode not persisted");
-  assert(/opencodePath: detection\.opencodePath \|\| null,/.test(SRC), "settings.detected.opencodePath not persisted");
+  assert(/fresh\.opencode = !!TC\.opencodePath;/.test(SRC), "fresh.opencode flag not set in detectTools");
+  assert(/fresh\.opencodePath = TC\.opencodePath;/.test(SRC), "fresh.opencodePath not set in detectTools");
+  assert(/opencode: TC\.detection\.opencode,/.test(SRC), "settings.detected.opencode not persisted");
+  assert(/opencodePath: TC\.detection\.opencodePath \|\| null,/.test(SRC), "settings.detected.opencodePath not persisted");
   // The cold-start restore in init() must repopulate opencode from settings.detected.
-  assert(/opencode: !!\(settings\.detected && settings\.detected\.opencode\),/.test(SRC),
+  assert(/opencode: !!\(TC\.settings\.detected && TC\.settings\.detected\.opencode\),/.test(SRC),
     "init() detection restore missing opencode flag");
-  assert(/opencodePath: \(settings\.detected && settings\.detected\.opencodePath\) \|\| null,/.test(SRC),
+  assert(/opencodePath: \(TC\.settings\.detected && TC\.settings\.detected\.opencodePath\) \|\| null,/.test(SRC),
     "init() detection restore missing opencodePath");
 });
 
@@ -144,7 +146,7 @@ test("availableLaunchTargets lists opencode as a direct target when installed", 
   };
   // Stub availableOllamaModels (the function calls it for the ollama list).
   const targets = makeFn(body, {
-    detection,
+    TC: { detection },
     availableOllamaModels: () => ["qwen3:30b"],
   });
   const direct = targets.filter((t) => t.kind === "direct");
@@ -166,7 +168,7 @@ test("availableLaunchTargets omits opencode when the binary is not installed", (
     opencode: false, opencodePath: null,
   };
   const targets = makeFn(body, {
-    detection,
+    TC: { detection },
     availableOllamaModels: () => ["qwen3:30b"],
   });
   const ids = targets.map((t) => t.id);
@@ -214,9 +216,10 @@ test("spawnChosen raw: branch launches the opencode binary directly (exec openco
   //     inner = "exec " + bin;
   //     label = bin + " · " + basename(choice.cwd);
   //   }
-  // Replicate the EXACT predicate + body from app.js and run it for opencode.
+  // Replicate the EXACT predicate + body from js/07-spawn.js and run it for
+  // opencode.
   const m = SRC.match(/if \(choice\.cli && choice\.cli\.startsWith\("raw:"\)\) \{[\s\S]*?inner = "exec " \+ bin;[\s\S]*?\}/);
-  assert(m, "spawnChosen raw:<bin> branch not found in app.js");
+  assert(m, "spawnChosen raw:<bin> branch not found in js/07-spawn.js");
   // Pull the two assignment lines out of the captured branch and run them.
   const branch = m[0];
   assert(/const bin = choice\.cli\.slice\(4\);/.test(branch), "raw branch should slice(4) the cli value");
@@ -231,10 +234,10 @@ test("spawnChosen raw: branch launches the opencode binary directly (exec openco
   // The above Function just defines; call it via eval-free wrapper:
   // Re-run inline to capture locals (the branch declares `const bin`).
   const runner = new Function( // eslint-disable-line no-new-func
-    "choice", "basename",
+    "choice", "TC",
     "let inner, label;\n" + branch + "\nreturn { inner: inner, label: label };"
   );
-  const out = runner(choice, (p) => p.split("/").pop());
+  const out = runner(choice, { basename: (p) => p.split("/").pop() });
   assert(out.inner === "exec opencode",
     "raw:opencode should produce inner 'exec opencode', got: " + JSON.stringify(out.inner));
   assert(/opencode/.test(out.label), "raw:opencode label should mention opencode: " + JSON.stringify(out.label));

@@ -1,30 +1,27 @@
-import { APPROVE_BUSY_TIMEOUT_MS, APPROVE_COOLDOWN_MS, ERROR_LOOP_THRESHOLD, NUDGE_COOLDOWN_MS, NUDGE_TEXT, ORCH_SENTINEL_RE, STALL_QUIET_MS, deadSessions, loginShell, sessions, state, trustMode } from "./00-state.js";
-import { detectAgentError, persistSessions, schedulePersistSessions, sessionActivity, worktreeBranchForCwd } from "./01-sessions.js";
-import { sqliteDeleteTerminalSession } from "./02-sqlite.js";
-import { $, el } from "./04-dom.js";
-import { activeConversation, basename, esc, saveState } from "./05-util.js";
-import { cleanApprovalText, sendKey, stripAnsi } from "./06-tools.js";
-import { askCommandApproval } from "./08-settings.js";
-import { confirmDelete } from "./11-projects.js";
-export function refreshSessionVisibility() {
-  const cid = state.activeConversationId;
+// 20-terminal.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+function refreshSessionVisibility() {
+  const cid = TC.state.activeConversationId;
   let visible = 0;
-  for (const rec of sessions.values()) {
+  for (const rec of TC.sessions.values()) {
     const show = (rec.conversationId || null) === cid;
     if (rec.squareEl) rec.squareEl.style.display = show ? "" : "none";
     if (show) visible++;
   }
-  for (const card of el.termGrid.querySelectorAll(".term-square-ended")) {
-    const snap = deadSessions.get(card.dataset.deadId);
+  for (const card of TC.el.termGrid.querySelectorAll(".term-square-ended")) {
+    const snap = TC.deadSessions.get(card.dataset.deadId);
     const show = !!snap && (snap.conversationId || null) === cid;
     card.style.display = show ? "" : "none";
     if (show) visible++;
   }
-  if (el.termEmpty) el.termEmpty.style.display = visible ? "none" : "";
-  if (el.termCount) el.termCount.textContent = String(visible);
+  if (TC.el.termEmpty) TC.el.termEmpty.style.display = visible ? "none" : "";
+  if (TC.el.termCount) TC.el.termCount.textContent = String(visible);
 }
 
-export function ensureEmptyHint() {
+function ensureEmptyHint() {
   // Both live sessions and persisted (ended) cards count toward "not empty",
   // but only those belonging to the active conversation.
   refreshSessionVisibility();
@@ -35,16 +32,16 @@ export function ensureEmptyHint() {
 // (CSS class on the grid) — the live xterm mounts are NOT recreated, so their
 // content/state is preserved. Each mount's ResizeObserver refits the PTY to
 // its new box automatically after the relayout.
-export function setTermView(view) {
+function setTermView(view) {
   if (view !== "squares" && view !== "columns" && view !== "rows") view = "squares";
-  state.termView = view;
-  saveState();
+  TC.state.termView = view;
+  TC.saveState();
   // Swap the grid's layout class.
-  el.termGrid.classList.remove("view-squares", "view-columns", "view-rows");
-  el.termGrid.classList.add("view-" + view);
+  TC.el.termGrid.classList.remove("view-squares", "view-columns", "view-rows");
+  TC.el.termGrid.classList.add("view-" + view);
   // Update the active/aria-pressed state of the switcher buttons.
-  if (el.termViewSwitcher) {
-    for (const btn of el.termViewSwitcher.querySelectorAll(".term-view-btn")) {
+  if (TC.el.termViewSwitcher) {
+    for (const btn of TC.el.termViewSwitcher.querySelectorAll(".term-view-btn")) {
       const isActive = btn.dataset.view === view;
       btn.classList.toggle("active", isActive);
       btn.setAttribute("aria-pressed", isActive ? "true" : "false");
@@ -53,43 +50,43 @@ export function setTermView(view) {
   // The container dimensions changed — give the layout a frame to settle, then
   // refit every live terminal to its new box. Dead (ended) cards have no PTY.
   requestAnimationFrame(() => {
-    for (const rec of sessions.values()) fitTerminal(rec);
+    for (const rec of TC.sessions.values()) fitTerminal(rec);
   });
 }
 
-export function renderTabs() {
+function renderTabs() {
   // Grid layout — no tab bar. Keep the active square visually marked and the
   // count badge in sync. (Name kept so existing call sites don't change.)
-  for (const rec of sessions.values()) {
-    rec.squareEl.classList.toggle("active", rec.id === state.activeSessionId);
+  for (const rec of TC.sessions.values()) {
+    rec.squareEl.classList.toggle("active", rec.id === TC.state.activeSessionId);
   }
   // Mark an active ended card too (clicking one selects it).
-  for (const card of el.termGrid.querySelectorAll(".term-square-ended")) {
-    card.classList.toggle("active", card.dataset.deadId === state.activeSessionId);
+  for (const card of TC.el.termGrid.querySelectorAll(".term-square-ended")) {
+    card.classList.toggle("active", card.dataset.deadId === TC.state.activeSessionId);
   }
   refreshSessionVisibility();
 }
 
-export function selectSession(id) {
+function selectSession(id) {
   // Live session?
-  const rec = sessions.get(id);
+  const rec = TC.sessions.get(id);
   // Ended/persisted session?
-  const dead = deadSessions.get(id);
+  const dead = TC.deadSessions.get(id);
   if (!rec && !dead) return;
-  state.activeSessionId = id;
-  saveState();
+  TC.state.activeSessionId = id;
+  TC.saveState();
   renderTabs();
-  const target = rec ? rec.squareEl : (el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]'));
+  const target = rec ? rec.squareEl : (TC.el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]'));
   if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
   renderSessionInfo();
 }
 
-export async function registerSession(session, cmd, args, cwd, label, conversationId) {
+async function registerSession(session, cmd, args, cwd, label, conversationId) {
   const id = session.id;
   // Scope the session to the conversation that was active when it was spawned
   // (or the explicit id passed by the reattach path). This is what lets the
   // Sessions section show only the current conversation's terminals.
-  const convId = (conversationId !== undefined) ? conversationId : state.activeConversationId;
+  const convId = (conversationId !== undefined) ? conversationId : TC.state.activeConversationId;
   // square
   const square = document.createElement("div");
   square.className = "term-square";
@@ -104,7 +101,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
   lab.textContent = label;
   const cwdEl = document.createElement("span");
   cwdEl.className = "term-cwd";
-  cwdEl.textContent = basename(cwd);
+  cwdEl.textContent = TC.basename(cwd);
   cwdEl.title = cwd;
   const expandBtn = document.createElement("button");
   expandBtn.className = "term-head-btn";
@@ -147,7 +144,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
   // Newest session first: prepend the square to the TOP of the grid so
   // currently-running terminals sit above ended (dead) cards and stay visible
   // without scrolling. The empty-state hint (termEmpty) remains the last child.
-  el.termGrid.insertBefore(square, el.termGrid.firstChild);
+  TC.el.termGrid.insertBefore(square, TC.el.termGrid.firstChild);
 
   // clicking a square selects it
   square.addEventListener("click", () => selectSession(id));
@@ -179,12 +176,12 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
     // worktree cleanup can match a session to a merged branch.
     agent: label ? String(label).split(" · ")[0] : label,
     conversationId: convId,
-    createdAt: Date.now(), endedAt: null, worktreeBranch: worktreeBranchForCwd(cwd), merged: false };
-  sessions.set(session.id, rec);
+    createdAt: Date.now(), endedAt: null, worktreeBranch: TC.worktreeBranchForCwd(cwd), merged: false };
+  TC.sessions.set(session.id, rec);
   // Persist immediately so a session that's spawned but produces no output
   // before the app is closed still survives a reopen (otherwise it would never
   // reach SESSIONS_KEY until the first output chunk triggers schedulePersist).
-  schedulePersistSessions();
+  TC.schedulePersistSessions();
 
   // ---------- Platform PTY-state observation (idle detection) ----------
   // The text heuristics (isIdlePrompt) never matched opencode/codex prompt
@@ -267,7 +264,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
           console.warn("[Term Coder] autoApproveBusy watchdog fired for", rec.label);
           rec.autoApproveBusy = false;
         }
-      }, APPROVE_BUSY_TIMEOUT_MS);
+      }, TC.APPROVE_BUSY_TIMEOUT_MS);
     }
   };
 
@@ -294,7 +291,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
 
   // Extract the question text that follows the orchestrator-input marker.
   function extractSentinelQuestion(text) {
-    const m = text.match(ORCH_SENTINEL_RE);
+    const m = text.match(TC.ORCH_SENTINEL_RE);
     if (!m) return "";
     // Grab the marker line + any following context lines (up to ~500 chars).
     let q = (m[1] || "").trim();
@@ -340,7 +337,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
     // frames ("Baking…", "still thinking") that stripAnsi() can't remove —
     // they're plain unicode redrawn every frame. Clean them out so the
     // approval overlay shows the real command, not garbled decoration.
-    commandText = cleanApprovalText(commandText);
+    commandText = TC.cleanApprovalText(commandText);
 
     // Dangerous command patterns — always ask the user before approving.
     const dangerous = /\brm\s+-rf?\b|\bdelete\b|\bdrop\s+(table|database)\b|\bformat\b|\btruncate\b|\bsudo\s+rm\b|\bgit\s+push\s+.*--force\b|\bchmod\s+777\b|\bkill\s+-9\b/i.test(commandText);
@@ -398,11 +395,11 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
         // Debounced-save this session's output snapshot to scopedData so it
         // survives an app close/reopen (see SESSIONS_KEY). schedulePersistSessions
         // batches many chunks into one write — never per byte.
-        schedulePersistSessions();
+        TC.schedulePersistSessions();
         // Cap the buffer so a long session can't grow it unbounded — prompts
         // and markers are always near the tail, so keeping the last ~8KB is plenty.
         if (monitorBuffer.length > 8192) monitorBuffer = monitorBuffer.slice(-4096);
-        const cleanText = stripAnsi(monitorBuffer);
+        const cleanText = TC.stripAnsi(monitorBuffer);
         // Match prompts against the TAIL only. Matching the whole accumulated
         // buffer meant a prompt that had already been answered stayed matchable
         // for thousands of characters — and since TUIs redraw their scrollback
@@ -421,7 +418,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
         // 0) Record agent/provider errors. Passive — this never touches the PTY,
         //    it just makes the failure visible to the orchestrator as a state
         //    instead of leaving it to notice error text in a screen dump.
-        const errLine = detectAgentError(tailText);
+        const errLine = TC.detectAgentError(tailText);
         if (errLine) {
           if (errLine === rec.lastErrorText) {
             rec.errorCount = (rec.errorCount || 1) + 1;
@@ -430,7 +427,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
             rec.errorCount = 1;
           }
           rec.lastErrorAt = now;
-          const looping = rec.errorCount >= ERROR_LOOP_THRESHOLD;
+          const looping = rec.errorCount >= TC.ERROR_LOOP_THRESHOLD;
           if (looping && !rec.errorLoop) {
             rec.errorLoop = true;
             renderTabs();
@@ -455,7 +452,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
         // 1) Orchestrator-input marker — the agent is asking us a question.
         //    Deduped by question text rather than by latching autoApproveBusy, so
         //    a pending question never blinds the monitor to approval prompts.
-        const sentinelMatch = cleanText.match(ORCH_SENTINEL_RE);
+        const sentinelMatch = cleanText.match(TC.ORCH_SENTINEL_RE);
         if (sentinelMatch) {
           const question = extractSentinelQuestion(cleanText);
           const key = question.slice(0, 160);
@@ -497,7 +494,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
 
             const settle = () => {
               monitorBuffer = "";
-              rec._approveCooldownUntil = Date.now() + APPROVE_COOLDOWN_MS;
+              rec._approveCooldownUntil = Date.now() + TC.APPROVE_COOLDOWN_MS;
               setApproveBusy(false);
               rec.waitingForInput = false;
               rec.pendingQuestion = "";
@@ -510,18 +507,18 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
               // .catch is essential: an askChoice that rejects would otherwise
               // leave autoApproveBusy set (the watchdog would clear it, but only
               // after 45s of the orchestrator being blind to this terminal).
-              askCommandApproval(rec, verdict.command).then((approved) => {
-                sendKey(session, approved ? "enter" : "escape").finally(settle);
+              TC.askCommandApproval(rec, verdict.command).then((approved) => {
+                TC.sendKey(session, approved ? "enter" : "escape").finally(settle);
               }).catch((e) => {
                 console.warn("askCommandApproval failed", e);
-                sendKey(session, "escape").finally(settle);
+                TC.sendKey(session, "escape").finally(settle);
               });
             } else {
               // Safe edit / safe command — auto-approve. For Claude the default
               // highlighted option is "1. Yes", so Enter accepts it (we never
               // pick option 2 "allow all edits during this session" — that stays
               // the user's per-edit choice).
-              sendKey(session, "enter").finally(settle);
+              TC.sendKey(session, "enter").finally(settle);
             }
             return;
           }
@@ -606,17 +603,17 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
         renderSessionInfo();
         // Eagerly persist the final ended snapshot so the last output is saved
         // even if the app is closed immediately after the process exits.
-        persistSessions().catch((e) => console.warn("persistSessions onExit", e));
+        TC.persistSessions().catch((e) => console.warn("persistSessions onExit", e));
       });
     }
   } catch (e) { console.warn("onExit failed:", e); }
 
   expandBtn.onclick = () => toggleExpand(id);
-  closeBtn.onclick = () => confirmDelete(() => closeSession(id), closeBtn);
+  closeBtn.onclick = () => TC.confirmDelete(() => closeSession(id), closeBtn);
 
   ensureEmptyHint();
-  state.activeSessionId = id;
-  saveState();
+  TC.state.activeSessionId = id;
+  TC.saveState();
   renderTabs();
   renderSessionInfo();
 
@@ -629,7 +626,7 @@ export async function registerSession(session, cmd, args, cwd, label, conversati
   } catch (e) { /* ResizeObserver unavailable — window resize still refits */ }
 }
 
-export function fitTerminal(rec) {
+function fitTerminal(rec) {
   if (!rec || !rec.active) return;
   // Skip squares that are not laid out (hidden or zero-size) — avoids
   // resizing the PTY to 20×5 while the app is starting up.
@@ -641,8 +638,8 @@ export function fitTerminal(rec) {
   try { if (rec.session && rec.session.resize) rec.session.resize(cols, rows); } catch (e) { /* non-fatal */ }
 }
 
-export function toggleExpand(id) {
-  const rec = sessions.get(id);
+function toggleExpand(id) {
+  const rec = TC.sessions.get(id);
   if (!rec) return;
   rec.expanded = !rec.expanded;
   rec.squareEl.classList.toggle("expanded", rec.expanded);
@@ -654,26 +651,26 @@ export function toggleExpand(id) {
 // nudges them back to life, or reports them so the user can intervene. Runs on
 // a timer (HEALTH_CHECK_MS) and is also exposed to the orchestrator as the
 // health_check tool. Returns a per-session report string.
-export async function runHealthCheck() {
+async function runHealthCheck() {
   const now = Date.now();
   const report = [];
-  for (const rec of sessions.values()) {
+  for (const rec of TC.sessions.values()) {
     if (rec.active === false) continue;
-    const act = sessionActivity(rec);
+    const act = TC.sessionActivity(rec);
     const quietFor = now - (rec.lastOutputAt || now);
-    const stalled = (act === "WORKING" || act === "STARTING") && quietFor >= STALL_QUIET_MS;
+    const stalled = (act === "WORKING" || act === "STARTING") && quietFor >= TC.STALL_QUIET_MS;
     if (stalled) {
-      const canNudge = now - (rec.lastNudgeAt || 0) >= NUDGE_COOLDOWN_MS;
+      const canNudge = now - (rec.lastNudgeAt || 0) >= TC.NUDGE_COOLDOWN_MS;
       if (canNudge && rec.session && typeof rec.session.paste === "function") {
         try {
-          await rec.session.paste(NUDGE_TEXT);
+          await rec.session.paste(TC.NUDGE_TEXT);
           await rec.session.key("enter");
           rec.lastNudgeAt = now;
           rec.nudgeCount = (rec.nudgeCount || 0) + 1;
           try {
             window.chatoss.notifications.send({
               title: "Agent appears stalled — nudged",
-              body: (rec.label || "Agent") + " was quiet for " + Math.round(quietFor / 60000) + " min. Sent: \"" + NUDGE_TEXT + "\"",
+              body: (rec.label || "Agent") + " was quiet for " + Math.round(quietFor / 60000) + " min. Sent: \"" + TC.NUDGE_TEXT + "\"",
             });
           } catch (e) { /* non-fatal */ }
           report.push("NUDGED " + (rec.label || rec.id) + " (quiet " + Math.round(quietFor / 60000) + " min, nudge #" + rec.nudgeCount + ")");
@@ -694,8 +691,8 @@ export async function runHealthCheck() {
   return report.length ? report.join("\n") : "No live sessions.";
 }
 
-export async function closeSession(id) {
-  const rec = sessions.get(id);
+async function closeSession(id) {
+  const rec = TC.sessions.get(id);
   if (!rec) return;
   if (rec.autoApproveUnsub) { try { rec.autoApproveUnsub(); } catch (e) { /* non-fatal */ } }
   if (rec._idleTimer) { clearTimeout(rec._idleTimer); rec._idleTimer = null; }
@@ -705,11 +702,11 @@ export async function closeSession(id) {
   // uncommitted edits are never stranded. A session whose cwd is a worktree
   // (worktreeBranchForCwd returns its branch) gets a WIP commit; the merge flow
   // later folds it into main. Nothing-to-commit is fine (exit 1, ignored).
-  const wtBranch = rec.worktreeBranch || worktreeBranchForCwd(rec.cwd);
+  const wtBranch = rec.worktreeBranch || TC.worktreeBranchForCwd(rec.cwd);
   if (wtBranch && rec.cwd) {
     try {
       const wipR = await window.chatoss.terminal.exec(
-        loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before closing " + (rec.label || rec.id))),
+        TC.loginShell("git add -A && git commit -m " + JSON.stringify("WIP: commit uncommitted work before closing " + (rec.label || rec.id))),
         { cwd: rec.cwd }
       );
       if (wipR && wipR.exitCode === 0) {
@@ -730,37 +727,37 @@ export async function closeSession(id) {
   if (rec.dispose) { try { rec.dispose(); } catch (e) { /* non-fatal */ } }
   if (rec.ro) { try { rec.ro.disconnect(); } catch (e) { /* non-fatal */ } }
   rec.squareEl.remove();
-  sessions.delete(id);
+  TC.sessions.delete(id);
   // A closed session should NOT come back as a dead card on the next reopen,
   // so drop it from the persisted snapshot list too.
-  sqliteDeleteTerminalSession(id);
-  persistSessions().catch((e) => console.warn("persistSessions closeSession", e));
-  if (state.activeSessionId === id) {
-    state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
+  TC.sqliteDeleteTerminalSession(id);
+  TC.persistSessions().catch((e) => console.warn("persistSessions closeSession", e));
+  if (TC.state.activeSessionId === id) {
+    TC.state.activeSessionId = TC.sessions.size ? TC.sessions.keys().next().value : null;
   }
-  saveState();
+  TC.saveState();
   ensureEmptyHint();
   renderTabs();
   renderSessionInfo();
 }
 
-export function renderSessionInfo() {
+function renderSessionInfo() {
   // If the selected session belongs to a different conversation, drop the
   // selection so the footer doesn't name a terminal that isn't visible here.
-  if (state.activeSessionId) {
-    const sel = sessions.get(state.activeSessionId) || deadSessions.get(state.activeSessionId);
-    if (!sel || (sel.conversationId || null) !== state.activeConversationId) {
-      state.activeSessionId = null;
+  if (TC.state.activeSessionId) {
+    const sel = TC.sessions.get(TC.state.activeSessionId) || TC.deadSessions.get(TC.state.activeSessionId);
+    if (!sel || (sel.conversationId || null) !== TC.state.activeConversationId) {
+      TC.state.activeSessionId = null;
     }
   }
-  const rec = state.activeSessionId ? sessions.get(state.activeSessionId) : null;
-  const dead = (!rec && state.activeSessionId) ? deadSessions.get(state.activeSessionId) : null;
-  const c = activeConversation();
+  const rec = TC.state.activeSessionId ? TC.sessions.get(TC.state.activeSessionId) : null;
+  const dead = (!rec && TC.state.activeSessionId) ? TC.deadSessions.get(TC.state.activeSessionId) : null;
+  const c = TC.activeConversation();
   let bits = [];
   if (c) bits.push("Conversation: " + c.name);
   if (rec) bits.push("Session: " + rec.label + " @ " + rec.cwd + (rec.active ? "" : " (exited)"));
   else if (dead) bits.push("Session: " + dead.label + " @ " + dead.cwd + " (ended)");
-  el.sessionInfo.textContent = bits.join("  ·  ");
+  TC.el.sessionInfo.textContent = bits.join("  ·  ");
   // Keep the terminal grid + count badge scoped to the active conversation.
   refreshSessionVisibility();
 }
@@ -782,3 +779,16 @@ export function renderSessionInfo() {
 //
 // style "rect" -> stacked text rectangles, one full-width row per option.
 // style "pill" -> pill buttons in a wrapping row (flex-wrap), horizontal, wrap.
+// --- exports ---
+TC.refreshSessionVisibility = refreshSessionVisibility;
+TC.ensureEmptyHint = ensureEmptyHint;
+TC.setTermView = setTermView;
+TC.renderTabs = renderTabs;
+TC.selectSession = selectSession;
+TC.registerSession = registerSession;
+TC.fitTerminal = fitTerminal;
+TC.toggleExpand = toggleExpand;
+TC.runHealthCheck = runHealthCheck;
+TC.closeSession = closeSession;
+TC.renderSessionInfo = renderSessionInfo;
+})();

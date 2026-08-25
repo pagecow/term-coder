@@ -14,8 +14,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const HTML = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 
 // ---------------------------------------------------------------------------
@@ -46,10 +47,10 @@ test("runHealthCheck detects stalls and nudges with the are-you-working prompt",
   assert(/async function runHealthCheck\(\)/.test(SRC), "runHealthCheck missing");
   assert(/STALL_QUIET_MS/.test(SRC), "stall threshold missing");
   assert(/are you still working\? continue/.test(SRC), "nudge text missing");
-  assert(/rec\.session\.paste\(NUDGE_TEXT\)/.test(SRC), "nudge must paste the text");
+  assert(/rec\.session\.paste\(TC\.NUDGE_TEXT\)/.test(SRC), "nudge must paste the text");
   assert(/rec\.session\.key\("enter"\)/.test(SRC), "nudge must press enter");
   assert(/NUDGE_COOLDOWN_MS/.test(SRC), "nudges must be rate-limited");
-  assert(/setInterval\(\(\) => \{\s*runHealthCheck\(\)/.test(SRC),
+  assert(/setInterval\(\(\) => \{\s*TC\.runHealthCheck\(\)/.test(SRC),
     "the health check must run on a timer");
 });
 
@@ -78,7 +79,7 @@ test("degenerate state is surfaced to the orchestrator", () => {
 // ---------------------------------------------------------------------------
 
 test("start_cli_session skips the spawn modal when a default launch is pinned", () => {
-  assert(/const defId = cliDefaultToTargetId\(settings\.cliDefault\)/.test(SRC),
+  assert(/const defId = TC\.cliDefaultToTargetId\(TC\.settings\.cliDefault\)/.test(SRC),
     "start_cli_session must read the saved default");
   assert(/using your saved default launch — no dialog shown/.test(SRC),
     "the skip path must report that no dialog was shown");

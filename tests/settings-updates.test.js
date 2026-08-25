@@ -4,21 +4,23 @@
 //   T3 — Ollama model detection unification (Settings consumes the same
 //        complete list the chat model picker uses)
 //
-// app.js is a browser module (top-level `window`/`document`/`window.chatoss`
-// references + an auto-running `init()`), so it can't be `require`d whole in
-// Node. These tests instead:
-//   1. Read the REAL app.js source as text and assert the wiring patterns.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// These tests instead:
+//   1. Read the REAL module sources as text and assert the wiring patterns.
 //   2. Replicate the exact decision predicates changed by the fixes VERBATIM
-//      from app.js (with the source line cited in a comment), and assert they
-//      behave correctly — so a revert of a fix's predicate still fails here.
+//      from the modules (with the source line cited in a comment), and assert
+//      they behave correctly — so a revert of a fix's predicate still fails
+//      here.
 //
 // Run: node tests/settings-updates.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const APP_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "app.json"), "utf8"));
 
 // ---------------------------------------------------------------------------
@@ -38,9 +40,9 @@ test("T1: app.json declares webSearch + openExternal and allows the GitHub hosts
   assert(APP_JSON.openExternalAllowlist.includes("raw.githubusercontent.com"), "raw.githubusercontent.com not in openExternalAllowlist");
 });
 
-test("T1: APP_VERSION in app.js matches app.json's version", () => {
+test("T1: APP_VERSION in js/00-state.js matches app.json's version", () => {
   const m = SRC.match(/const APP_VERSION = "([^"]+)";/);
-  assert(m, "APP_VERSION constant not found in app.js");
+  assert(m, "APP_VERSION constant not found in js/00-state.js");
   assert.strictEqual(m[1], APP_JSON.version,
     "APP_VERSION (" + m[1] + ") drifted from app.json version (" + APP_JSON.version + ")");
 });
@@ -101,15 +103,15 @@ test("T1: checkForUpdates wires the GitHub sources, statuses, and the releases l
   // Statuses.
   assert(/Couldn't check for updates — check your connection/.test(SRC), "failure status message missing");
   assert(/"Update available: " \+ remote/.test(SRC), "update-available status missing");
-  assert(/"Up to date \(" \+ APP_VERSION \+ "\)"/.test(SRC), "up-to-date status missing");
+  assert(/"Up to date \(" \+ TC\.APP_VERSION \+ "\)"/.test(SRC), "up-to-date status missing");
   // The update action opens the releases page via openExternal (the app cannot
   // self-replace its files — notify + link out is the whole flow).
   assert(/UPDATES_RELEASES_PAGE_URL = "https:\/\/github\.com\/pagecow\/term-coder\/releases"/.test(SRC),
     "releases page URL missing");
   assert(/openExternal\.open\(UPDATES_RELEASES_PAGE_URL\)/.test(SRC), "releases page must open via openExternal");
   // The check must be user-triggered from the Settings button.
-  assert(/checkUpdatesBtn\.addEventListener\("click", checkForUpdates\)/.test(SRC), "Check-for-updates button not wired");
-  assert(/openReleasesBtn\.addEventListener\("click", openReleasesPage\)/.test(SRC), "Get-update button not wired");
+  assert(/TC\.el\.checkUpdatesBtn\.addEventListener\("click", TC\.checkForUpdates\)/.test(SRC), "Check-for-updates button not wired");
+  assert(/TC\.el\.openReleasesBtn\.addEventListener\("click", TC\.openReleasesPage\)/.test(SRC), "Get-update button not wired");
 });
 
 test("T1: raw app.json fetch is cache-busted (forces a CDN cache miss)", () => {
@@ -211,7 +213,7 @@ test("T2: openSettings falls back to 'ask' for a legacy cliDefault not in the se
   assert.strictEqual(pick(""), "ask", "empty value must fall back to ask");
   assert.strictEqual(pick(undefined), "ask", "undefined value must fall back to ask");
   // The source must contain the fallback wiring.
-  assert(/cliValues\.includes\(settings\.cliDefault\) \? settings\.cliDefault : "ask"/.test(SRC),
+  assert(/cliValues\.includes\(TC\.settings\.cliDefault\) \? TC\.settings\.cliDefault : "ask"/.test(SRC),
     "openSettings setCli fallback wiring missing");
 });
 
@@ -310,9 +312,9 @@ test("T3: Settings consumes the live detection + merged list (source wiring)", (
   // the launch-target pickers use — not the persisted settings.detected
   // snapshot (the stale/limited list that caused the 5-vs-all mismatch).
   assert(!/const d = settings\.detected/.test(SRC), "renderDetectedList still reads the stale settings.detected snapshot");
-  assert(/const d = detection \|\| \{ codex: false/.test(SRC), "renderDetectedList must read the live detection object");
+  assert(/const d = TC\.detection \|\| \{ codex: false/.test(SRC), "renderDetectedList must read the live detection object");
   // The detected list must show the merged model list.
-  assert(/const ollamaModels = allOllamaModels\(\);/.test(SRC), "renderDetectedList must use allOllamaModels()");
+  assert(/const ollamaModels = TC\.allOllamaModels\(\);/.test(SRC), "renderDetectedList must use allOllamaModels()");
   // availableOllamaModels (the pickers' source) must consume the merged list.
   assert(/const m = allOllamaModels\(\);/.test(SRC), "availableOllamaModels must consume allOllamaModels()");
   // detectTools/parseOllamaModels themselves must be untouched by this fix.

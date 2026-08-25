@@ -1,15 +1,15 @@
 // Audit-fix verification tests for Term Coder (B1, B2, B3, B4, D2).
 //
-// app.js is a browser module (top-level `window`/`document`/`window.chatoss`
-// references + an auto-running `init()`), so it can't be `require`d whole in
-// Node. These tests instead:
-//   1. Read the REAL app.js source as text and parse the OLLAMA_LAUNCH_TOOLS
-//      constant out of it (D2 — the constant is the source of truth, so the
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// These tests instead:
+//   1. Read the REAL module sources as text and parse the OLLAMA_LAUNCH_TOOLS
+//      constant out of them (D2 — the constant is the source of truth, so the
 //      test must fail if the source drifts from the dropdown).
 //   2. Replicate the exact decision predicates changed by each fix VERBATIM
-//      from app.js (with the source line cited in a comment), and assert they
-//      behave correctly. This keeps the tests honest: if someone reverts a
-//      fix's predicate, the test still encodes the required behavior and the
+//      from the modules (with the source line cited in a comment), and assert
+//      they behave correctly. This keeps the tests honest: if someone reverts
+//      a fix's predicate, the test still encodes the required behavior and the
 //      test's citation points the reader at the real source line to update.
 //
 // Run: node tests/audit-fixes.test.js   (no test runner, no deps)
@@ -17,8 +17,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 // ---------------------------------------------------------------------------
 // D2 — OLLAMA_LAUNCH_TOOLS is the single source of truth for buildCliOptions.
@@ -60,7 +61,7 @@ test("D2: buildCliOptions derives its ollama-launch entries from the constant", 
   // The fix wired buildCliOptions to loop over OLLAMA_LAUNCH_TOOLS. Verify the
   // source contains that loop (not the old per-tool push() calls), so the
   // constant is genuinely the source of truth and the two can't drift.
-  assert(/for \(const tool of OLLAMA_LAUNCH_TOOLS\)/.test(SRC),
+  assert(/for \(const tool of TC\.OLLAMA_LAUNCH_TOOLS\)/.test(SRC),
     "buildCliOptions should loop over OLLAMA_LAUNCH_TOOLS (D2 source-of-truth wiring)");
   // The old hardcoded pushes for openclaw/droid must be gone.
   assert(!/push\("openclaw"/.test(SRC), "stale openclaw push() still present (D2)");
@@ -369,7 +370,7 @@ test("D3: statusRefreshTimer handle is declared and stored/cleared", () => {
 // R3 — handleTrust captures trustMode into a local `mode` after loadTrustMode.
 // ---------------------------------------------------------------------------
 test("R3: handleTrust branches on a local `mode`, not the shared `trustMode`", () => {
-  assert(/const mode = trustMode;/.test(SRC), "handleTrust should capture `const mode = trustMode;` (R3)");
+  assert(/const mode = TC\.trustMode;/.test(SRC), "handleTrust should capture `const mode = TC.trustMode;` (R3)");
   assert(/if \(mode === "always"\)/.test(SRC), "handleTrust should branch on local `mode` (R3)");
 });
 
@@ -381,7 +382,7 @@ test("R2: rec and unsub are declared above finish() (no TDZ footgun)", () => {
   // declarations must come BEFORE `const finish = async () =>`.
   const finishIdx = SRC.indexOf("const finish = async () => {");
   assert(finishIdx > -1, "finish() not found (R2)");
-  const recDeclIdx = SRC.indexOf("const rec = sessions.get(session.id);");
+  const recDeclIdx = SRC.indexOf("const rec = TC.sessions.get(session.id);");
   const unsubDeclIdx = SRC.indexOf("let unsub = null;");
   assert(recDeclIdx > -1 && recDeclIdx < finishIdx,
     "const rec must be declared before finish() (R2): rec@" + recDeclIdx + " finish@" + finishIdx);

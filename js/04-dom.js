@@ -1,11 +1,11 @@
-export let spawnPromise = null;
-export let spawnResolve = null;
-// The opts the currently-open modal was opened with (batchMode support).
-export let spawnModalOpts = null;
-
+// 04-dom.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
 // ---------- DOM refs ----------
-export const $ = (id) => document.getElementById(id);
-export const el = {
+const $ = (id) => document.getElementById(id);
+const el = {
   loading: $("app-loading"),
   // top bar
   settingsBtn: $("settings-btn"),
@@ -136,3 +136,7 @@ export const el = {
 };
 
 // ---------- Utils ----------
+// --- exports ---
+Object.defineProperty(TC, "$", { get: () => $, configurable: true });
+Object.defineProperty(TC, "el", { get: () => el, configurable: true });
+})();

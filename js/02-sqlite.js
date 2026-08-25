@@ -1,12 +1,11 @@
-import { deadSessions, sessions, state } from "./00-state.js";
-import { worktreeBranchForCwd, worktreeMeta } from "./01-sessions.js";
-import { el } from "./04-dom.js";
-import { basename, uuid } from "./05-util.js";
-import { stripAnsi } from "./06-tools.js";
-import { registerSession } from "./20-terminal.js";
-export const SQLITE_DB = "termcoder";
-export let sqliteReady = false;
-export let sqliteInitPromise = null;
+// 02-sqlite.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+const SQLITE_DB = "termcoder";
+let sqliteReady = false;
+let sqliteInitPromise = null;
 
 // --- ChatOSS sqlite API shape detection -------------------------------
 // The documented contract is namespace-based: `db.open(name)` returns a
@@ -24,9 +23,9 @@ export let sqliteInitPromise = null;
 // To stay correct against EITHER shape (and survive a future platform change
 // that brings the namespace API in line with the docs), we detect the shape
 // once at open time and route every call through these helpers:
-export let sqliteApiShape = "unknown"; // "namespace" | "handle"
-export let sqliteHandle = null;        // the handle object when shape === "handle"
-export let sqliteName = null;          // the sanitized name string when shape === "namespace"
+let sqliteApiShape = "unknown"; // "namespace" | "handle"
+let sqliteHandle = null;        // the handle object when shape === "handle"
+let sqliteName = null;          // the sanitized name string when shape === "namespace"
 
 // Safely substitute `?` placeholders in a SQL string when the active exec path
 // cannot bind params (i.e. the handle-exec path, which ignores params). Values
@@ -35,7 +34,7 @@ export let sqliteName = null;          // the sanitized name string when shape =
 // the handle.exec() path; the namespace and handle.query() paths bind params
 // natively. NOTE: every value Term Coder stores here is app-generated (ids,
 // model output, tool results) — not user SQL — so interpolation is safe.
-export function sqliteInterpolate(sql, params) {
+function sqliteInterpolate(sql, params) {
   if (!Array.isArray(params) || params.length === 0) return sql;
   let i = 0, out = "", literal = false;
   for (let k = 0; k < sql.length; k++) {
@@ -51,7 +50,7 @@ export function sqliteInterpolate(sql, params) {
   }
   return out;
 }
-export function sqliteLiteral(v) {
+function sqliteLiteral(v) {
   if (v === null || v === undefined) return "NULL";
   if (typeof v === "number") return (isFinite(v) ? String(v) : "NULL");
   if (typeof v === "boolean") return v ? "1" : "0";
@@ -61,7 +60,7 @@ export function sqliteLiteral(v) {
 
 // Internal raw exec — does NOT gate on sqliteReady (used DURING sqliteInit to
 // create the schema before the ready flag is set). Returns affected-row count.
-export async function _sqliteExecRaw(sql, params) {
+async function _sqliteExecRaw(sql, params) {
   if (sqliteApiShape === "namespace") {
     return await window.chatoss.db.exec(sqliteName, sql, params) | 0;
   }
@@ -71,7 +70,7 @@ export async function _sqliteExecRaw(sql, params) {
 }
 
 // Internal raw query — does NOT gate on sqliteReady.
-export async function _sqliteQueryRaw(sql, params) {
+async function _sqliteQueryRaw(sql, params) {
   if (sqliteApiShape === "namespace") {
     return await window.chatoss.db.query(sqliteName, sql, params) || [];
   }
@@ -81,7 +80,7 @@ export async function _sqliteQueryRaw(sql, params) {
 
 // Run a statement (DDL/DML). Accepts (sql, params?). Returns the affected-row
 // count from the platform (or 0 when the platform returns nothing meaningful).
-export async function sqliteExec(sql, params) {
+async function sqliteExec(sql, params) {
   if (!sqliteReady) return 0;
   try {
     return await _sqliteExecRaw(sql, params);
@@ -89,7 +88,7 @@ export async function sqliteExec(sql, params) {
 }
 
 // Run a SELECT. Accepts (sql, params?). Returns rows as objects keyed by column.
-export async function sqliteQuery(sql, params) {
+async function sqliteQuery(sql, params) {
   if (!sqliteReady) return [];
   try {
     return await _sqliteQueryRaw(sql, params);
@@ -99,7 +98,7 @@ export async function sqliteQuery(sql, params) {
 // Open the private DB and create the schema (idempotent). Returns true when
 // the DB is usable; every helper below gates on this. Retries on a transient
 // failure (the cached promise is cleared so a later open can succeed).
-export async function sqliteInit() {
+async function sqliteInit() {
   if (sqliteReady) return true;
   if (sqliteInitPromise) return sqliteInitPromise;
   sqliteInitPromise = (async () => {
@@ -155,8 +154,13 @@ export async function sqliteInit() {
 // stable. Tool calls are upserted by id and never bulk-deleted here, so a
 // mid-turn write (see sqlitePersistToolCall) survives a sync that runs before
 // the assistant message is stored.
-export let _sqliteSyncTimer = null;
-export function scheduleSqliteSync() {
+let _sqliteSyncTimer = null;
+// Other modules (the init flush handler) cancel a pending sync through this —
+// the timer binding itself is exported read-only.
+function cancelPendingSqliteSync() {
+  if (_sqliteSyncTimer) { clearTimeout(_sqliteSyncTimer); _sqliteSyncTimer = null; }
+}
+function scheduleSqliteSync() {
   if (_sqliteSyncTimer) return;
   _sqliteSyncTimer = setTimeout(() => {
     _sqliteSyncTimer = null;
@@ -164,10 +168,10 @@ export function scheduleSqliteSync() {
   }, 700);
 }
 
-export async function syncConversationsToSqlite() {
+async function syncConversationsToSqlite() {
   if (!(await sqliteInit())) return;
   try {
-    const projects = Array.isArray(state.projects) ? state.projects : [];
+    const projects = Array.isArray(TC.state.projects) ? TC.state.projects : [];
     for (const p of projects) {
       await sqliteExec(
         "INSERT OR REPLACE INTO projects (id, name, folder_path, created_at) VALUES (?, ?, ?, ?)",
@@ -191,7 +195,7 @@ export async function syncConversationsToSqlite() {
             for (const tc of m.toolCalls) {
               await sqliteExec(
                 "INSERT OR REPLACE INTO tool_calls (id, conversation_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                [tc.id || uuid(), c.id, tc.name || "unknown",
+                [tc.id || TC.uuid(), c.id, tc.name || "unknown",
                  JSON.stringify(tc.args || {}),
                  tc.error ? ("Error: " + tc.error) : (tc.result != null ? String(tc.result) : null),
                  tc.createdAt || Date.now()]);
@@ -206,19 +210,19 @@ export async function syncConversationsToSqlite() {
 
 // Write one tool call as it happens (mid-turn). Upsert by id so the result
 // update later in the same turn replaces the pending row.
-export async function sqlitePersistToolCall(conversationId, tc) {
+async function sqlitePersistToolCall(conversationId, tc) {
   if (!(await sqliteInit())) return;
   try {
     await sqliteExec(
       "INSERT OR REPLACE INTO tool_calls (id, conversation_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [tc.id || uuid(), conversationId, tc.name || "unknown",
+      [tc.id || TC.uuid(), conversationId, tc.name || "unknown",
        JSON.stringify(tc.args || {}),
        tc.error ? ("Error: " + tc.error) : (tc.result != null ? String(tc.result) : null),
        tc.createdAt || Date.now()]);
   } catch (e) { console.warn("sqlitePersistToolCall", e); }
 }
 
-export async function sqliteDeleteConversation(cid) {
+async function sqliteDeleteConversation(cid) {
   if (!(await sqliteInit())) return;
   try {
     await sqliteExec("DELETE FROM messages WHERE conversation_id = ?", [cid]);
@@ -227,7 +231,7 @@ export async function sqliteDeleteConversation(cid) {
   } catch (e) { console.warn("sqliteDeleteConversation", e); }
 }
 
-export async function sqliteDeleteProject(pid) {
+async function sqliteDeleteProject(pid) {
   if (!(await sqliteInit())) return;
   try {
     const rows = await sqliteQuery("SELECT id FROM conversations WHERE project_id = ?", [pid]);
@@ -245,15 +249,15 @@ export async function sqliteDeleteProject(pid) {
 //   • A conversation present in state keeps its (possibly newer) name, and its
 //     messages become the SQLite ones — plus any in-memory tail that has not
 //     been synced yet (state longer than SQLite).
-export async function hydrateFromSqlite() {
+async function hydrateFromSqlite() {
   if (!(await sqliteInit())) return;
   try {
     const prows = await sqliteQuery("SELECT * FROM projects ORDER BY created_at ASC");
     for (const pr of prows) {
-      if (!state.projects.some((p) => p.id === pr.id)) {
-        state.projects.push({
+      if (!TC.state.projects.some((p) => p.id === pr.id)) {
+        TC.state.projects.push({
           id: pr.id,
-          name: pr.name || basename(pr.folder_path),
+          name: pr.name || TC.basename(pr.folder_path),
           folderPath: pr.folder_path || "",
           conversations: [],
         });
@@ -261,7 +265,7 @@ export async function hydrateFromSqlite() {
     }
     const crows = await sqliteQuery("SELECT * FROM conversations ORDER BY created_at ASC");
     for (const cr of crows) {
-      const p = state.projects.find((x) => x.id === cr.project_id);
+      const p = TC.state.projects.find((x) => x.id === cr.project_id);
       if (!p) continue; // orphaned (project deleted) — leave the rows alone
       const mrows = await sqliteQuery(
         "SELECT * FROM messages WHERE conversation_id = ? ORDER BY seq ASC", [cr.id]);
@@ -293,7 +297,7 @@ export async function hydrateFromSqlite() {
 // metadata (label, agent, worktree branch, merged flag, output tail) so the
 // History browser can show richer rows than the OS list alone.
 
-export async function sqliteSyncTerminalSessions(snaps) {
+async function sqliteSyncTerminalSessions(snaps) {
   if (!(await sqliteInit())) return;
   try {
     for (const s of (snaps || [])) {
@@ -310,14 +314,14 @@ export async function sqliteSyncTerminalSessions(snaps) {
   } catch (e) { console.warn("sqliteSyncTerminalSessions", e); }
 }
 
-export async function sqliteDeleteTerminalSession(id) {
+async function sqliteDeleteTerminalSession(id) {
   if (!(await sqliteInit())) return;
   try {
     await sqliteExec("DELETE FROM terminal_sessions WHERE id = ?", [id]);
   } catch (e) { console.warn("sqliteDeleteTerminalSession", e); }
 }
 
-export async function sqliteGetTerminalMeta(id) {
+async function sqliteGetTerminalMeta(id) {
   if (!(await sqliteInit())) return null;
   try {
     const rows = await sqliteQuery("SELECT * FROM terminal_sessions WHERE id = ?", [id]);
@@ -326,7 +330,7 @@ export async function sqliteGetTerminalMeta(id) {
 }
 
 // Decode the base64 output history attachSession() returns.
-export function decodeBase64(b64) {
+function decodeBase64(b64) {
   try { return atob(String(b64 || "")); } catch (e) { return ""; }
 }
 
@@ -335,15 +339,15 @@ export function decodeBase64(b64) {
 // the richer label/agent metadata) win for ids they already know.
 //   • live:true  -> reattachSession() and register it as a live square again.
 //   • live:false -> read-only "ended" card with the saved output tail.
-export async function loadPlatformSessions() {
+async function loadPlatformSessions() {
   try {
     if (!window.chatoss || !window.chatoss.terminal || typeof window.chatoss.terminal.listSessions !== "function") return;
     const list = await window.chatoss.terminal.listSessions();
     if (!Array.isArray(list)) return;
     for (const s of list) {
       if (!s || !s.id) continue;
-      if (sessions.has(s.id)) continue; // already live this run
-      const prior = deadSessions.get(s.id);
+      if (TC.sessions.has(s.id)) continue; // already live this run
+      const prior = TC.deadSessions.get(s.id);
       if (s.live) {
         // The process survived the window close — reconnect to it.
         try {
@@ -351,11 +355,11 @@ export async function loadPlatformSessions() {
           if (handle) {
             const label = (prior && prior.label) || s.command || "session";
             const cwd = (prior && prior.cwd) || s.cwd || "";
-            await registerSession(handle, s.command || "", [], cwd, label, (prior && prior.conversationId) || null);
+            await TC.registerSession(handle, s.command || "", [], cwd, label, (prior && prior.conversationId) || null);
             // The reattached session is live again — drop the stale dead card.
             if (prior) {
-              deadSessions.delete(s.id);
-              const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(s.id) + '"]');
+              TC.deadSessions.delete(s.id);
+              const card = TC.el.termGrid.querySelector('[data-dead-id="' + CSS.escape(s.id) + '"]');
               if (card) card.remove();
             }
             continue;
@@ -366,23 +370,23 @@ export async function loadPlatformSessions() {
         // affordance was removed from History to avoid confusion).
         continue;
       }
-      if (deadSessions.has(s.id)) continue;
+      if (TC.deadSessions.has(s.id)) continue;
       // Ended session — fetch its persisted output for the read-only card.
       let output = "";
       try {
         const attached = await window.chatoss.terminal.attachSession(s.id);
         if (attached && attached.output) {
-          output = stripAnsi(decodeBase64(attached.output));
+          output = TC.stripAnsi(decodeBase64(attached.output));
           if (output.length > 6000) output = "…(earlier output trimmed)…\n" + output.slice(-6000);
         }
       } catch (e) { /* no output available */ }
-      deadSessions.set(s.id, {
+      TC.deadSessions.set(s.id, {
         id: s.id,
         label: (prior && prior.label) || s.command || s.id,
         cwd: (prior && prior.cwd) || s.cwd || "",
         agent: (prior && prior.agent) || s.command || s.id,
         conversationId: (prior && prior.conversationId) || null,
-        worktreeBranch: (prior && prior.worktreeBranch) || worktreeBranchForCwd(s.cwd),
+        worktreeBranch: (prior && prior.worktreeBranch) || TC.worktreeBranchForCwd(s.cwd),
         status: "ended",
         exitCode: null,
         createdAt: s.createdAt || Date.now(),
@@ -396,7 +400,7 @@ export async function loadPlatformSessions() {
 
 // ---------- Worktrees (SQLite mirror) ----------
 
-export async function sqliteSyncWorktrees(arr) {
+async function sqliteSyncWorktrees(arr) {
   if (!(await sqliteInit())) return;
   try {
     const seen = new Set();
@@ -416,13 +420,13 @@ export async function sqliteSyncWorktrees(arr) {
   } catch (e) { console.warn("sqliteSyncWorktrees", e); }
 }
 
-export async function sqliteHydrateWorktrees() {
+async function sqliteHydrateWorktrees() {
   if (!(await sqliteInit())) return;
   try {
     const rows = await sqliteQuery("SELECT * FROM worktrees");
     for (const r of rows) {
-      if (!r.branch || worktreeMeta.has(r.branch)) continue;
-      worktreeMeta.set(r.branch, { wtPath: r.wt_path, parentBranch: r.parent_branch, projectPath: r.project_path });
+      if (!r.branch || TC.worktreeMeta.has(r.branch)) continue;
+      TC.worktreeMeta.set(r.branch, { wtPath: r.wt_path, parentBranch: r.parent_branch, projectPath: r.project_path });
     }
   } catch (e) { console.warn("sqliteHydrateWorktrees", e); }
 }
@@ -431,4 +435,33 @@ export async function sqliteHydrateWorktrees() {
 // Top-bar "History" button -> modal with two tabs. Conversations come from the
 // SQLite mirror; terminals come from the OS-persisted session list merged with
 // the app's metadata table and in-memory maps.
-
+// --- exports ---
+Object.defineProperty(TC, "SQLITE_DB", { get: () => SQLITE_DB, configurable: true });
+Object.defineProperty(TC, "sqliteReady", { get: () => sqliteReady, set: (v) => { sqliteReady = v; }, configurable: true });
+Object.defineProperty(TC, "sqliteInitPromise", { get: () => sqliteInitPromise, set: (v) => { sqliteInitPromise = v; }, configurable: true });
+Object.defineProperty(TC, "sqliteApiShape", { get: () => sqliteApiShape, set: (v) => { sqliteApiShape = v; }, configurable: true });
+Object.defineProperty(TC, "sqliteHandle", { get: () => sqliteHandle, set: (v) => { sqliteHandle = v; }, configurable: true });
+Object.defineProperty(TC, "sqliteName", { get: () => sqliteName, set: (v) => { sqliteName = v; }, configurable: true });
+Object.defineProperty(TC, "_sqliteSyncTimer", { get: () => _sqliteSyncTimer, set: (v) => { _sqliteSyncTimer = v; }, configurable: true });
+TC.sqliteInterpolate = sqliteInterpolate;
+TC.sqliteLiteral = sqliteLiteral;
+TC._sqliteExecRaw = _sqliteExecRaw;
+TC._sqliteQueryRaw = _sqliteQueryRaw;
+TC.sqliteExec = sqliteExec;
+TC.sqliteQuery = sqliteQuery;
+TC.sqliteInit = sqliteInit;
+TC.cancelPendingSqliteSync = cancelPendingSqliteSync;
+TC.scheduleSqliteSync = scheduleSqliteSync;
+TC.syncConversationsToSqlite = syncConversationsToSqlite;
+TC.sqlitePersistToolCall = sqlitePersistToolCall;
+TC.sqliteDeleteConversation = sqliteDeleteConversation;
+TC.sqliteDeleteProject = sqliteDeleteProject;
+TC.hydrateFromSqlite = hydrateFromSqlite;
+TC.sqliteSyncTerminalSessions = sqliteSyncTerminalSessions;
+TC.sqliteDeleteTerminalSession = sqliteDeleteTerminalSession;
+TC.sqliteGetTerminalMeta = sqliteGetTerminalMeta;
+TC.decodeBase64 = decodeBase64;
+TC.loadPlatformSessions = loadPlatformSessions;
+TC.sqliteSyncWorktrees = sqliteSyncWorktrees;
+TC.sqliteHydrateWorktrees = sqliteHydrateWorktrees;
+})();

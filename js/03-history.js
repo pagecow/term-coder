@@ -1,15 +1,11 @@
-import { deadSessions, sessions, state } from "./00-state.js";
-import { persistSessions } from "./01-sessions.js";
-import { decodeBase64, sqliteDeleteConversation, sqliteDeleteTerminalSession, sqliteGetTerminalMeta, sqliteInit, sqliteQuery } from "./02-sqlite.js";
-import { el } from "./04-dom.js";
-import { basename, saveState, setStatus } from "./05-util.js";
-import { stripAnsi } from "./06-tools.js";
-import { collapsedProjects, deleteConversation, renderProjects } from "./11-projects.js";
-import { renderChat } from "./13-chat.js";
-import { closeSession, ensureEmptyHint, renderSessionInfo, renderTabs } from "./20-terminal.js";
-export let historyTab = "conversations";
+// 03-history.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+let historyTab = "conversations";
 
-export function fmtTime(ts) {
+function fmtTime(ts) {
   if (!ts) return "unknown time";
   const d = new Date(ts);
   if (isNaN(d.getTime())) return "unknown time";
@@ -20,20 +16,20 @@ export function fmtTime(ts) {
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-export function openHistoryBrowser() {
-  if (!el.historyModal) return;
-  el.historyModal.classList.remove("hidden");
+function openHistoryBrowser() {
+  if (!TC.el.historyModal) return;
+  TC.el.historyModal.classList.remove("hidden");
   renderHistoryBrowser();
 }
-export function closeHistoryBrowser() {
-  if (el.historyModal) el.historyModal.classList.add("hidden");
+function closeHistoryBrowser() {
+  if (TC.el.historyModal) TC.el.historyModal.classList.add("hidden");
 }
 
-export async function renderHistoryBrowser() {
-  const list = el.historyList;
-  if (!list || !el.historyTabs) return;
+async function renderHistoryBrowser() {
+  const list = TC.el.historyList;
+  if (!list || !TC.el.historyTabs) return;
   list.innerHTML = "";
-  for (const btn of el.historyTabs.querySelectorAll(".history-tab")) {
+  for (const btn of TC.el.historyTabs.querySelectorAll(".history-tab")) {
     const active = btn.dataset.tab === historyTab;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-selected", String(active));
@@ -42,14 +38,14 @@ export async function renderHistoryBrowser() {
   else await renderHistoryTerminals(list);
 }
 
-export async function renderHistoryConversations(list) {
-  if (!(await sqliteInit())) {
+async function renderHistoryConversations(list) {
+  if (!(await TC.sqliteInit())) {
     list.innerHTML = '<div class="history-empty">SQLite storage is unavailable — history cannot be shown.</div>';
     return;
   }
   let rows = [];
   try {
-    rows = await sqliteQuery(
+    rows = await TC.sqliteQuery(
       "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count FROM conversations c ORDER BY c.created_at DESC");
   } catch (e) { console.warn("renderHistoryConversations", e); }
   if (!rows.length) {
@@ -57,7 +53,7 @@ export async function renderHistoryConversations(list) {
     return;
   }
   for (const r of rows) {
-    const p = state.projects.find((x) => x.id === r.project_id);
+    const p = TC.state.projects.find((x) => x.id === r.project_id);
     const item = document.createElement("div");
     item.className = "history-item";
     const info = document.createElement("div");
@@ -94,34 +90,34 @@ export async function renderHistoryConversations(list) {
   }
 }
 
-export function historyReopenConversation(cid) {
-  for (const p of state.projects) {
+function historyReopenConversation(cid) {
+  for (const p of TC.state.projects) {
     const c = p.conversations.find((x) => x.id === cid);
     if (c) {
-      state.activeProjectId = p.id;
-      state.activeConversationId = c.id;
-      collapsedProjects.delete(p.id);
-      saveState();
+      TC.state.activeProjectId = p.id;
+      TC.state.activeConversationId = c.id;
+      TC.collapsedProjects.delete(p.id);
+      TC.saveState();
       closeHistoryBrowser();
-      renderProjects();
-      renderChat();
-      renderSessionInfo();
+      TC.renderProjects();
+      TC.renderChat();
+      TC.renderSessionInfo();
       return;
     }
   }
-  setStatus("That conversation's project no longer exists.");
+  TC.setStatus("That conversation's project no longer exists.");
 }
 
-export async function historyDeleteConversation(cid) {
-  for (const p of state.projects) {
+async function historyDeleteConversation(cid) {
+  for (const p of TC.state.projects) {
     const c = p.conversations.find((x) => x.id === cid);
-    if (c) { deleteConversation(p, c); break; }
+    if (c) { TC.deleteConversation(p, c); break; }
   }
-  await sqliteDeleteConversation(cid);
+  await TC.sqliteDeleteConversation(cid);
   renderHistoryBrowser();
 }
 
-export async function renderHistoryTerminals(list) {
+async function renderHistoryTerminals(list) {
   let osSessions = [];
   try {
     if (window.chatoss && window.chatoss.terminal && typeof window.chatoss.terminal.listSessions === "function") {
@@ -130,9 +126,9 @@ export async function renderHistoryTerminals(list) {
     }
   } catch (e) { console.warn("renderHistoryTerminals listSessions", e); }
   const meta = new Map();
-  if (await sqliteInit()) {
+  if (await TC.sqliteInit()) {
     try {
-      const rows = await sqliteQuery("SELECT * FROM terminal_sessions ORDER BY last_active DESC");
+      const rows = await TC.sqliteQuery("SELECT * FROM terminal_sessions ORDER BY last_active DESC");
       for (const r of rows) meta.set(r.id, r);
     } catch (e) { /* ignore */ }
   }
@@ -156,7 +152,7 @@ export async function renderHistoryTerminals(list) {
     });
   }
   // In-memory live sessions not (yet) in the OS list.
-  for (const rec of sessions.values()) {
+  for (const rec of TC.sessions.values()) {
     if (seen.has(rec.id)) continue;
     seen.add(rec.id);
     entries.push({
@@ -167,7 +163,7 @@ export async function renderHistoryTerminals(list) {
     });
   }
   // Dead cards from this run.
-  for (const snap of deadSessions.values()) {
+  for (const snap of TC.deadSessions.values()) {
     if (seen.has(snap.id)) continue;
     seen.add(snap.id);
     entries.push({
@@ -194,7 +190,7 @@ export async function renderHistoryTerminals(list) {
     const meta = document.createElement("div");
     meta.className = "history-item-meta";
     meta.textContent = (e.command ? e.command + " · " : "") +
-      (e.cwd ? basename(e.cwd) : "(no cwd)") + " · " + fmtTime(e.createdAt) +
+      (e.cwd ? TC.basename(e.cwd) : "(no cwd)") + " · " + fmtTime(e.createdAt) +
       (e.worktreeBranch ? " · branch " + e.worktreeBranch : "") +
       (e.merged ? " · merged" : "");
     info.appendChild(title);
@@ -232,7 +228,7 @@ export async function renderHistoryTerminals(list) {
   }
 }
 
-export async function historyViewTerminal(id, item) {
+async function historyViewTerminal(id, item) {
   const existing = item.querySelector(".history-output");
   if (existing) { existing.remove(); return; }
   const out = document.createElement("pre");
@@ -246,7 +242,7 @@ export async function historyViewTerminal(id, item) {
   try {
     const attached = await window.chatoss.terminal.attachSession(id);
     if (attached && attached.output) {
-      osOutput = stripAnsi(decodeBase64(attached.output));
+      osOutput = TC.stripAnsi(TC.decodeBase64(attached.output));
     }
   } catch (e) {
     // "no such terminal session: <id>" — the live session was killed/expired/
@@ -264,10 +260,10 @@ export async function historyViewTerminal(id, item) {
   //    session is from the current run. Show a clear message instead of a raw
   //    "no such terminal session" error.
   let saved = "";
-  const dead = deadSessions.get(id);
+  const dead = TC.deadSessions.get(id);
   if (dead && dead.output) saved = dead.output;
   if (!saved) {
-    const meta = await sqliteGetTerminalMeta(id);
+    const meta = await TC.sqliteGetTerminalMeta(id);
     if (meta && meta.output) saved = meta.output;
   }
 
@@ -281,37 +277,37 @@ export async function historyViewTerminal(id, item) {
   }
 }
 
-export async function historyKillTerminal(id) {
+async function historyKillTerminal(id) {
   try {
     if (window.chatoss && window.chatoss.terminal && typeof window.chatoss.terminal.killSession === "function") {
       await window.chatoss.terminal.killSession(id);
     }
   } catch (e) { console.warn("historyKillTerminal killSession", id, e); }
-  if (sessions.has(id)) { await closeSession(id); }
-  if (deadSessions.has(id)) {
-    deadSessions.delete(id);
-    const card = el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
+  if (TC.sessions.has(id)) { await TC.closeSession(id); }
+  if (TC.deadSessions.has(id)) {
+    TC.deadSessions.delete(id);
+    const card = TC.el.termGrid.querySelector('[data-dead-id="' + CSS.escape(id) + '"]');
     if (card) card.remove();
-    if (state.activeSessionId === id) state.activeSessionId = sessions.size ? sessions.keys().next().value : null;
-    saveState();
-    ensureEmptyHint();
-    renderTabs();
-    renderSessionInfo();
+    if (TC.state.activeSessionId === id) TC.state.activeSessionId = TC.sessions.size ? TC.sessions.keys().next().value : null;
+    TC.saveState();
+    TC.ensureEmptyHint();
+    TC.renderTabs();
+    TC.renderSessionInfo();
   }
-  await sqliteDeleteTerminalSession(id);
-  persistSessions().catch(() => { /* non-fatal */ });
+  await TC.sqliteDeleteTerminalSession(id);
+  TC.persistSessions().catch(() => { /* non-fatal */ });
   renderHistoryBrowser();
 }
 
 // Wire the top-bar button, tabs, refresh and close controls. Called once from
 // init(); the modal itself is also added to the shared backdrop/Esc handling.
-export function initHistoryBrowser() {
-  if (!el.historyBtn || !el.historyModal) return;
-  el.historyBtn.addEventListener("click", openHistoryBrowser);
-  if (el.historyCloseX) el.historyCloseX.addEventListener("click", closeHistoryBrowser);
-  if (el.historyRefresh) el.historyRefresh.addEventListener("click", () => renderHistoryBrowser());
-  if (el.historyTabs) {
-    el.historyTabs.addEventListener("click", (e) => {
+function initHistoryBrowser() {
+  if (!TC.el.historyBtn || !TC.el.historyModal) return;
+  TC.el.historyBtn.addEventListener("click", openHistoryBrowser);
+  if (TC.el.historyCloseX) TC.el.historyCloseX.addEventListener("click", closeHistoryBrowser);
+  if (TC.el.historyRefresh) TC.el.historyRefresh.addEventListener("click", () => renderHistoryBrowser());
+  if (TC.el.historyTabs) {
+    TC.el.historyTabs.addEventListener("click", (e) => {
       const btn = e.target.closest && e.target.closest(".history-tab");
       if (!btn) return;
       historyTab = btn.dataset.tab || "conversations";
@@ -322,3 +318,17 @@ export function initHistoryBrowser() {
 
 // Promise + resolver for the spawn modal wait (set while the modal is open).
 // The orchestrator's start_cli_session tool awaits this; manual start too.
+// --- exports ---
+Object.defineProperty(TC, "historyTab", { get: () => historyTab, set: (v) => { historyTab = v; }, configurable: true });
+TC.fmtTime = fmtTime;
+TC.openHistoryBrowser = openHistoryBrowser;
+TC.closeHistoryBrowser = closeHistoryBrowser;
+TC.renderHistoryBrowser = renderHistoryBrowser;
+TC.renderHistoryConversations = renderHistoryConversations;
+TC.historyReopenConversation = historyReopenConversation;
+TC.historyDeleteConversation = historyDeleteConversation;
+TC.renderHistoryTerminals = renderHistoryTerminals;
+TC.historyViewTerminal = historyViewTerminal;
+TC.historyKillTerminal = historyKillTerminal;
+TC.initHistoryBrowser = initHistoryBrowser;
+})();

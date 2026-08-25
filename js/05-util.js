@@ -1,50 +1,49 @@
-import { CLAUDE_GUESSES, CODEX_GUESSES, DETECT_TTL_MS, FALLBACK_MODELS, OLLAMA_GUESSES, OPENCODE_GUESSES, SETTINGS_KEY, STORE_KEY, claudePath, codexPath, detection, loginShell, models, ollamaPath, opencodePath, running, settings, state } from "./00-state.js";
-import { scheduleSqliteSync } from "./02-sqlite.js";
-import { $, el } from "./04-dom.js";
-import { renderDetectedList } from "./07-spawn.js";
-import { applyModelSelectionModeToUi } from "./08-settings.js";
-import { syncOverlayOffset } from "./21-askchoice.js";
-export function esc(s) {
+// 05-util.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
-export function basename(p) {
+function basename(p) {
   if (!p) return "project";
   const parts = String(p).replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || p;
 }
-export function uuid() {
+function uuid() {
   return (crypto.randomUUID && crypto.randomUUID()) ||
     "id-" + Date.now() + "-" + Math.random().toString(36).slice(2);
 }
 // Persistence is async — fire-and-forget but never leave an unhandled rejection.
-export function saveState() {
-  try { window.chatoss.scopedData.set(STORE_KEY, state).catch((e) => console.warn("saveState", e)); }
+function saveState() {
+  try { window.chatoss.scopedData.set(TC.STORE_KEY, TC.state).catch((e) => console.warn("saveState", e)); }
   catch (e) { console.warn("saveState", e); }
   // Mirror conversations/messages into the private SQLite DB (debounced) so
   // history survives even if the scopedData blob is lost after a session.
-  scheduleSqliteSync();
+  TC.scheduleSqliteSync();
 }
-export function saveSettings() {
-  try { window.chatoss.scopedData.set(SETTINGS_KEY, settings).catch((e) => console.warn("saveSettings", e)); }
+function saveSettings() {
+  try { window.chatoss.scopedData.set(TC.SETTINGS_KEY, TC.settings).catch((e) => console.warn("saveSettings", e)); }
   catch (e) { console.warn("saveSettings", e); }
 }
-export function getProject(id) { return state.projects.find((p) => p.id === id) || null; }
-export function getConversation(pid, cid) {
+function getProject(id) { return TC.state.projects.find((p) => p.id === id) || null; }
+function getConversation(pid, cid) {
   const p = getProject(pid);
   return p ? p.conversations.find((c) => c.id === cid) || null : null;
 }
-export function activeConversation() { return getConversation(state.activeProjectId, state.activeConversationId); }
-export function defaultCwd() {
+function activeConversation() { return getConversation(TC.state.activeProjectId, TC.state.activeConversationId); }
+function defaultCwd() {
   // Best-effort cwd for terminal.exec probes: active project folder, then settings, then '/'.
-  const p = getProject(state.activeProjectId);
+  const p = getProject(TC.state.activeProjectId);
   if (p && p.folderPath) return p.folderPath;
-  if (settings.cwdDefault) return settings.cwdDefault;
+  if (TC.settings.cwdDefault) return TC.settings.cwdDefault;
   return "/";
 }
-export function setStatus(t) {
-  const s = el.chatStatus;
+function setStatus(t) {
+  const s = TC.el.chatStatus;
   if (!s) return;
   const text = t || "";
   // Show a subtle pulsing dot when the orchestrator is actively working.
@@ -62,13 +61,13 @@ export function setStatus(t) {
   }
   // The status line appearing/disappearing changes the composer stack height the
   // askChoice overlay sits above. (Hoisted declaration — safe to call here.)
-  syncOverlayOffset();
+  TC.syncOverlayOffset();
 }
 
 // Normalize a tool call delivered by runTurn's onToolCall. The documented shape is
 // { function: { name, arguments } } where arguments is ALREADY an object — but some
 // engines pass { name, args } or { name, arguments: "<json string>" }. Handle all.
-export function normalizeToolCall(call) {
+function normalizeToolCall(call) {
   call = call || {};
   const fn = call.function || {};
   const name = call.name || fn.name || "unknown";
@@ -86,7 +85,7 @@ export function normalizeToolCall(call) {
 }
 
 // ---------- Auto-detection (cached ~60s) ----------
-export function parseOllamaModels(out) {
+function parseOllamaModels(out) {
   const found = [];
   const lines = String(out || "").split("\n");
   for (const line of lines) {
@@ -99,10 +98,10 @@ export function parseOllamaModels(out) {
   return [...new Set(found)];
 }
 
-export async function detectTools(force = false) {
+async function detectTools(force = false) {
   const now = Date.now();
-  if (!force && detection.scannedAt && now - detection.scannedAt < DETECT_TTL_MS) {
-    return detection;
+  if (!force && TC.detection.scannedAt && now - TC.detection.scannedAt < TC.DETECT_TTL_MS) {
+    return TC.detection;
   }
   const fresh = { codex: false, claude: false, ollama: false, opencode: false, models: [], scannedAt: now, denied: false, claudePath: null, codexPath: null, opencodePath: null };
   const cwd = defaultCwd();
@@ -129,7 +128,7 @@ export async function detectTools(force = false) {
       path = String(wr.output).trim().split("\n")[0].trim();
     }
     if (!path) {
-      const lr = await probe(loginShell("which " + name));
+      const lr = await probe(TC.loginShell("which " + name));
       if (lr !== null && lr.exitCode === 0 && String(lr.output || "").trim()) {
         path = String(lr.output).trim().split("\n")[0].trim();
       }
@@ -146,67 +145,84 @@ export async function detectTools(force = false) {
   // Resolve the direct claude / codex / opencode binaries (for launching them
   // WITHOUT going through ollama). The boolean flags stay in lockstep with the
   // path.
-  codexPath = await resolveCliPath("codex", CODEX_GUESSES);
-  fresh.codex = !!codexPath;
-  fresh.codexPath = codexPath;
-  claudePath = await resolveCliPath("claude", CLAUDE_GUESSES);
-  fresh.claude = !!claudePath;
-  fresh.claudePath = claudePath;
-  opencodePath = await resolveCliPath("opencode", OPENCODE_GUESSES);
-  fresh.opencode = !!opencodePath;
-  fresh.opencodePath = opencodePath;
+  TC.setCodexPath(await resolveCliPath("codex", TC.CODEX_GUESSES));
+  fresh.codex = !!TC.codexPath;
+  fresh.codexPath = TC.codexPath;
+  TC.setClaudePath(await resolveCliPath("claude", TC.CLAUDE_GUESSES));
+  fresh.claude = !!TC.claudePath;
+  fresh.claudePath = TC.claudePath;
+  TC.setOpencodePath(await resolveCliPath("opencode", TC.OPENCODE_GUESSES));
+  fresh.opencode = !!TC.opencodePath;
+  fresh.opencodePath = TC.opencodePath;
 
   // Resolve ollama's absolute path — the sandbox shell has a minimal PATH, so
   // "which ollama" may fail even though ollama is installed. Try `which`, then
   // a login shell, then well-known locations.
-  ollamaPath = null;
+  TC.setOllamaPath(null);
   const ollamaR = await probe("which ollama");
   if (ollamaR !== null && ollamaR.exitCode === 0 && String(ollamaR.output || "").trim()) {
-    ollamaPath = String(ollamaR.output).trim().split("\n")[0].trim();
+    TC.setOllamaPath(String(ollamaR.output).trim().split("\n")[0].trim());
   }
-  if (!ollamaPath) {
-    const lr = await probe(loginShell("which ollama"));
+  if (!TC.ollamaPath) {
+    const lr = await probe(TC.loginShell("which ollama"));
     if (lr !== null && lr.exitCode === 0 && String(lr.output || "").trim()) {
-      ollamaPath = String(lr.output).trim().split("\n")[0].trim();
+      TC.setOllamaPath(String(lr.output).trim().split("\n")[0].trim());
     }
   }
-  if (!ollamaPath) {
-    for (const g of OLLAMA_GUESSES) {
+  if (!TC.ollamaPath) {
+    for (const g of TC.OLLAMA_GUESSES) {
       const tr = await probe("test -x " + JSON.stringify(g) + " && echo ok");
-      if (tr !== null && tr.exitCode === 0 && /ok/.test(String(tr.output))) { ollamaPath = g; break; }
+      if (tr !== null && tr.exitCode === 0 && /ok/.test(String(tr.output))) { TC.setOllamaPath(g); break; }
     }
   }
-  fresh.ollama = !!ollamaPath;
+  fresh.ollama = !!TC.ollamaPath;
 
   if (fresh.ollama) {
-    const listR = await probe(JSON.stringify(ollamaPath) + " list");
+    const listR = await probe(JSON.stringify(TC.ollamaPath) + " list");
     if (listR !== null && listR.exitCode === 0) {
       fresh.models = parseOllamaModels(listR.output);
     }
-    if (!fresh.models.length) fresh.models = FALLBACK_MODELS.slice();
+    if (!fresh.models.length) fresh.models = TC.FALLBACK_MODELS.slice();
   }
 
-  detection = fresh;
-  settings.detected = {
-    codex: detection.codex,
-    claude: detection.claude,
-    ollama: detection.ollama,
-    opencode: detection.opencode,
-    models: detection.models.slice(),
-    denied: detection.denied,
-    claudePath: detection.claudePath || null,
-    codexPath: detection.codexPath || null,
-    opencodePath: detection.opencodePath || null,
+  // `detection` is exported from 00-state.js, so it must be mutated in place
+  // (the imported binding itself is read-only).
+  Object.assign(TC.detection, fresh);
+  TC.settings.detected = {
+    codex: TC.detection.codex,
+    claude: TC.detection.claude,
+    ollama: TC.detection.ollama,
+    opencode: TC.detection.opencode,
+    models: TC.detection.models.slice(),
+    denied: TC.detection.denied,
+    claudePath: TC.detection.claudePath || null,
+    codexPath: TC.detection.codexPath || null,
+    opencodePath: TC.detection.opencodePath || null,
   };
   saveSettings();
-  renderDetectedList();
+  TC.renderDetectedList();
   // If the settings panel is open, refresh the model pickers with the newly
   // detected models (preserving saved selections where still available).
-  if (el.settingsPanel && !el.settingsPanel.classList.contains("hidden")) {
-    applyModelSelectionModeToUi();
+  if (TC.el.settingsPanel && !TC.el.settingsPanel.classList.contains("hidden")) {
+    TC.applyModelSelectionModeToUi();
   }
 
-  return detection;
+  return TC.detection;
 }
 
 // ---------- ORCHESTRATOR TOOLS (JSON schema for runTurn) ----------
+// --- exports ---
+TC.esc = esc;
+TC.basename = basename;
+TC.uuid = uuid;
+TC.saveState = saveState;
+TC.saveSettings = saveSettings;
+TC.getProject = getProject;
+TC.getConversation = getConversation;
+TC.activeConversation = activeConversation;
+TC.defaultCwd = defaultCwd;
+TC.setStatus = setStatus;
+TC.normalizeToolCall = normalizeToolCall;
+TC.parseOllamaModels = parseOllamaModels;
+TC.detectTools = detectTools;
+})();

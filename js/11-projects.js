@@ -1,19 +1,15 @@
-import { deadSessions, loginShell, sessions, settings, state } from "./00-state.js";
-import { sessionActivity } from "./01-sessions.js";
-import { sqliteDeleteConversation, sqliteDeleteProject } from "./02-sqlite.js";
-import { $, el } from "./04-dom.js";
-import { basename, getConversation, getProject, saveSettings, saveState, setStatus, uuid } from "./05-util.js";
-import { pbFetchBranches, renderProjectBranchBar } from "./10-project-branch.js";
-import { renderChat } from "./13-chat.js";
-import { renderSessionInfo, selectSession } from "./20-terminal.js";
-import { RZ_W, applyColWidths, shellEl } from "./22-resizers.js";
-export let collapsedProjects = new Set();
+// 11-projects.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+let collapsedProjects = new Set();
 // Codex-style sidebar: bold project rows with folder glyph + chevron, hover
 // actions on the right, and the selected project's content (Conversations +
 // Files tree) nested underneath with an indentation guide.
-export function renderProjects() {
-  el.projectList.innerHTML = "";
-  if (!state.projects.length) {
+function renderProjects() {
+  TC.el.projectList.innerHTML = "";
+  if (!TC.state.projects.length) {
     // No project → drop the file watcher; it would be watching a folder that is
     // no longer shown anywhere.
     if (fileTree.watchStop) resetFileTree(null);
@@ -37,11 +33,11 @@ export function renderProjects() {
     empty.appendChild(title);
     empty.appendChild(bodyText);
     empty.appendChild(cta);
-    el.projectList.appendChild(empty);
+    TC.el.projectList.appendChild(empty);
     return;
   }
-  for (const p of state.projects) {
-    const isActive = p.id === state.activeProjectId;
+  for (const p of TC.state.projects) {
+    const isActive = p.id === TC.state.activeProjectId;
     const isCollapsed = collapsedProjects.has(p.id);
     const item = document.createElement("div");
     item.className = "project-item" + (isActive ? " selected" : "") + (isCollapsed ? " is-collapsed" : "");
@@ -61,7 +57,7 @@ export function renderProjects() {
       e.stopPropagation();
       if (collapsedProjects.has(p.id)) collapsedProjects.delete(p.id);
       else collapsedProjects.add(p.id);
-      saveState();
+      TC.saveState();
       renderProjects();
     };
     row.appendChild(chev);
@@ -93,7 +89,7 @@ export function renderProjects() {
     newConvBtn.onclick = (e) => {
       e.stopPropagation();
       newConversation(p);
-      try { el.chatInput.focus(); } catch (_) {}
+      try { TC.el.chatInput.focus(); } catch (_) {}
     };
     const renameBtn = document.createElement("button");
     renameBtn.className = "btn-icon";
@@ -131,12 +127,12 @@ export function renderProjects() {
       const base = 7, step = 10;
       // Most recent first (newest is appended at the end of the array).
       const recent = [...allConvs].reverse();
-      const maxShown = Math.min(allConvs.length, state.convShown[p.id] || base);
+      const maxShown = Math.min(allConvs.length, TC.state.convShown[p.id] || base);
       const shown = recent.slice(0, maxShown);
 
       for (const c of shown) {
         const ci = document.createElement("div");
-        ci.className = "conversation-item" + (c.id === state.activeConversationId ? " selected" : "");
+        ci.className = "conversation-item" + (c.id === TC.state.activeConversationId ? " selected" : "");
         const cn = document.createElement("span");
         cn.className = "conv-name";
         cn.textContent = c.name;
@@ -173,8 +169,8 @@ export function renderProjects() {
           more.title = "Show up to 10 more conversations";
           more.onclick = (e) => {
             e.stopPropagation();
-            state.convShown[p.id] = Math.min(allConvs.length, maxShown + step);
-            saveState();
+            TC.state.convShown[p.id] = Math.min(allConvs.length, maxShown + step);
+            TC.saveState();
             renderProjects();
           };
           moreRow.appendChild(more);
@@ -185,8 +181,8 @@ export function renderProjects() {
           less.innerHTML = '<span class="conv-more-icon"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10 8 6.5 11.5 10"/></svg></span><span>Show less</span>';
           less.onclick = (e) => {
             e.stopPropagation();
-            delete state.convShown[p.id];
-            saveState();
+            delete TC.state.convShown[p.id];
+            TC.saveState();
             renderProjects();
           };
           moreRow.appendChild(less);
@@ -199,7 +195,7 @@ export function renderProjects() {
 
       // Section collapse state — Files and Sessions start COLLAPSED and stay
       // that way until the user expands one (persisted per project).
-      const sec = (state.sectionCollapsed && state.sectionCollapsed[p.id]) || {};
+      const sec = (TC.state.sectionCollapsed && TC.state.sectionCollapsed[p.id]) || {};
       const filesCollapsed = sec.files !== false;
       const sessionsCollapsed = sec.sessions !== false;
 
@@ -235,14 +231,14 @@ export function renderProjects() {
       sesWrap.appendChild(sesHead);
       sesWrap.appendChild(sesBody);
       body.appendChild(sesWrap);
-      el.projSessionsBody = sesBody;
-      el.projSessionsCount = sesCount;
+      TC.el.projSessionsBody = sesBody;
+      TC.el.projSessionsCount = sesCount;
       paintProjSessions();
 
       item.appendChild(body);
     }
 
-    el.projectList.appendChild(item);
+    TC.el.projectList.appendChild(item);
   }
 }
 
@@ -254,19 +250,19 @@ export function renderProjects() {
 // spawned (rec.conversationId). Only the ACTIVE conversation's sessions are
 // shown here, so a new chat / a different conversation starts with an empty
 // Sessions section instead of inheriting the previous conversation's terminals.
-export function sessionsForActiveConversation() {
-  const cid = state.activeConversationId;
-  const live = [...sessions.values()].filter((s) => (s.conversationId || null) === cid);
-  const dead = [...deadSessions.values()].filter((s) => (s.conversationId || null) === cid);
+function sessionsForActiveConversation() {
+  const cid = TC.state.activeConversationId;
+  const live = [...TC.sessions.values()].filter((s) => (s.conversationId || null) === cid);
+  const dead = [...TC.deadSessions.values()].filter((s) => (s.conversationId || null) === cid);
   return { live, dead };
 }
 
-export function paintProjSessions() {
-  const body = el.projSessionsBody;
+function paintProjSessions() {
+  const body = TC.el.projSessionsBody;
   if (!body || !body.isConnected) return;
   const { live: liveAll, dead: deadAll } = sessionsForActiveConversation();
   const total = liveAll.length + deadAll.length;
-  if (el.projSessionsCount) el.projSessionsCount.textContent = String(total);
+  if (TC.el.projSessionsCount) TC.el.projSessionsCount.textContent = String(total);
 
   body.innerHTML = "";
   // Newest session first (by createdAt, which is immutable — unlike lastOutputAt,
@@ -287,7 +283,7 @@ export function paintProjSessions() {
     return idx >= 0 ? lab.slice(0, idx) : lab;
   };
   for (const rec of recs) {
-    const act = sessionActivity(rec);
+    const act = TC.sessionActivity(rec);
     const row = document.createElement("div");
     row.className = "proj-session-row";
     row.dataset.status = act === "ERROR LOOP" ? "error" : act === "NEEDS INPUT" ? "input" : act === "WORKING" ? "working" : act === "IDLE" ? "idle" : "starting";
@@ -299,7 +295,7 @@ export function paintProjSessions() {
     row.appendChild(dot);
     row.appendChild(nm);
     row.title = act + (rec.worktreeBranch ? " · branch " + rec.worktreeBranch : "");
-    row.onclick = () => { selectSession(rec.id); };
+    row.onclick = () => { TC.selectSession(rec.id); };
     body.appendChild(row);
   }
   for (const snap of deads) {
@@ -314,7 +310,7 @@ export function paintProjSessions() {
     row.appendChild(dot);
     row.appendChild(nm);
     row.title = (snap.merged ? "Merged · " : "Ended · ") + (snap.worktreeBranch ? "branch " + snap.worktreeBranch : "output preserved");
-    row.onclick = () => { selectSession(snap.id); };
+    row.onclick = () => { TC.selectSession(snap.id); };
     body.appendChild(row);
   }
 }
@@ -327,10 +323,10 @@ export function paintProjSessions() {
 // change stream, which matters a lot here: agents are writing to this tree the
 // whole time the app is running, and the old version was a flat, inert 60-line
 // `ls` snapshot behind a 30s cache.
-export const HIDDEN_ENTRIES = new Set([".git", ".chatoss", ".DS_Store"]);
-export const MAX_CHILDREN = 300;
+const HIDDEN_ENTRIES = new Set([".git", ".chatoss", ".DS_Store"]);
+const MAX_CHILDREN = 300;
 
-export const fileTree = {
+const fileTree = {
   projectPath: null,
   expanded: new Set(),  // absolute dir paths currently open
   cache: new Map(),     // absolute dir path -> [{ name, isDir }] | "denied"
@@ -339,7 +335,7 @@ export const fileTree = {
   watchStop: null,
 };
 
-export function resetFileTree(projectPath) {
+function resetFileTree(projectPath) {
   fileTree.projectPath = projectPath;
   fileTree.expanded = new Set();
   fileTree.cache = new Map();
@@ -350,7 +346,7 @@ export function resetFileTree(projectPath) {
   }
 }
 
-export async function listDirEntries(path) {
+async function listDirEntries(path) {
   // Preferred: the structured file API — no shell, no per-command approval, and
   // it reports isDir directly.
   try {
@@ -362,14 +358,14 @@ export async function listDirEntries(path) {
   } catch (e) { /* fall through to the shell */ }
   // Fallback: `ls -Ap` suffixes directories with "/".
   try {
-    const r = await window.chatoss.terminal.exec(loginShell("ls -Ap"), { cwd: path, timeoutMs: 8000 });
+    const r = await window.chatoss.terminal.exec(TC.loginShell("ls -Ap"), { cwd: path, timeoutMs: 8000 });
     if (!r) return "denied";
     return (r.output || "").split("\n").map((s) => s.trim()).filter(Boolean)
       .map((n) => (n.endsWith("/") ? { name: n.slice(0, -1), isDir: true } : { name: n, isDir: false }));
   } catch (e) { return "denied"; }
 }
 
-export function sortEntries(entries) {
+function sortEntries(entries) {
   return entries
     .filter((e) => !HIDDEN_ENTRIES.has(e.name))
     .sort((a, b) => (a.isDir === b.isDir
@@ -377,7 +373,7 @@ export function sortEntries(entries) {
       : (a.isDir ? -1 : 1)));
 }
 
-export async function loadDir(path, repaint) {
+async function loadDir(path, repaint) {
   if (fileTree.loading.has(path)) return;
   fileTree.loading.add(path);
   const entries = await listDirEntries(path);
@@ -387,7 +383,7 @@ export async function loadDir(path, repaint) {
 }
 
 // Start (or restart) the live watcher for the active project.
-export function ensureFileWatch(projectPath) {
+function ensureFileWatch(projectPath) {
   if (fileTree.watchStop) return;
   try {
     const f = window.chatoss.files;
@@ -410,7 +406,7 @@ export function ensureFileWatch(projectPath) {
   } catch (e) { console.warn("files.watch unavailable", e); }
 }
 
-export function renderFileTree(project, container, opts) {
+function renderFileTree(project, container, opts) {
   const collapsed = !!(opts && opts.collapsed);
   // Switching projects resets expansion state and rebinds the watcher.
   if (fileTree.projectPath !== project.folderPath) resetFileTree(project.folderPath);
@@ -466,14 +462,14 @@ export function renderFileTree(project, container, opts) {
 
 // Repaint in place — used by the watcher and by expand/collapse so we never have
 // to rebuild the whole Projects column (which would also blow away the watcher).
-export function repaintFileTree() {
+function repaintFileTree() {
   const container = fileTree.container;
   if (!container || !container.isConnected || !fileTree.projectPath) return;
   const body = container.querySelector(".file-tree-body");
   if (body) paintFileTree(body, fileTree.projectPath);
 }
 
-export function paintFileTree(body, rootPath) {
+function paintFileTree(body, rootPath) {
   body.innerHTML = "";
   const rows = document.createDocumentFragment();
 
@@ -537,7 +533,7 @@ export function paintFileTree(body, rootPath) {
   body.appendChild(rows);
 }
 
-export function fileTreeNote(text, depth) {
+function fileTreeNote(text, depth) {
   const d = document.createElement("div");
   d.className = "file-tree-loading";
   d.textContent = text;
@@ -545,7 +541,7 @@ export function fileTreeNote(text, depth) {
   return d;
 }
 
-export function fileIcon(name) {
+function fileIcon(name) {
   const ext = name.split(".").pop().toLowerCase();
   switch (ext) {
     case "js": case "mjs": case "cjs": case "jsx":
@@ -574,13 +570,13 @@ export function fileIcon(name) {
 // ---------- Code editor column ----------
 // Thin in-sidebar editor between Projects and Chat. Files open by clicking the
 // Files tree; unsaved changes gate closing/saving, and ⌘S / Ctrl+S saves.
-export const editorState = {
+const editorState = {
   path: null,          // absolute path of the open file (null = closed)
   original: "",        // contents as last saved (or as loaded)
   size: 360,           // persisted column width
 };
 
-export const isBinaryExt = (name) => {
+const isBinaryExt = (name) => {
   const ext = name.split(".").pop().toLowerCase();
   return ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "tiff", "pdf", "zip",
           "gz", "tar", "7z", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4",
@@ -588,7 +584,7 @@ export const isBinaryExt = (name) => {
           "a", "wasm", "db", "sqlite", "sqlite3", "icns", "lock"].includes(ext);
 };
 
-export async function openFileInEditor(path) {
+async function openFileInEditor(path) {
   // Unsaved changes? Ask before switching files.
   if (editorState.path && editorState.path !== path && editorIsDirty()) {
     const ok = await editorConfirm("Discard unsaved changes to open another file?");
@@ -606,9 +602,9 @@ export async function openFileInEditor(path) {
     }
     editorState.path = path;
     editorState.original = text;
-    el.editorInput.value = text;
-    el.editorFilename.textContent = path.split("/").pop();
-    el.editorFilename.title = path;
+    TC.el.editorInput.value = text;
+    TC.el.editorFilename.textContent = path.split("/").pop();
+    TC.el.editorFilename.title = path;
     editorSetStatus("Loaded " + (text.split("\n").length) + " lines");
     openEditorPane();
   } catch (e) {
@@ -616,63 +612,63 @@ export async function openFileInEditor(path) {
   }
 }
 
-export function openEditorPane() {
-  if (el.editor.classList.contains("hidden")) {
-    el.editor.classList.remove("hidden");
-    el.rzEditor.classList.remove("hidden");
-    const shell = shellEl();
+function openEditorPane() {
+  if (TC.el.editor.classList.contains("hidden")) {
+    TC.el.editor.classList.remove("hidden");
+    TC.el.rzEditor.classList.remove("hidden");
+    const shell = TC.shellEl();
     const editorWidth = editorState.size || 380;
     shell.style.setProperty("--col-editor", editorWidth + "px");
-    shell.style.setProperty("--rz-editor", RZ_W + "px");
+    shell.style.setProperty("--rz-editor", TC.RZ_W + "px");
     // Re-clamp the chat column so the editor doesn't crush it or overflow.
-    applyColWidths(null, null, {});
+    TC.applyColWidths(null, null, {});
   }
-  el.editorInput.focus();
+  TC.el.editorInput.focus();
 }
 
-export function closeEditorPane() {
-  if (el.editor.classList.contains("hidden")) return;
-  el.editor.classList.add("hidden");
-  el.rzEditor.classList.add("hidden");
+function closeEditorPane() {
+  if (TC.el.editor.classList.contains("hidden")) return;
+  TC.el.editor.classList.add("hidden");
+  TC.el.rzEditor.classList.add("hidden");
   editorState.path = null;
   editorState.original = "";
-  el.editorInput.value = "";
-  el.editorFilename.textContent = "";
-  el.editorFilename.title = "";
+  TC.el.editorInput.value = "";
+  TC.el.editorFilename.textContent = "";
+  TC.el.editorFilename.title = "";
   editorSetStatus("");
-  el.editorSaveBtn.disabled = true;
-  el.editorModifiedDot.classList.add("hidden");
-  const shell = shellEl();
+  TC.el.editorSaveBtn.disabled = true;
+  TC.el.editorModifiedDot.classList.add("hidden");
+  const shell = TC.shellEl();
   shell.style.setProperty("--col-editor", "0px");
   shell.style.setProperty("--rz-editor", "0px");
-  applyColWidths(null, null, {});
+  TC.applyColWidths(null, null, {});
   // Chat is the primary column — give it focus back.
-  el.chatInput && el.chatInput.focus();
+  TC.el.chatInput && TC.el.chatInput.focus();
 }
 
-export function editorIsDirty() {
-  return !!editorState.path && el.editorInput.value !== editorState.original;
+function editorIsDirty() {
+  return !!editorState.path && TC.el.editorInput.value !== editorState.original;
 }
 
-export function editorRefreshDirty() {
+function editorRefreshDirty() {
   const dirty = editorIsDirty();
-  el.editorSaveBtn.disabled = !dirty;
-  el.editorModifiedDot.classList.toggle("hidden", !dirty);
+  TC.el.editorSaveBtn.disabled = !dirty;
+  TC.el.editorModifiedDot.classList.toggle("hidden", !dirty);
   if (dirty) editorSetStatus("Unsaved changes — press Save");
 }
 
-export function editorSetStatus(msg, isError) {
-  el.editorStatus.textContent = msg || "";
-  el.editorStatus.classList.toggle("is-error", !!isError);
-  el.editorStatus.classList.remove("is-saving");
+function editorSetStatus(msg, isError) {
+  TC.el.editorStatus.textContent = msg || "";
+  TC.el.editorStatus.classList.toggle("is-error", !!isError);
+  TC.el.editorStatus.classList.remove("is-saving");
 }
 
-export async function editorSave() {
+async function editorSave() {
   if (!editorState.path) return;
-  const contents = el.editorInput.value;
+  const contents = TC.el.editorInput.value;
   if (contents === editorState.original) { editorSetStatus("No changes"); return; }
-  el.editorStatus.classList.add("is-saving");
-  el.editorStatus.classList.remove("is-error");
+  TC.el.editorStatus.classList.add("is-saving");
+  TC.el.editorStatus.classList.remove("is-error");
   editorSetStatus("Saving…");
   try {
     await window.chatoss.files.writeFile(editorState.path, contents);
@@ -685,9 +681,9 @@ export async function editorSave() {
 }
 
 // Inline confirm (no window.confirm — blocked in the sandbox).
-export function editorConfirm(question) {
+function editorConfirm(question) {
   return new Promise((resolve) => {
-    const status = el.editorStatus;
+    const status = TC.el.editorStatus;
     status.classList.add("is-error");
     status.textContent = question + " Click ✓ to confirm.";
     const yes = document.createElement("button");
@@ -709,18 +705,18 @@ export function editorConfirm(question) {
   });
 }
 
-export function initEditor() {
-  if (!el.editor) return;
-  el.editorInput.addEventListener("input", editorRefreshDirty);
-  el.editorInput.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { el.editorCloseBtn.click(); return; }
+function initEditor() {
+  if (!TC.el.editor) return;
+  TC.el.editorInput.addEventListener("input", editorRefreshDirty);
+  TC.el.editorInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { TC.el.editorCloseBtn.click(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       editorSave();
     }
   });
-  el.editorSaveBtn.onclick = editorSave;
-  el.editorCloseBtn.onclick = async () => {
+  TC.el.editorSaveBtn.onclick = editorSave;
+  TC.el.editorCloseBtn.onclick = async () => {
     if (editorIsDirty()) {
       const ok = await editorConfirm("Discard unsaved changes and close the editor?");
       if (!ok) return;
@@ -729,21 +725,21 @@ export function initEditor() {
   };
 
   // Editor resizer — same pattern as the other column handles.
-  const handle = el.rzEditor;
+  const handle = TC.el.rzEditor;
   if (!handle) return;
   let startX = 0, startW = 0, dragging = false;
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     startX = e.clientX;
-    startW = parseFloat(getComputedStyle(shellEl()).getPropertyValue("--col-editor")) || editorState.size;
+    startW = parseFloat(getComputedStyle(TC.shellEl()).getPropertyValue("--col-editor")) || editorState.size;
     dragging = true;
     handle.classList.add("is-dragging");
     document.body.classList.add("is-resizing");
     const onMove = (ev) => {
       if (!dragging) return;
       const w = Math.max(200, Math.min(720, startW + (ev.clientX - startX)));
-      shellEl().style.setProperty("--col-editor", w + "px");
-      applyColWidths(null, null, {});
+      TC.shellEl().style.setProperty("--col-editor", w + "px");
+      TC.applyColWidths(null, null, {});
     };
     const onUp = () => {
       if (!dragging) return;
@@ -752,11 +748,11 @@ export function initEditor() {
       document.body.classList.remove("is-resizing");
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      const w = parseFloat(getComputedStyle(shellEl()).getPropertyValue("--col-editor")) || editorState.size;
+      const w = parseFloat(getComputedStyle(TC.shellEl()).getPropertyValue("--col-editor")) || editorState.size;
       editorState.size = w;
-      settings.editorWidth = w;
-      saveSettings();
-      applyColWidths(null, null, { fit: true });
+      TC.settings.editorWidth = w;
+      TC.saveSettings();
+      TC.applyColWidths(null, null, { fit: true });
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -770,23 +766,23 @@ export function initEditor() {
     e.preventDefault();
     const w = Math.max(200, Math.min(720, (editorState.size || 380) + d));
     editorState.size = w;
-    shellEl().style.setProperty("--col-editor", w + "px");
-    settings.editorWidth = w;
-    saveSettings();
-    applyColWidths(null, null, {});
+    TC.shellEl().style.setProperty("--col-editor", w + "px");
+    TC.settings.editorWidth = w;
+    TC.saveSettings();
+    TC.applyColWidths(null, null, {});
   });
   handle.addEventListener("dblclick", () => {
     editorState.size = 360;
-    shellEl().style.setProperty("--col-editor", "360px");
-    settings.editorWidth = 360;
-    saveSettings();
-    applyColWidths(null, null, {});
+    TC.shellEl().style.setProperty("--col-editor", "360px");
+    TC.settings.editorWidth = 360;
+    TC.saveSettings();
+    TC.applyColWidths(null, null, {});
   });
   handle.title = "Drag to resize the code editor · double-click to reset";
 }
 
 // Inline rename (no window.prompt — blocked in the sandbox)
-export function renameProject(p, nameText) {
+function renameProject(p, nameText) {
   const input = document.createElement("input");
   input.className = "form-input";
   input.value = p.name;
@@ -800,9 +796,9 @@ export function renameProject(p, nameText) {
     if (done) return;
     done = true;
     const v = input.value.trim();
-    if (v) { p.name = v; saveState(); }
+    if (v) { p.name = v; TC.saveState(); }
     renderProjects();
-    renderSessionInfo();
+    TC.renderSessionInfo();
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); commit(); }
@@ -812,7 +808,7 @@ export function renameProject(p, nameText) {
 }
 
 // Same inline-rename pattern for a conversation row.
-export function renameConversation(p, c, nameEl) {
+function renameConversation(p, c, nameEl) {
   const input = document.createElement("input");
   input.className = "conv-rename-input";
   input.value = c.name;
@@ -824,10 +820,10 @@ export function renameConversation(p, c, nameEl) {
     if (done) return;
     done = true;
     const v = input.value.trim();
-    if (v) { c.name = v; saveState(); }
+    if (v) { c.name = v; TC.saveState(); }
     renderProjects();
-    renderChat();
-    renderSessionInfo();
+    TC.renderChat();
+    TC.renderSessionInfo();
   };
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); commit(); }
@@ -837,7 +833,7 @@ export function renameConversation(p, c, nameEl) {
 }
 
 // Two-step confirm (no window.confirm — blocked in the sandbox)
-export function confirmDelete(fn, btn) {
+function confirmDelete(fn, btn) {
   if (btn.dataset.armed === "1") { fn(); return; }
   btn.dataset.armed = "1";
   const orig = btn.innerHTML;
@@ -849,79 +845,79 @@ export function confirmDelete(fn, btn) {
   }, 2500);
 }
 
-export function selectProject(pid) {
-  state.activeProjectId = pid;
+function selectProject(pid) {
+  TC.state.activeProjectId = pid;
   // Selecting a project always reveals its body — a hidden one would make the
   // click look broken.
   collapsedProjects.delete(pid);
-  const p = getProject(pid);
-  const cur = getConversation(pid, state.activeConversationId);
+  const p = TC.getProject(pid);
+  const cur = TC.getConversation(pid, TC.state.activeConversationId);
   if (!cur) {
     const pref = preferredConversation(p);
-    state.activeConversationId = pref ? pref.id : null;
+    TC.state.activeConversationId = pref ? pref.id : null;
   }
-  saveState();
+  TC.saveState();
   renderProjects();
-  renderChat();
-  renderSessionInfo();
-  renderProjectBranchBar();
+  TC.renderChat();
+  TC.renderSessionInfo();
+  TC.renderProjectBranchBar();
   // Refresh the branch chip for the newly selected project (async, non-blocking).
-  state.currentBranch = null;
-  pbFetchBranches().then((data) => {
-    if (data && data.current) { state.currentBranch = data.current; renderProjectBranchBar(); }
+  TC.state.currentBranch = null;
+  TC.pbFetchBranches().then((data) => {
+    if (data && data.current) { TC.state.currentBranch = data.current; TC.renderProjectBranchBar(); }
   }).catch(() => {});
 }
 // Switching conversation must also refresh the footer line, which names the
 // active conversation — it used to keep showing the previous one.
-export function selectConversation(pid, cid) {
-  state.activeProjectId = pid;
-  state.activeConversationId = cid;
-  saveState();
+function selectConversation(pid, cid) {
+  TC.state.activeProjectId = pid;
+  TC.state.activeConversationId = cid;
+  TC.saveState();
   renderProjects();
-  renderChat();
-  renderSessionInfo();
-  renderProjectBranchBar();
+  TC.renderChat();
+  TC.renderSessionInfo();
+  TC.renderProjectBranchBar();
 }
-export async function newProject() {
+async function newProject() {
   try {
     const path = await window.chatoss.files.pickFolder();
     if (!path) return;
-    const p = { id: uuid(), name: basename(path), folderPath: path, conversations: [] };
-    state.projects.push(p);
-    state.activeProjectId = p.id;
-    state.activeConversationId = null;
-    saveState();
+    const p = { id: TC.uuid(), name: TC.basename(path), folderPath: path, conversations: [] };
+    TC.state.projects.push(p);
+    TC.state.activeProjectId = p.id;
+    TC.state.activeConversationId = null;
+    TC.saveState();
     renderProjects();
     newConversation(p);
-    renderSessionInfo();
-    renderProjectBranchBar();
+    TC.renderSessionInfo();
+    TC.renderProjectBranchBar();
   } catch (e) {
-    setStatus("Project error: " + (e && e.message ? e.message : String(e)));
+    TC.setStatus("Project error: " + (e && e.message ? e.message : String(e)));
   }
 }
-export function deleteProject(p) {
-  state.projects = state.projects.filter((x) => x.id !== p.id);
+function deleteProject(p) {
+  TC.state.projects = TC.state.projects.filter((x) => x.id !== p.id);
   // Remove the project + its conversations from the SQLite history store so
   // they don't resurrect on the next hydrateFromSqlite().
-  sqliteDeleteProject(p.id);
-  if (state.activeProjectId === p.id) {
-    state.activeProjectId = state.projects.length ? state.projects[0].id : null;
-    const np = getProject(state.activeProjectId);
+  TC.sqliteDeleteProject(p.id);
+  if (TC.state.activeProjectId === p.id) {
+    TC.state.activeProjectId = TC.state.projects.length ? TC.state.projects[0].id : null;
+    const np = TC.getProject(TC.state.activeProjectId);
     const pref = preferredConversation(np);
-    state.activeConversationId = pref ? pref.id : null;
+    TC.state.activeConversationId = pref ? pref.id : null;
   }
-  saveState();
+  TC.saveState();
   renderProjects();
-  renderChat();
-  renderSessionInfo();
-  renderProjectBranchBar();
+  TC.renderChat();
+  TC.renderSessionInfo();
+  TC.renderProjectBranchBar();
 }
 // Derive a short conversation name from the first user message: the first
 // ~40–60 characters, cut cleanly at a word boundary with a trailing "…" when
 // the message is longer than that. Returns fallback when text is empty, so a
 // brand-new conversation keeps its "Conversation N" placeholder until the user
 // actually sends something.
-export function nameFromFirstMessage(text, fallback) {
+function nameFromFirstMessage(text, fallback) {
   const s = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
   if (!s) return fallback;
   const MAX = 60, MIN = 40;
@@ -937,14 +933,14 @@ export function nameFromFirstMessage(text, fallback) {
 // A conversation only "exists" for the sidebar once the user has posted in it.
 // Brand-new empty chats stay hidden so New chat / Cmd+N can never pile up a
 // stack of empty rows — see newConversation(), which reuses the empty draft.
-export function conversationHasPosts(c) {
+function conversationHasPosts(c) {
   return !!(c && c.messages && c.messages.some((m) => m.role === "user" && !m.event));
 }
 
 // Pick which conversation to open when none is selected: the newest one that
 // has posts (empty drafts stay out of the way), falling back to the newest
 // overall when every conversation is still empty.
-export function preferredConversation(p) {
+function preferredConversation(p) {
   if (!p || !p.conversations.length) return null;
   for (let i = p.conversations.length - 1; i >= 0; i--) {
     if (conversationHasPosts(p.conversations[i])) return p.conversations[i];
@@ -955,80 +951,125 @@ export function preferredConversation(p) {
 // Files / Sessions section collapse — persisted per project in
 // state.sectionCollapsed. Both are COLLAPSED by default: a section counts as
 // expanded only when it was explicitly set to false.
-export function toggleProjSection(pid, key) {
-  if (!state.sectionCollapsed) state.sectionCollapsed = {};
-  const cur = state.sectionCollapsed[pid] || {};
+function toggleProjSection(pid, key) {
+  if (!TC.state.sectionCollapsed) TC.state.sectionCollapsed = {};
+  const cur = TC.state.sectionCollapsed[pid] || {};
   const nowCollapsed = cur[key] !== false;
-  state.sectionCollapsed[pid] = Object.assign({}, cur, { [key]: !nowCollapsed });
-  saveState();
+  TC.state.sectionCollapsed[pid] = Object.assign({}, cur, { [key]: !nowCollapsed });
+  TC.saveState();
   renderProjects();
 }
 
-export function newConversation(p) {
+function newConversation(p) {
   // One empty draft at a time per project: if one already exists (no posts
   // yet), just switch back to it instead of creating another. The user can
   // hit New chat / Cmd+N repeatedly and always lands on the same fresh chat
   // until they actually post something in it.
   const draft = p.conversations.find((c) => !conversationHasPosts(c));
   if (draft) {
-    state.activeProjectId = p.id;
-    state.activeConversationId = draft.id;
+    TC.state.activeProjectId = p.id;
+    TC.state.activeConversationId = draft.id;
     collapsedProjects.delete(p.id);
-    saveState();
+    TC.saveState();
     renderProjects();
-    renderChat();
-    renderSessionInfo();
+    TC.renderChat();
+    TC.renderSessionInfo();
     return draft;
   }
   // Start with the "Conversation N" placeholder; the real name is filled in
   // from the user's first message in sendMessage (see nameFromFirstMessage).
-  const c = { id: uuid(), name: "Conversation " + (p.conversations.length + 1), messages: [], modelId: null, effort: null, boardId: null, attachments: [] };
+  const c = { id: TC.uuid(), name: "Conversation " + (p.conversations.length + 1), messages: [], modelId: null, effort: null, boardId: null, attachments: [] };
   p.conversations.push(c);
-  state.activeProjectId = p.id;
-  state.activeConversationId = c.id;
+  TC.state.activeProjectId = p.id;
+  TC.state.activeConversationId = c.id;
   collapsedProjects.delete(p.id);
-  saveState();
+  TC.saveState();
   renderProjects();
-  renderChat();
-  renderSessionInfo();
+  TC.renderChat();
+  TC.renderSessionInfo();
   return c;
 }
 
 // Top-bar "New Chat" — starts a fresh conversation inside the CURRENTLY
 // selected project (same flow as the + button on a project row). Disabled via
 // syncTopNewButtons() when there is no project to put it in.
-export function newChatFromTopbar() {
-  const p = getProject(state.activeProjectId);
+function newChatFromTopbar() {
+  const p = TC.getProject(TC.state.activeProjectId);
   if (!p) {
-    setStatus("Add a project folder first — new chats live inside a project.");
+    TC.setStatus("Add a project folder first — new chats live inside a project.");
     return;
   }
   newConversation(p);
   // Drop the caret into the composer so the user can type immediately.
-  try { el.chatInput.focus(); } catch (_) {}
+  try { TC.el.chatInput.focus(); } catch (_) {}
 }
 // Keep the top-bar New Chat enabled state in step with the active project.
 // renderChat runs on every project/conversation change, so it owns the sync.
-export function syncTopNewButtons() {
-  if (!el.newChatBtn) return;
-  const hasProject = !!getProject(state.activeProjectId);
-  el.newChatBtn.disabled = !hasProject;
-  el.newChatBtn.title = hasProject
+function syncTopNewButtons() {
+  if (!TC.el.newChatBtn) return;
+  const hasProject = !!TC.getProject(TC.state.activeProjectId);
+  TC.el.newChatBtn.disabled = !hasProject;
+  TC.el.newChatBtn.title = hasProject
     ? "Start a new chat in the current project (⌘N / Ctrl+N)"
     : "Add a project folder first";
 }
-export function deleteConversation(p, c) {
+function deleteConversation(p, c) {
   p.conversations = p.conversations.filter((x) => x.id !== c.id);
   // Remove it from the SQLite history store too (messages + tool calls).
-  sqliteDeleteConversation(c.id);
-  if (state.activeConversationId === c.id) {
+  TC.sqliteDeleteConversation(c.id);
+  if (TC.state.activeConversationId === c.id) {
     const pref = preferredConversation(p);
-    state.activeConversationId = pref ? pref.id : null;
+    TC.state.activeConversationId = pref ? pref.id : null;
   }
-  saveState();
+  TC.saveState();
   renderProjects();
-  renderChat();
-  renderSessionInfo();
+  TC.renderChat();
+  TC.renderSessionInfo();
 }
 
 // Resolve a board's display name (cached) so the attached chip shows the real name.
+// --- exports ---
+Object.defineProperty(TC, "HIDDEN_ENTRIES", { get: () => HIDDEN_ENTRIES, configurable: true });
+Object.defineProperty(TC, "MAX_CHILDREN", { get: () => MAX_CHILDREN, configurable: true });
+Object.defineProperty(TC, "fileTree", { get: () => fileTree, configurable: true });
+Object.defineProperty(TC, "editorState", { get: () => editorState, configurable: true });
+Object.defineProperty(TC, "isBinaryExt", { get: () => isBinaryExt, configurable: true });
+Object.defineProperty(TC, "collapsedProjects", { get: () => collapsedProjects, set: (v) => { collapsedProjects = v; }, configurable: true });
+TC.renderProjects = renderProjects;
+TC.sessionsForActiveConversation = sessionsForActiveConversation;
+TC.paintProjSessions = paintProjSessions;
+TC.resetFileTree = resetFileTree;
+TC.listDirEntries = listDirEntries;
+TC.sortEntries = sortEntries;
+TC.loadDir = loadDir;
+TC.ensureFileWatch = ensureFileWatch;
+TC.renderFileTree = renderFileTree;
+TC.repaintFileTree = repaintFileTree;
+TC.paintFileTree = paintFileTree;
+TC.fileTreeNote = fileTreeNote;
+TC.fileIcon = fileIcon;
+TC.openFileInEditor = openFileInEditor;
+TC.openEditorPane = openEditorPane;
+TC.closeEditorPane = closeEditorPane;
+TC.editorIsDirty = editorIsDirty;
+TC.editorRefreshDirty = editorRefreshDirty;
+TC.editorSetStatus = editorSetStatus;
+TC.editorSave = editorSave;
+TC.editorConfirm = editorConfirm;
+TC.initEditor = initEditor;
+TC.renameProject = renameProject;
+TC.renameConversation = renameConversation;
+TC.confirmDelete = confirmDelete;
+TC.selectProject = selectProject;
+TC.selectConversation = selectConversation;
+TC.newProject = newProject;
+TC.deleteProject = deleteProject;
+TC.nameFromFirstMessage = nameFromFirstMessage;
+TC.conversationHasPosts = conversationHasPosts;
+TC.preferredConversation = preferredConversation;
+TC.toggleProjSection = toggleProjSection;
+TC.newConversation = newConversation;
+TC.newChatFromTopbar = newChatFromTopbar;
+TC.syncTopNewButtons = syncTopNewButtons;
+TC.deleteConversation = deleteConversation;
+})();

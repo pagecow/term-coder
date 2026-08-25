@@ -1,24 +1,25 @@
-import { modelSelection, settings } from "./00-state.js";
-import { $ } from "./04-dom.js";
-import { esc } from "./05-util.js";
-import { availableLaunchTargets, availableOllamaModels, cliDefaultToTargetId } from "./08-settings.js";
+// 09-complexity.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
 window.termCoder = window.termCoder || {};
 window.termCoder.getModelSelectionConfig = function () {
   return {
-    mode: modelSelection.modelSelectionMode || "manual",
-    alwaysModel: modelSelection.alwaysModel || "",
-    complexityModelLow: modelSelection.complexityModelLow || "",
-    complexityModelMedium: modelSelection.complexityModelMedium || "",
-    complexityModelHigh: modelSelection.complexityModelHigh || "",
-    availableModels: availableOllamaModels(),
+    mode: TC.modelSelection.modelSelectionMode || "manual",
+    alwaysModel: TC.modelSelection.alwaysModel || "",
+    complexityModelLow: TC.modelSelection.complexityModelLow || "",
+    complexityModelMedium: TC.modelSelection.complexityModelMedium || "",
+    complexityModelHigh: TC.modelSelection.complexityModelHigh || "",
+    availableModels: TC.availableOllamaModels(),
     // Unified launch targets: direct CLIs (claude/codex/opencode) + ollama
     // models. The session-startup integration can read these to know everything
     // launchable.
-    availableTargets: availableLaunchTargets(),
+    availableTargets: TC.availableLaunchTargets(),
     // The persisted "default launch" (Settings "Default agent" / spawn-modal
     // "Remember as default"). resolveSessionModel applies it automatically on
     // session start so the orchestrator does not re-ask every time.
-    cliDefault: settings.cliDefault || "ask",
+    cliDefault: TC.settings.cliDefault || "ask",
   };
 };
 
@@ -52,7 +53,7 @@ window.termCoder.getModelSelectionConfig = function () {
 // Lightweight keyword + length heuristic. No chatApi call needed, so it works
 // even before the first orchestrator turn and never adds latency.
 // Returns "low" | "medium" | "high".
-export function assessComplexity(taskPrompt) {
+function assessComplexity(taskPrompt) {
   const text = (taskPrompt || "").toLowerCase();
   if (!text.trim()) return "medium";
 
@@ -147,7 +148,7 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
   // don't map to a concrete target, e.g. the bare ollama-tool names that still
   // need a model) resolve to null here and fall through to the Model Selection
   // Mode logic below, so the picker still appears exactly when it should.
-  const defId = cliDefaultToTargetId(cfg.cliDefault);
+  const defId = TC.cliDefaultToTargetId(cfg.cliDefault);
   if (defId && ids.includes(defId)) return defId;
 
   // ---- Always: use the configured fixed target, no prompt. ----
@@ -201,3 +202,6 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
 };
 
 // ---------- Board picker ----------
+// --- exports ---
+TC.assessComplexity = assessComplexity;
+})();

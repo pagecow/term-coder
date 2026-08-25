@@ -1,6 +1,8 @@
-import { el } from "./04-dom.js";
-import { renderMarkdown } from "./12-markdown.js";
-import { scrollChatBottom } from "./13-chat.js";
+// 21-askchoice.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
 window.termCoder = window.termCoder || {};
 
 // Count of askChoice prompts currently awaiting the user. A permission/approval
@@ -13,17 +15,17 @@ window.termCoder = window.termCoder || {};
 // starting a fresh streaming UI on top of it. The underlying turn keeps
 // running; only the visual spinners pause, and they resume the instant the
 // last pending prompt is answered.
-export let pendingChoices = 0;
+let pendingChoices = 0;
 
 // Toggle the "a choice is pending" state on the chat column. The CSS rules
 // scoped to .chat-prompt-pending freeze the thinking-indicator animations and
 // make the overlay opaque so no streaming content shows through around the
 // prompt. Idempotent: adding when already on / removing when already off is a
 // no-op. Robust to the document.body fallback host (no .col-chat ancestor).
-export function setPromptPending(on) {
+function setPromptPending(on) {
   let target = null;
-  if (typeof el !== "undefined" && el && el.chatOverlay) {
-    target = el.chatOverlay.closest ? el.chatOverlay.closest(".col-chat") : null;
+  if (typeof TC.el !== "undefined" && TC.el && TC.el.chatOverlay) {
+    target = TC.el.chatOverlay.closest ? TC.el.chatOverlay.closest(".col-chat") : null;
   }
   if (!target) target = document.querySelector(".col-chat") || document.body;
   if (on) target.classList.add("chat-prompt-pending");
@@ -40,7 +42,7 @@ window.termCoder.askChoice = function askChoice(config) {
     // Render into a persistent overlay container, NOT inside chatLog, so the
     // pill picker survives renderChat() full-history re-renders (which clear
     // chatLog.innerHTML). The overlay sits above the chat log.
-    let host = (typeof el !== "undefined" && el && el.chatOverlay) ? el.chatOverlay : null;
+    let host = (typeof TC.el !== "undefined" && TC.el && TC.el.chatOverlay) ? TC.el.chatOverlay : null;
     if (!host) host = document.body;
 
     // --- message bubble -------------------------------------------------
@@ -55,7 +57,7 @@ window.termCoder.askChoice = function askChoice(config) {
       const promptEl = document.createElement("div");
       promptEl.className = "choice-prompt";
       // Render the prompt as markdown for a polished look (safe: escaped inside).
-      promptEl.innerHTML = renderMarkdown(promptText);
+      promptEl.innerHTML = TC.renderMarkdown(promptText);
       body.appendChild(promptEl);
     }
 
@@ -117,7 +119,7 @@ window.termCoder.askChoice = function askChoice(config) {
         if (settled) return;
         btn.classList.add("choice-selected");
         finish(btn, value);
-        if (typeof scrollChatBottom === "function") scrollChatBottom();
+        if (typeof TC.scrollChatBottom === "function") TC.scrollChatBottom();
       });
       optsWrap.appendChild(btn);
       btns.push(btn);
@@ -135,7 +137,7 @@ window.termCoder.askChoice = function askChoice(config) {
       if (e.key !== "Escape" || settled) return;
       e.stopPropagation();
       finish(null, null);
-      if (typeof scrollChatBottom === "function") scrollChatBottom();
+      if (typeof TC.scrollChatBottom === "function") TC.scrollChatBottom();
     }
     document.addEventListener("keydown", onKey, true);
 
@@ -150,7 +152,7 @@ window.termCoder.askChoice = function askChoice(config) {
       setPromptPending(true);
     }
     host.appendChild(row);
-    if (typeof scrollChatBottom === "function") scrollChatBottom();
+    if (typeof TC.scrollChatBottom === "function") TC.scrollChatBottom();
   });
 };
 
@@ -158,7 +160,7 @@ window.termCoder.askChoice = function askChoice(config) {
 // absolutely positioned in .col-chat, and the block below it (status line +
 // composer + hint + session info) changes height as the textarea grows and as
 // the status line appears — so its offset has to be measured, not hard-coded.
-export function syncOverlayOffset() {
+function syncOverlayOffset() {
   const chatCol = document.querySelector(".col-chat");
   if (!chatCol) return;
   let h = 0;
@@ -171,8 +173,8 @@ export function syncOverlayOffset() {
 
 // Held at module scope on purpose: a ResizeObserver with no strong reference can
 // be collected, silently stopping the resync.
-export let overlayRO = null;
-export function initOverlayOffset() {
+let overlayRO = null;
+function initOverlayOffset() {
   syncOverlayOffset();
   window.addEventListener("resize", syncOverlayOffset);
   // A ResizeObserver catches height changes we don't have an explicit hook for,
@@ -192,3 +194,10 @@ export function initOverlayOffset() {
 // The three columns are grid tracks sized by two CSS variables on .app-shell.
 // Dragging a handle writes px values; with no saved layout the variables keep
 // their responsive defaults (minmax) so the grid still adapts to the window.
+// --- exports ---
+Object.defineProperty(TC, "pendingChoices", { get: () => pendingChoices, set: (v) => { pendingChoices = v; }, configurable: true });
+Object.defineProperty(TC, "overlayRO", { get: () => overlayRO, set: (v) => { overlayRO = v; }, configurable: true });
+TC.setPromptPending = setPromptPending;
+TC.syncOverlayOffset = syncOverlayOffset;
+TC.initOverlayOffset = initOverlayOffset;
+})();

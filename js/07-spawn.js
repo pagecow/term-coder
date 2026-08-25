@@ -1,10 +1,17 @@
-import { CODEX_EFFORT_FLAG_VALUES, OLLAMA_LAUNCH_TOOLS, claudePath, codexPath, detection, ollamaPath, opencodePath, settings, state } from "./00-state.js";
-import { el, spawnModalOpts, spawnPromise, spawnResolve } from "./04-dom.js";
-import { basename, detectTools, getProject, saveSettings } from "./05-util.js";
-import { autoDriveStartup } from "./06-tools.js";
-import { EFFORT_BRIEF, allOllamaModels, applyModelSelectionModeToUi, applyTrustModeToUi, effortForTarget, findLaunchTarget, saveModelSelectionMode, saveTrustMode } from "./08-settings.js";
-import { registerSession } from "./20-terminal.js";
-export function buildCliOptions() {
+// 07-spawn.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+// One spawn dialog at a time: while the modal is open, its wait promise,
+// resolver, and the opts it was opened with live here (module-private). These
+// used to live in 04-dom.js as exported `let`s, but only this module reads or
+// writes them — so with the module split they belong here, where assignment is
+// legal (assigning to an imported binding would throw).
+let spawnPromise = null;
+let spawnResolve = null;
+let spawnModalOpts = null;
+function buildCliOptions() {
   const opts = [];
   const push = (value, label, detected) => {
     opts.push({ value, label: detected ? label : label + " (not detected)" });
@@ -13,24 +20,24 @@ export function buildCliOptions() {
   // source of truth) so the constant and the dropdown can never drift apart.
   // `detected` here reflects whether ollama itself is available (these all
   // launch THROUGH ollama), matching the previous per-line behavior.
-  for (const tool of OLLAMA_LAUNCH_TOOLS) {
-    push(tool.id, tool.label, detection.ollama);
+  for (const tool of TC.OLLAMA_LAUNCH_TOOLS) {
+    push(tool.id, tool.label, TC.detection.ollama);
   }
   // Direct binaries (launch the real CLI without ollama), only if installed.
   // These are a manual fallback; the model picker also offers claude/codex
   // directly as launch targets. Order matches the default-agents spec:
   // opencode, claude, codex.
-  if (detection.opencode) push("raw:opencode", "opencode  (direct binary)", true);
-  if (detection.claude) push("raw:claude", "claude  (direct binary)", true);
-  if (detection.codex) push("raw:codex", "codex  (direct binary)", true);
+  if (TC.detection.opencode) push("raw:opencode", "opencode  (direct binary)", true);
+  if (TC.detection.claude) push("raw:claude", "claude  (direct binary)", true);
+  if (TC.detection.codex) push("raw:codex", "codex  (direct binary)", true);
   return opts;
 }
 
-export function syncSpawnModelRow() {
+function syncSpawnModelRow() {
   // "ollama launch <tool>" opens its own model picker inside the terminal, so
   // there's no separate model dropdown — always hide that row.
-  el.spawnModelRow.classList.add("hidden");
-  el.spawnModel.disabled = true;
+  TC.el.spawnModelRow.classList.add("hidden");
+  TC.el.spawnModel.disabled = true;
 }
 
 /**
@@ -40,14 +47,14 @@ export function syncSpawnModelRow() {
  * If the modal is already open (e.g. the orchestrator called the tool twice),
  * the same promise is returned — one dialog, one choice, all waiters resolve.
  */
-export function openSpawnModal(opts) {
+function openSpawnModal(opts) {
   // One dialog at a time: if the modal is already open (e.g. the orchestrator
   // called the tool twice), every waiter shares the same promise.
   if (spawnPromise) return spawnPromise;
   opts = opts || {};
   spawnModalOpts = opts;
-  el.spawnStatus.textContent = "";
-  el.spawnStart.disabled = false;
+  TC.el.spawnStatus.textContent = "";
+  TC.el.spawnStart.disabled = false;
 
   // Create the wait promise FIRST so callers (the orchestrator tool) start
   // awaiting it immediately, then populate the UI asynchronously.
@@ -59,41 +66,41 @@ export function openSpawnModal(opts) {
   (async () => {
     try {
       // Fresh-ish detection (cached 60s), so options only show what's installed.
-      await detectTools(false);
+      await TC.detectTools(false);
 
       // CLI options
-      el.spawnCli.innerHTML = "";
+      TC.el.spawnCli.innerHTML = "";
       const cliOpts = buildCliOptions();
       for (const o of cliOpts) {
         const opt = document.createElement("option");
         opt.value = o.value;
         opt.textContent = o.label;
-        el.spawnCli.appendChild(opt);
+        TC.el.spawnCli.appendChild(opt);
       }
       let preselectCli = (opts.cliHint || "").trim() || null;
-      if (!preselectCli && settings.cliDefault && settings.cliDefault !== "ask" && cliOpts.some((o) => o.value === settings.cliDefault)) {
-        preselectCli = settings.cliDefault;
+      if (!preselectCli && TC.settings.cliDefault && TC.settings.cliDefault !== "ask" && cliOpts.some((o) => o.value === TC.settings.cliDefault)) {
+        preselectCli = TC.settings.cliDefault;
       }
       if (!preselectCli || !cliOpts.some((o) => o.value === preselectCli)) {
-        preselectCli = detection.claude ? "claude" : (detection.codex ? "codex" : (cliOpts[0] ? cliOpts[0].value : "claude"));
+        preselectCli = TC.detection.claude ? "claude" : (TC.detection.codex ? "codex" : (cliOpts[0] ? cliOpts[0].value : "claude"));
       }
-      el.spawnCli.value = preselectCli;
+      TC.el.spawnCli.value = preselectCli;
       syncSpawnModelRow();
 
       // cwd: tool call > settings default > active project folder
       let cwd = (opts.cwd || "").trim();
-      if (!cwd) cwd = (settings.cwdDefault || "").trim();
+      if (!cwd) cwd = (TC.settings.cwdDefault || "").trim();
       if (!cwd) {
-        const p = getProject(state.activeProjectId);
+        const p = TC.getProject(TC.state.activeProjectId);
         cwd = p ? p.folderPath : "";
       }
-      el.spawnCwd.value = cwd;
+      TC.el.spawnCwd.value = cwd;
 
       // prompt: tool call, else empty
-      el.spawnPrompt.value = (opts.prompt || "").trim();
-      el.spawnRemember.checked = false;
+      TC.el.spawnPrompt.value = (opts.prompt || "").trim();
+      TC.el.spawnRemember.checked = false;
 
-      el.spawnModal.classList.remove("hidden");
+      TC.el.spawnModal.classList.remove("hidden");
     } catch (e) {
       // Never hang the waiters — degrade to a cancelled dialog.
       console.warn("openSpawnModal", e);
@@ -104,23 +111,23 @@ export function openSpawnModal(opts) {
   return promise;
 }
 
-export function closeSpawnModal(choice) {
-  el.spawnModal.classList.add("hidden");
+function closeSpawnModal(choice) {
+  TC.el.spawnModal.classList.add("hidden");
   const r = spawnResolve;
   spawnResolve = null;
   spawnPromise = null;
   spawnModalOpts = null;
   if (r) r(choice);
 }
-export async function onSpawnStart() {
+async function onSpawnStart() {
   if (!spawnResolve) return;
-  const cli = el.spawnCli.value;
-  const cwd = el.spawnCwd.value.trim();
-  const prompt = el.spawnPrompt.value.trim();
-  const remember = el.spawnRemember.checked;
+  const cli = TC.el.spawnCli.value;
+  const cwd = TC.el.spawnCwd.value.trim();
+  const prompt = TC.el.spawnPrompt.value.trim();
+  const remember = TC.el.spawnRemember.checked;
 
-  if (!cli) { el.spawnStatus.textContent = "Pick what to launch."; return; }
-  if (!cwd) { el.spawnStatus.textContent = "Enter a working directory."; return; }
+  if (!cli) { TC.el.spawnStatus.textContent = "Pick what to launch."; return; }
+  if (!cwd) { TC.el.spawnStatus.textContent = "Enter a working directory."; return; }
 
   // ---- Route the session model through the configured Model Selection Mode ----
   // window.termCoder.resolveSessionModel(taskPrompt) encapsulates all three
@@ -128,7 +135,7 @@ export async function onSpawnStart() {
   // to cancel. The manual mode renders a pill picker inside the chat stream via
   // askChoice, so hide the spawn modal while the choice is pending so the pills
   // are visible and clickable.
-  el.spawnModal.classList.add("hidden");
+  TC.el.spawnModal.classList.add("hidden");
   let target = null;
   let noModels = false;
   try {
@@ -152,9 +159,9 @@ export async function onSpawnStart() {
       // Re-show the modal (it was hidden to make room for the pill picker) with
       // an actionable status message. Do NOT dismiss — let the user cancel or
       // go run Re-scan in Settings.
-      el.spawnModal.classList.remove("hidden");
-      el.spawnStatus.textContent = "No models detected — run Re-scan in Settings, or switch Model Selection Mode.";
-      el.spawnStart.disabled = false;
+      TC.el.spawnModal.classList.remove("hidden");
+      TC.el.spawnStatus.textContent = "No models detected — run Re-scan in Settings, or switch Model Selection Mode.";
+      TC.el.spawnStart.disabled = false;
     } else {
       // Dismissed / cancelled by the user — close silently.
       closeSpawnModal(null);
@@ -172,10 +179,10 @@ export async function onSpawnStart() {
     // (target is an ollama model) have no self-contained set-cli value, so fall
     // back to the dropdown's ollama-tool id — consistent with the picker, and
     // auto-applied only when it maps to a concrete target.
-    const tgt = findLaunchTarget(target);
-    settings.cliDefault = (tgt && tgt.kind === "direct") ? ("raw:" + tgt.id) : cli;
-    settings.cwdDefault = cwd;
-    saveSettings();
+    const tgt = TC.findLaunchTarget(target);
+    TC.settings.cliDefault = (tgt && tgt.kind === "direct") ? ("raw:" + tgt.id) : cli;
+    TC.settings.cwdDefault = cwd;
+    TC.saveSettings();
   }
 
   // Batch mode (spawn_batch): the modal collected ONE launch choice for a whole
@@ -186,33 +193,33 @@ export async function onSpawnStart() {
     return;
   }
 
-  el.spawnStart.disabled = true;
-  el.spawnStatus.textContent = "Starting…";
-  el.spawnModal.classList.remove("hidden");
+  TC.el.spawnStart.disabled = true;
+  TC.el.spawnStatus.textContent = "Starting…";
+  TC.el.spawnModal.classList.remove("hidden");
   try {
     const session = await spawnChosen({ cli, cwd, prompt, target });
     if (!session) {
-      el.spawnStatus.textContent = "Terminal permission denied. Approve it in the system prompt and try again, or cancel.";
-      el.spawnStart.disabled = false;
+      TC.el.spawnStatus.textContent = "Terminal permission denied. Approve it in the system prompt and try again, or cancel.";
+      TC.el.spawnStart.disabled = false;
       return; // keep the modal open so the user can retry/cancel
     }
     if (session.error) {
-      el.spawnStatus.textContent = session.error;
-      el.spawnStart.disabled = false;
+      TC.el.spawnStatus.textContent = session.error;
+      TC.el.spawnStart.disabled = false;
       return;
     }
     closeSpawnModal({ cli, cwd, prompt, session });
   } catch (e) {
-    el.spawnStatus.textContent = "Error: " + (e && e.message ? e.message : String(e));
-    el.spawnStart.disabled = false;
+    TC.el.spawnStatus.textContent = "Error: " + (e && e.message ? e.message : String(e));
+    TC.el.spawnStart.disabled = false;
   }
 }
 
-export function onSpawnCancel() {
+function onSpawnCancel() {
   closeSpawnModal(null);
 }
 
-export async function spawnChosen(choice) {
+async function spawnChosen(choice) {
   // choice.target is the launch-target id from resolveSessionModel — either a
   // direct CLI name ("claude"/"codex") or an ollama model name. choice.cli is
   // the ollama launch tool from the spawn-modal dropdown (used only for the
@@ -232,21 +239,21 @@ export async function spawnChosen(choice) {
     const bin = choice.cli.slice(4);
     effortTargetId = bin;
     inner = "exec " + bin;
-    label = bin + " · " + basename(choice.cwd);
+    label = bin + " · " + TC.basename(choice.cwd);
   } else {
     // Route by the chosen launch target.
-    const target = findLaunchTarget(choice.target);
+    const target = TC.findLaunchTarget(choice.target);
     if (target) effortTargetId = target.id;
     if (target && target.kind === "direct") {
       // ── Direct CLI launch ── run the REAL binary via the terminal capability,
       // NOT through ollama. Uses the resolved absolute path (claudePath /
       // codexPath / opencodePath) so it survives the sandbox's minimal PATH.
       inner = "exec " + JSON.stringify(target.bin);
-      label = target.id + " · " + basename(choice.cwd);
+      label = target.id + " · " + TC.basename(choice.cwd);
     } else {
       // ── Ollama launch path (existing) ── the dropdown's tool selects the
       // agent; the target id (an ollama model name) is passed as --model.
-      const bin = ollamaPath || "ollama";
+      const bin = TC.ollamaPath || "ollama";
       const tool = choice.cli || "claude";
       inner = "exec " + JSON.stringify(bin) + " launch " + tool;
       // Apply the resolved model as a CLI flag so the launched agent uses it
@@ -256,7 +263,7 @@ export async function spawnChosen(choice) {
       if (model) {
         inner += " --model " + JSON.stringify(model);
       }
-      label = tool + " · " + basename(choice.cwd);
+      label = tool + " · " + TC.basename(choice.cwd);
     }
   }
 
@@ -270,15 +277,15 @@ export async function spawnChosen(choice) {
   // is expressed as a guidance line appended to the task brief — universal and
   // harmless on CLIs that don't parse it. Effort values are validated against
   // the target's option list before storage, so interpolating them is safe.
-  const effort = effortForTarget(effortTargetId);
+  const effort = TC.effortForTarget(effortTargetId);
   let effectivePrompt = choice.prompt;
   if (effort) {
     const isCodex = /^exec "?[^"]*codex/.test(inner);
-    if (isCodex && CODEX_EFFORT_FLAG_VALUES.has(effort)) {
+    if (isCodex && TC.CODEX_EFFORT_FLAG_VALUES.has(effort)) {
       inner += " --config 'model_reasoning_effort=\"" + effort + "\"'";
       codexFlagApplied = true;
-    } else if (EFFORT_BRIEF[effort] && effectivePrompt) {
-      effectivePrompt = effectivePrompt + "\n\n[" + EFFORT_BRIEF[effort] + "]";
+    } else if (TC.EFFORT_BRIEF[effort] && effectivePrompt) {
+      effectivePrompt = effectivePrompt + "\n\n[" + TC.EFFORT_BRIEF[effort] + "]";
     } else if (effectivePrompt) {
       // Unknown/custom level (e.g. "max" on a non-codex target with no EFFORT_BRIEF entry):
       // append a generic instruction so the level is not silently dropped.
@@ -299,7 +306,7 @@ export async function spawnChosen(choice) {
   // The session handle is object-oriented: session.id, session.write, session.onData,
   // session.onExit, session.resize, session.kill. Pass the WHOLE handle to
   // registerSession so mount() can wire output→terminal and input→stdin.
-  await registerSession(session, "zsh", ["-lic", inner], choice.cwd, label);
+  await TC.registerSession(session, "zsh", ["-lic", inner], choice.cwd, label);
   if (effectivePrompt) {
     // Don't write the prompt immediately — the CLI (Claude Code / Codex) shows a
     // "trust this folder?" dialog and sometimes a model picker at launch, and
@@ -307,21 +314,21 @@ export async function spawnChosen(choice) {
     // watches the live output, handles the trust dialog (per the Settings trust
     // policy: ask in chat, or always trust), and sends the prompt once the agent's
     // real input box is ready (with a 12s safety timeout).
-    try { autoDriveStartup(session, effectivePrompt, label, choice.cwd); } catch (e) { /* non-fatal */ }
+    try { TC.autoDriveStartup(session, effectivePrompt, label, choice.cwd); } catch (e) { /* non-fatal */ }
   }
   return { id: session.id, label, cwd: choice.cwd };
 }
 
 // ---------- Settings panel ----------
-export function renderDetectedList() {
-  if (!el.detectedList) return;
+function renderDetectedList() {
+  if (!TC.el.detectedList) return;
   // Read the LIVE detection object — the same source the launch-target pickers
   // (and the chat pill picker) consume via availableOllamaModels() — NOT the
   // persisted settings.detected snapshot. The snapshot can be stale (restored
   // from an older app version) and then disagrees with the pickers, which is
   // exactly the "Settings shows fewer models than the chat picker" bug.
-  const d = detection || { codex: false, claude: false, ollama: false, opencode: false, models: [], denied: false };
-  el.detectedList.innerHTML = "";
+  const d = TC.detection || { codex: false, claude: false, ollama: false, opencode: false, models: [], denied: false };
+  TC.el.detectedList.innerHTML = "";
   const row = (name, ok) => {
     const div = document.createElement("div");
     div.className = "detected-item";
@@ -330,7 +337,7 @@ export function renderDetectedList() {
     mark.textContent = ok ? "✓" : "✗";
     div.appendChild(mark);
     div.appendChild(document.createTextNode(" " + name + (ok ? " installed" : " not found")));
-    el.detectedList.appendChild(div);
+    TC.el.detectedList.appendChild(div);
   };
   row("codex", !!d.codex);
   row("claude", !!d.claude);
@@ -343,72 +350,85 @@ export function renderDetectedList() {
     const div = document.createElement("div");
     div.className = "detected-item";
     div.textContent = "  claude direct: " + d.claudePath;
-    el.detectedList.appendChild(div);
+    TC.el.detectedList.appendChild(div);
   }
   if (d.codex && d.codexPath) {
     const div = document.createElement("div");
     div.className = "detected-item";
     div.textContent = "  codex direct: " + d.codexPath;
-    el.detectedList.appendChild(div);
+    TC.el.detectedList.appendChild(div);
   }
   if (d.opencode && d.opencodePath) {
     const div = document.createElement("div");
     div.className = "detected-item";
     div.textContent = "  opencode direct: " + d.opencodePath;
-    el.detectedList.appendChild(div);
+    TC.el.detectedList.appendChild(div);
   }
   // The COMPLETE ollama model list (terminal detection + local models from the
   // ChatOSS chat model list — the same source the model picker at the top of
   // the AI chat section uses), so Settings shows every detected model.
-  const ollamaModels = allOllamaModels();
+  const ollamaModels = TC.allOllamaModels();
   if (d.ollama || ollamaModels.length) {
     const div = document.createElement("div");
     div.className = "detected-item";
     div.textContent = "ollama models (" + ollamaModels.length + "): " + (ollamaModels.join(", ") || "(none)");
-    el.detectedList.appendChild(div);
+    TC.el.detectedList.appendChild(div);
   }
   if (d.denied) {
     const div = document.createElement("div");
     div.className = "detected-item";
     div.style.color = "var(--danger)";
     div.textContent = "Terminal permission needed for auto-detection.";
-    el.detectedList.appendChild(div);
+    TC.el.detectedList.appendChild(div);
   }
 }
 
-export function openSettings() {
+function openSettings() {
   // Fall back to "ask" when the saved default isn't among the current options
   // (e.g. a legacy "ollama" value from an older build) — otherwise the select
   // renders blank and Save would silently clear the default.
-  const cliValues = Array.from(el.setCli.options).map((o) => o.value);
-  el.setCli.value = cliValues.includes(settings.cliDefault) ? settings.cliDefault : "ask";
-  el.setCwd.value = settings.cwdDefault || "";
+  const cliValues = Array.from(TC.el.setCli.options).map((o) => o.value);
+  TC.el.setCli.value = cliValues.includes(TC.settings.cliDefault) ? TC.settings.cliDefault : "ask";
+  TC.el.setCwd.value = TC.settings.cwdDefault || "";
   renderDetectedList();
-  applyModelSelectionModeToUi();
-  applyTrustModeToUi();
-  if (el.autoFollow) el.autoFollow.checked = settings.autoFollow !== false;
-  el.settingsPanel.classList.remove("hidden");
+  TC.applyModelSelectionModeToUi();
+  TC.applyTrustModeToUi();
+  if (TC.el.autoFollow) TC.el.autoFollow.checked = TC.settings.autoFollow !== false;
+  TC.el.settingsPanel.classList.remove("hidden");
 }
 
-export function syncSettingsModelRow() {
+function syncSettingsModelRow() {
   // Model is chosen inside the launched terminal — no settings model row.
-  if (el.setModelRow) el.setModelRow.classList.add("hidden");
+  if (TC.el.setModelRow) TC.el.setModelRow.classList.add("hidden");
 }
 
-export function saveSettingsFromPanel() {
-  settings.cliDefault = el.setCli.value;
-  settings.cwdDefault = el.setCwd.value.trim();
+function saveSettingsFromPanel() {
+  TC.settings.cliDefault = TC.el.setCli.value;
+  TC.settings.cwdDefault = TC.el.setCwd.value.trim();
   // Model Selection Mode persists to its own scopedData keys (handled by
   // saveModelSelectionMode), not the bundled settings blob. Sync it now so
   // any uncommitted picker value is captured on Save.
-  saveModelSelectionMode();
-  saveTrustMode();
-  if (el.autoFollow) settings.autoFollow = !!el.autoFollow.checked;
-  saveSettings();
-  el.settingsPanel.classList.add("hidden");
+  TC.saveModelSelectionMode();
+  TC.saveTrustMode();
+  if (TC.el.autoFollow) TC.settings.autoFollow = !!TC.el.autoFollow.checked;
+  TC.saveSettings();
+  TC.el.settingsPanel.classList.add("hidden");
 }
 
 // ---------- Check for updates ----------
 // The app cannot replace its own files, so "update" = notify + open the GitHub
 // releases page for the user to install. APP_VERSION (top of file) must stay
 // in sync with app.json's "version".
+// --- exports ---
+TC.buildCliOptions = buildCliOptions;
+TC.syncSpawnModelRow = syncSpawnModelRow;
+TC.openSpawnModal = openSpawnModal;
+TC.closeSpawnModal = closeSpawnModal;
+TC.onSpawnStart = onSpawnStart;
+TC.onSpawnCancel = onSpawnCancel;
+TC.spawnChosen = spawnChosen;
+TC.renderDetectedList = renderDetectedList;
+TC.openSettings = openSettings;
+TC.syncSettingsModelRow = syncSettingsModelRow;
+TC.saveSettingsFromPanel = saveSettingsFromPanel;
+})();

@@ -1,26 +1,28 @@
 // Token estimator verification tests for Term Coder.
 //
-// app.js is a browser module, so these tests follow the same convention as
-// tests/copy-conversation.test.js: read the REAL app.js source as text and
-// extract the pure estimation functions out of it, so the tests fail if the
-// source drifts. The DOM wiring (HTML/CSS) is verified by grepping the real
-// files.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so these tests follow the same
+// convention as tests/copy-conversation.test.js: read the REAL module sources
+// as text and extract the pure estimation functions out of them, so the tests
+// fail if the source drifts. The DOM wiring (HTML/CSS) is verified by grepping
+// the real files.
 //
 // Run: node tests/token-estimator.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const HTML = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const CSS = fs.readFileSync(path.join(__dirname, "..", "style.css"), "utf8");
 
-// Pull a pure function VERBATIM out of app.js and evaluate it in a sandbox.
+// Pull a pure function VERBATIM out of the modules and evaluate it in a sandbox.
 function extractFn(src, name) {
   const re = new RegExp("function " + name + "\\(([\\s\\S]*?)\\)\\s*\\{");
   const m = src.match(re);
-  assert(m, name + " declaration not found in app.js");
+  assert(m, name + " declaration not found in the modules");
   const open = src.indexOf("{", m.index + m[0].length - 1);
   let depth = 0, end = -1;
   for (let i = open; i < src.length; i++) {
@@ -85,12 +87,12 @@ test("breakdown: computeTokenBreakdown reports system/tools/messages/draft", () 
   assert(/system/.test(fn) && /tools/.test(fn) && /messages/.test(fn) && /draft/.test(fn),
     "breakdown must include system, tools, messages, and draft categories");
   assert(/ORCHESTRATOR_TOOLS/.test(fn), "tool definitions must be estimated from ORCHESTRATOR_TOOLS");
-  assert(/estimateTokens\(el\.chatInput/.test(fn), "draft must read the live chat input");
+  assert(/estimateTokens\(TC\.el\.chatInput/.test(fn), "draft must read the live chat input");
 });
 
 test("breakdown: system prompt is cached from buildSystemPrompt", () => {
-  assert(/_lastSystemPrompt = joined/.test(SRC), "buildSystemPrompt must cache its output");
-  assert(/_lastSystemPrompt \|\| SYSTEM_PROMPT_FALLBACK/.test(SRC), "breakdown must use the cached prompt with a fallback");
+  assert(/TC\.setLastSystemPrompt\(joined\)/.test(SRC), "buildSystemPrompt must cache its output");
+  assert(/TC\._lastSystemPrompt \|\| TC\.SYSTEM_PROMPT_FALLBACK/.test(SRC), "breakdown must use the cached prompt with a fallback");
 });
 
 // ---------------------------------------------------------------------------
@@ -135,7 +137,7 @@ test("wiring: estimator updates on input and model change", () => {
 test("wiring: popover closes on outside click and Escape", () => {
   assert(/closeTokenPopover\(\)/.test(SRC), "closeTokenPopover must exist");
   assert(/toggleTokenPopover\(\)/.test(SRC), "toggleTokenPopover must exist");
-  assert(/el\.tokenPopover && !el\.tokenPopover\.hidden\) closeTokenPopover\(\)/.test(SRC),
+  assert(/TC\.el\.tokenPopover && !TC\.el\.tokenPopover\.hidden\) TC\.closeTokenPopover\(\)/.test(SRC),
     "Escape must close the popover");
 });
 

@@ -5,9 +5,10 @@
 // continues with it (a fresh turn with the message in history), instead of the
 // old behavior where the composer was disabled and submitting only stopped.
 //
-// app.js is a browser module, so it can't be `require`d whole in Node. These
-// tests follow the audit-fixes pattern:
-//   1. Read the REAL app.js source and assert the wiring (submit handler,
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// These tests follow the audit-fixes pattern:
+//   1. Read the REAL module sources and assert the wiring (submit handler,
 //      setRunning, runOrchestratorTurn, runToolWithTimeout) contains the new
 //      paths.
 //   2. Extract the real functions from the source and EXECUTE them in a
@@ -18,6 +19,7 @@
 const fs = require("fs");
 const path = require("path");
 const { assert } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
 // The shared harness's run() does not await async test functions, so this file
 // uses its own async-aware runner (same output format, same exit code).
@@ -40,7 +42,7 @@ async function run() {
   if (failed > 0) process.exitCode = 1;
 }
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 // Extract a top-level `function NAME(...) { ... }` (or `async function`) whose
 // closing brace sits at column 0, and return a factory that evaluates it with
@@ -69,14 +71,14 @@ test("wiring: setRunning no longer disables the chat input while running", () =>
 test("wiring: the submit handler delivers mid-run text via interruptAndSend", () => {
   // The submit handler must route a non-empty message to interruptAndSend while
   // running, and only plain-abort when the composer is empty.
-  const m = SRC.match(/el\.chatForm\.addEventListener\("submit", \(e\) => \{[\s\S]*?\n  \}\);/);
+  const m = SRC.match(/TC\.el\.chatForm\.addEventListener\("submit", \(e\) => \{[\s\S]*?\n  \}\);/);
   assert(m, "chatForm submit handler not found");
   const handler = m[0];
-  assert(/interruptAndSend\(text\)/.test(handler),
+  assert(/TC\.interruptAndSend\(text\)/.test(handler),
     "mid-run submit must call interruptAndSend(text)");
-  assert(/abortController\.abort\(\); \/\/ plain stop/.test(handler),
+  assert(/TC\.abortController\.abort\(\); \/\/ plain stop/.test(handler),
     "empty submit while running must remain a plain stop");
-  assert(/sendMessage\(\);/.test(handler),
+  assert(/TC\.sendMessage\(\);/.test(handler),
     "idle submit must still call sendMessage()");
 });
 
@@ -104,7 +106,7 @@ test("wiring: tool calls race the turn's abort signal", () => {
   assert(m, "runToolWithTimeout(name, args, signal) not found");
   assert(/signal\.addEventListener\("abort"/.test(m[0]),
     "runToolWithTimeout must race the abort signal so an interrupt is responsive");
-  assert(/runToolWithTimeout\(name, args, abortController\.signal\)/.test(SRC),
+  assert(/runToolWithTimeout\(name, args, TC\.abortController\.signal\)/.test(SRC),
     "onToolCall must pass the turn's abortController.signal (not the controller, which lacks addEventListener)");
 });
 
@@ -121,10 +123,13 @@ test("behavior: setRunning(true) keeps the input enabled and flips the placehold
     stopIcon: { classList: { toggle: () => {} } },
   };
   const sandbox = {
-    running: false,
-    el,
-    activeConversation: () => ({ id: "c1" }),
-    syncSendButton: extractFunction(SRC, "syncSendButton")({ running: false, el }),
+    TC: {
+      running: false,
+      el,
+      activeConversation: () => ({ id: "c1" }),
+      updateRunning: (v) => { sandbox.TC.running = v; },
+    },
+    syncSendButton: extractFunction(SRC, "syncSendButton")({ TC: { running: false, el } }),
   };
   const setRunning = make(sandbox);
   setRunning(true);
@@ -146,7 +151,7 @@ test("behavior: syncSendButton shows Stop only when running with an empty compos
     sendIcon: { classList: { toggle: (cls, on) => { state[cls + "-icon"] = on; } } },
     stopIcon: { classList: { toggle: (cls, on) => { state[cls + "-icon"] = on; } } },
   };
-  const sync = make({ get running() { return state.running; }, el });
+  const sync = make({ TC: { get running() { return state.running; }, el } });
   // Idle → Send.
   sync();
   assert.strictEqual(state["is-running"], false, "idle button must show Send");
@@ -184,26 +189,28 @@ function makeInterruptSandbox(overrides) {
   const sandbox = {
     // Getter/setter proxies so the extracted function's reads/writes of these
     // module-level variables hit the shared state object.
-    get running() { return state.running; },
-    set running(v) { state.running = v; },
     get midRunDeliveryInFlight() { return state.midRunDeliveryInFlight; },
     set midRunDeliveryInFlight(v) { state.midRunDeliveryInFlight = v; },
     get interruptDeliveryActive() { return state.interruptDeliveryActive; },
     set interruptDeliveryActive(v) { state.interruptDeliveryActive = v; },
-    get abortController() { return state.abortController; },
-    setStatus: (t) => calls.push("status:" + t),
-    activeConversation: () => conv,
-    nameFromFirstMessage: (t, f) => t,
-    saveState: () => calls.push("saveState"),
-    renderProjects: () => {},
-    renderSessionInfo: () => {},
-    renderMessage: (m) => { calls.push("render:" + m.content); return { content: m.content, parentNode: chatLog }; },
-    scrollChatBottom: () => {},
-    updateChatEmpty: () => {},
-    el: { chatInput: { value: "typed", style: {} }, chatLog },
     syncSendButton: () => {},
     waitForTurnEnd: async () => { state.running = false; },
     runOrchestratorTurn: async (c) => { calls.push("turn:" + c.messages.map((m) => m.role).join(",")); },
+    TC: {
+      get running() { return state.running; },
+      set running(v) { state.running = v; },
+      get abortController() { return state.abortController; },
+      setStatus: (t) => calls.push("status:" + t),
+      activeConversation: () => conv,
+      nameFromFirstMessage: (t, f) => t,
+      saveState: () => calls.push("saveState"),
+      renderProjects: () => {},
+      renderSessionInfo: () => {},
+      renderMessage: (m) => { calls.push("render:" + m.content); return { content: m.content, parentNode: chatLog }; },
+      scrollChatBottom: () => {},
+      updateChatEmpty: () => {},
+      el: { chatInput: { value: "typed", style: {} }, chatLog },
+    },
     ...overrides,
   };
   return { conv, calls, state, sandbox };
@@ -222,7 +229,7 @@ test("behavior: interruptAndSend aborts, waits, and continues with the new messa
   assert(calls.includes("abort"), "the current turn must be aborted");
   assert(calls.includes("turn:user,user"), "a fresh turn must run with the new message in history");
   // The composer was cleared and the delivery markers reset.
-  assert.strictEqual(sandbox.el.chatInput.value, "");
+  assert.strictEqual(sandbox.TC.el.chatInput.value, "");
   assert.strictEqual(state.midRunDeliveryInFlight, false);
   assert.strictEqual(state.interruptDeliveryActive, false);
 });
@@ -247,7 +254,7 @@ test("behavior: interruptAndSend reorders history when the old turn finished on 
   // the end so history order stays user → assistant.
   const { conv, calls, sandbox } = makeInterruptSandbox({
     waitForTurnEnd: async () => {
-      sandbox.running = false;
+      sandbox.TC.running = false;
       conv.messages.push({ role: "assistant", content: "partial reply" });
     },
   });
@@ -284,14 +291,14 @@ test("behavior: interruptAndSend safety net when the turn ignores the abort", as
 test("behavior: waitForTurnEnd resolves when the turn unwinds and times out otherwise", async () => {
   const make = extractFunction(SRC, "waitForTurnEnd");
   const state = { running: true };
-  const waitForTurnEnd = make({ get running() { return state.running; } });
+  const waitForTurnEnd = make({ TC: { get running() { return state.running; } } });
   // Unwinds quickly.
   setTimeout(() => { state.running = false; }, 50);
   await waitForTurnEnd(5000);
   assert.strictEqual(state.running, false);
   // Stuck turn → resolves at the timeout instead of hanging forever.
   const stuck = { running: true };
-  const waitStuck = make({ get running() { return stuck.running; } });
+  const waitStuck = make({ TC: { get running() { return stuck.running; } } });
   const t0 = Date.now();
   await waitStuck(150);
   assert.strictEqual(stuck.running, true, "stuck turn stays running");
@@ -313,7 +320,7 @@ test("behavior: runToolWithTimeout resolves promptly when the turn is aborted", 
   const sandbox = {
     TOOL_TIMEOUT_MS: 90 * 1000,
     TOOL_TIMEOUT_OVERRIDES: {},
-    toolHandler: () => new Promise(() => {}), // never settles (e.g. a hung wait_for_session)
+    TC: { toolHandler: () => new Promise(() => {}) }, // never settles (e.g. a hung wait_for_session)
   };
   const runToolWithTimeout = make(sandbox);
   const p = runToolWithTimeout("wait_for_session", {}, signal);
@@ -336,7 +343,7 @@ test("behavior: runToolWithTimeout still returns the tool result when not aborte
   const sandbox = {
     TOOL_TIMEOUT_MS: 90 * 1000,
     TOOL_TIMEOUT_OVERRIDES: {},
-    toolHandler: async () => "tool done",
+    TC: { toolHandler: async () => "tool done" },
   };
   const runToolWithTimeout = make(sandbox);
   const result = await runToolWithTimeout("read_session", {}, signal);
@@ -420,7 +427,7 @@ test("regression: the REAL runToolWithTimeout works when given abortController.s
   const sandbox = {
     TOOL_TIMEOUT_MS: 90 * 1000,
     TOOL_TIMEOUT_OVERRIDES: {},
-    toolHandler: makeDelayedTool("tool done", 30),
+    TC: { toolHandler: makeDelayedTool("tool done", 30) },
   };
   const runToolWithTimeout = make(sandbox);
   const controller = new AbortController();
@@ -439,7 +446,7 @@ test("regression: the REAL runToolWithTimeout degrades gracefully when MISUSED w
   const sandbox = {
     TOOL_TIMEOUT_MS: 90 * 1000,
     TOOL_TIMEOUT_OVERRIDES: {},
-    toolHandler: makeDelayedTool("tool done", 30),
+    TC: { toolHandler: makeDelayedTool("tool done", 30) },
   };
   const runToolWithTimeout = make(sandbox);
   const controller = new AbortController();

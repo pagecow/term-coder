@@ -1,7 +1,10 @@
-import { $, el } from "./04-dom.js";
-import { activeConversation, saveState } from "./05-util.js";
-export const boardNameCache = {};
-export async function resolveBoardName(boardId) {
+// 12-markdown.js — classic script (converted from an ES module; see REFACTOR_PLAN.md).
+// Exports are registered on the shared window.termCoder namespace (TC).
+(function () {
+"use strict";
+const TC = window.termCoder = window.termCoder || {};
+const boardNameCache = {};
+async function resolveBoardName(boardId) {
   if (!boardId) return "";
   if (boardNameCache[boardId]) return boardNameCache[boardId];
   try {
@@ -13,28 +16,28 @@ export async function resolveBoardName(boardId) {
     return "Board";
   }
 }
-export async function renderBoardChip() {
-  const c = activeConversation();
-  const chip = el.boardChip;
+async function renderBoardChip() {
+  const c = TC.activeConversation();
+  const chip = TC.el.boardChip;
   if (!chip) return;
   if (c && c.boardId) {
     chip.classList.remove("hidden");
-    el.attachedBoardName.textContent = "…";
-    el.attachBoardBtn.classList.add("hidden");
+    TC.el.attachedBoardName.textContent = "…";
+    TC.el.attachBoardBtn.classList.add("hidden");
     const name = await resolveBoardName(c.boardId);
     // conversation may have changed while awaiting
-    const cur = activeConversation();
-    if (cur && cur.boardId === c.boardId) el.attachedBoardName.textContent = name;
+    const cur = TC.activeConversation();
+    if (cur && cur.boardId === c.boardId) TC.el.attachedBoardName.textContent = name;
   } else {
     chip.classList.add("hidden");
-    el.attachBoardBtn.classList.remove("hidden");
+    TC.el.attachBoardBtn.classList.remove("hidden");
   }
 }
-export function detachBoard() {
-  const c = activeConversation();
+function detachBoard() {
+  const c = TC.activeConversation();
   if (!c) return;
   c.boardId = null;
-  saveState();
+  TC.saveState();
   renderBoardChip();
 }
 
@@ -43,7 +46,7 @@ export function detachBoard() {
 // block + inline transforms. Supports headings, fenced code blocks, tables,
 // blockquotes, ordered/unordered lists, hr, bold/italic/strike/code, links,
 // and inline code. Returns an HTML string.
-export function mdEscape(s) {
+function mdEscape(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
@@ -53,7 +56,7 @@ export function mdEscape(s) {
 // escaped string. Order matters: inline code first (protect its contents),
 // then links, then emphasis. Uses unique placeholder tokens to avoid
 // colliding with text content.
-export function mdInline(escaped) {
+function mdInline(escaped) {
   let out = escaped;
   const stash = [];
   const stashPush = (html) => { stash.push(html); return "\u0000" + (stash.length - 1) + "\u0000"; };
@@ -84,7 +87,7 @@ export function mdInline(escaped) {
 
 // Render a single block of lines (already split) into HTML. Used for table rows,
 // list items, paragraphs, etc.
-export function mdRenderTable(lines) {
+function mdRenderTable(lines) {
   if (lines.length < 2) return null;
   const splitRow = (l) => l.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
   const header = splitRow(lines[0]);
@@ -103,7 +106,7 @@ export function mdRenderTable(lines) {
   return html;
 }
 
-export function mdRenderList(items, ordered) {
+function mdRenderList(items, ordered) {
   // Detect GitHub-style task lists: every item starts with [ ] or [x].
   const allTasks = items.length > 0 && items.every((it) => /^\s*([-*+]|\d+\.)\s+\[[ xX]\]\s+/i.test(it));
   const tag = ordered ? "ol" : "ul";
@@ -133,7 +136,7 @@ export function mdRenderList(items, ordered) {
 // escaped first, then block + inline transforms are applied. Supports headings,
 // fenced code blocks, tables, blockquotes, task lists, ordered/unordered lists,
 // hr, bold/italic/strike/code, links, and inline code. Returns an HTML string.
-export function renderMarkdown(src) {
+function renderMarkdown(src) {
   if (!src) return "";
   const text = String(src).replace(/\r\n?/g, "\n");
   const lines = text.split("\n");
@@ -222,7 +225,7 @@ export function renderMarkdown(src) {
 // it is XSS-safe. Languages share a generic pass; a few (js/ts/json/css) get a
 // richer keyword/operator set. No external library, no build step.
 
-export const HL_KEYWORDS = {
+const HL_KEYWORDS = {
   js: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity",
   ts: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity public private protected readonly enum interface type namespace implements abstract declare",
   jsx: "const let var function return if else for while do switch case break continue new class extends super this typeof instanceof void delete in of async await yield import export default from as try catch finally throw static get set null undefined true false NaN Infinity",
@@ -235,7 +238,7 @@ export const HL_KEYWORDS = {
   sql: "SELECT FROM WHERE INSERT INTO UPDATE DELETE CREATE TABLE ALTER DROP JOIN LEFT RIGHT INNER OUTER ON GROUP BY ORDER HAVING LIMIT OFFSET VALUES SET NULL NOT AND OR AS DISTINCT PRIMARY KEY FOREIGN REFERENCES DEFAULT UNIQUE INDEX",
 };
 
-export function hlLangFor(lang) {
+function hlLangFor(lang) {
   const l = String(lang || "").toLowerCase().replace(/^x-/, "").replace(/\.(.*)$/, "$1");
   if (HL_KEYWORDS[l]) return l;
   if (l === "javascript" || l === "js") return "js";
@@ -252,7 +255,7 @@ export function hlLangFor(lang) {
 
 // Tokenize a single line into [{t: type, v: raw}] pieces. The tokenizer is a
 // single ordered regex pass per line, which is plenty for read-only previews.
-export function hlLine(raw, langKey) {
+function hlLine(raw, langKey) {
   const kw = HL_KEYWORDS[langKey] ? HL_KEYWORDS[langKey].split(" ") : null;
   const kwSet = kw ? new Set(kw) : null;
   // Order: comments, strings, numbers, then identifiers/words, then operators/punct.
@@ -275,13 +278,13 @@ export function hlLine(raw, langKey) {
   return out;
 }
 
-export function hlEscape(s) {
+function hlEscape(s) {
   return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
 
 // Highlight raw code into an HTML string of <span> tokens, one line per row so
 // long lines scroll horizontally without reflowing tokens.
-export function highlightCode(raw, lang) {
+function highlightCode(raw, lang) {
   const langKey = hlLangFor(lang);
   const lines = String(raw == null ? "" : raw).split("\n");
   let html = "";
@@ -302,7 +305,7 @@ export function highlightCode(raw, lang) {
 // Build the HTML for a fenced code block: syntax-highlighted code + language
 // label + copy button. The copy button uses data-code-copy which a delegated
 // click listener copies to the clipboard.
-export function renderCodeBlockHtml(rawCode, lang) {
+function renderCodeBlockHtml(rawCode, lang) {
   const langLabel = lang ? mdEscape(lang) : "";
   const langKey = hlLangFor(lang);
   const id = "code-" + (crypto.randomUUID ? crypto.randomUUID() : "c" + Date.now() + Math.random().toString(36).slice(2));
@@ -320,7 +323,7 @@ export function renderCodeBlockHtml(rawCode, lang) {
 
 // Copy text to the clipboard, preferring the platform clipboardWrite API and
 // falling back to a hidden textarea + execCommand('copy'). Resolves a bool.
-export async function copyToClipboard(text) {
+async function copyToClipboard(text) {
   try {
     if (window.chatoss && window.chatoss.clipboard && window.chatoss.clipboard.writeText) {
       return await window.chatoss.clipboard.writeText(String(text));
@@ -349,3 +352,21 @@ export async function copyToClipboard(text) {
 //
 // Streaming contract: onThinking only calls _update() — the widget STAYS
 // collapsed while tokens accumulate (the word count ticks up in the header), so
+// --- exports ---
+Object.defineProperty(TC, "boardNameCache", { get: () => boardNameCache, configurable: true });
+Object.defineProperty(TC, "HL_KEYWORDS", { get: () => HL_KEYWORDS, configurable: true });
+TC.resolveBoardName = resolveBoardName;
+TC.renderBoardChip = renderBoardChip;
+TC.detachBoard = detachBoard;
+TC.mdEscape = mdEscape;
+TC.mdInline = mdInline;
+TC.mdRenderTable = mdRenderTable;
+TC.mdRenderList = mdRenderList;
+TC.renderMarkdown = renderMarkdown;
+TC.hlLangFor = hlLangFor;
+TC.hlLine = hlLine;
+TC.hlEscape = hlEscape;
+TC.highlightCode = highlightCode;
+TC.renderCodeBlockHtml = renderCodeBlockHtml;
+TC.copyToClipboard = copyToClipboard;
+})();

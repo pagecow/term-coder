@@ -13,16 +13,19 @@
 //      guidance line for agents without a flag.
 //   4. Top-left "New Chat" / "New Project" buttons.
 //
-// app.js is a browser module, so these tests grep the real source/HTML/CSS for
-// the wiring and replicate the decision predicates verbatim.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so these tests grep the real module
+// sources/HTML/CSS for the wiring and replicate the decision predicates
+// verbatim.
 //
 // Run: node tests/first-run-models-effort.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const HTML = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const CSS = fs.readFileSync(path.join(__dirname, "..", "style.css"), "utf8");
 const APP_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "app.json"), "utf8"));
@@ -35,15 +38,15 @@ test("models: a retrying loadModels() is the ONLY assignment of the model list",
   assert(/async function loadModels\(\)/.test(SRC), "loadModels() helper missing");
   assert(/await window\.chatoss\.chat\.listModels\(\)/.test(SRC), "loadModels must call chat.listModels");
   // No stray one-shot assignment left in init():
-  const initBlock = SRC.slice(SRC.indexOf("async function init()"), SRC.indexOf("init().catch"));
+  const initBlock = SRC.slice(SRC.indexOf("async function init()"), SRC.indexOf("TC.init().catch"));
   assert(!/models = await window\.chatoss/.test(initBlock), "init must go through loadModels(), not assign models ad-hoc");
-  assert(/await loadModels\(\);/.test(SRC), "init must await loadModels()");
+  assert(/await TC\.loadModels\(\);/.test(SRC), "init must await loadModels()");
 });
 
 test("models: empty first-boot list schedules background retries + focus recovery", () => {
-  assert(/if \(!models\.length\) scheduleModelRetries\(\);/.test(SRC), "init must schedule retries when the list is empty");
+  assert(/if \(!TC\.models\.length\) TC\.scheduleModelRetries\(\);/.test(SRC), "init must schedule retries when the list is empty");
   assert(/function scheduleModelRetries\(/.test(SRC), "scheduleModelRetries missing");
-  assert(/el\.modelPicker\.addEventListener\("focus", \(\) => \{\s*if \(!models\.length\) loadModels\(\);/.test(SRC),
+  assert(/TC\.el\.modelPicker\.addEventListener\("focus", \(\) => \{\s*if \(!TC\.models\.length\) TC\.loadModels\(\);/.test(SRC),
     "picker focus must lazily reload an empty model list");
   assert(/_modelRetryScheduled/.test(SRC), "retry chain must be guarded against stacking");
 });
@@ -51,8 +54,8 @@ test("models: empty first-boot list schedules background retries + focus recover
 test("models: renderModelPicker shows a disabled 'Loading models…' placeholder when empty", () => {
   const fn = SRC.slice(SRC.indexOf("function renderModelPicker()"), SRC.indexOf("function selectedModelSupportsEffort"));
   assert(/Loading models…/.test(fn), "empty picker must show a placeholder instead of rendering blank");
-  assert(/el\.modelPicker\.disabled = true/.test(fn), "empty picker must be disabled so '' can't persist onto a conversation");
-  assert(/el\.modelPicker\.disabled = false/.test(fn), "picker must be re-enabled when models exist");
+  assert(/TC\.el\.modelPicker\.disabled = true/.test(fn), "empty picker must be disabled so '' can't persist onto a conversation");
+  assert(/TC\.el\.modelPicker\.disabled = false/.test(fn), "picker must be re-enabled when models exist");
 });
 
 // ---------------------------------------------------------------------------
@@ -81,17 +84,17 @@ test("effort: selectedModelSupportsEffort keys off thinkLevels or reasoning capa
 
 test("effort: orchestrator uses generic expanded levels when model has no thinkLevels", () => {
   const fn = SRC.slice(SRC.indexOf("function orchestratorEffortLevels()"), SRC.indexOf("function renderEffortPicker()"));
-  assert(/GENERIC_EFFORT_LEVELS/.test(fn), "must fall back to the generic effort levels");
-  assert(/return GENERIC_EFFORT_LEVELS/.test(fn), "fallback must return the generic set");
+  assert(/TC\.GENERIC_EFFORT_LEVELS/.test(fn), "must fall back to the generic effort levels");
+  assert(/return TC\.GENERIC_EFFORT_LEVELS/.test(fn), "fallback must return the generic set");
 });
 
 test("effort: sendMessage passes thinkLevel whenever effort is set", () => {
   const fn = SRC.slice(SRC.indexOf("async function sendMessage("), SRC.indexOf("async function sendMessage(") + 3000);
   // find the runTurn options block
-  const block = SRC.slice(SRC.indexOf("const result = await window.chatoss.chat.runTurn"), SRC.indexOf("signal: abortController.signal,", SRC.indexOf("const result = await window.chatoss.chat.runTurn")) + 40);
+  const block = SRC.slice(SRC.indexOf("const result = await window.chatoss.chat.runTurn"), SRC.indexOf("signal: TC.abortController.signal,", SRC.indexOf("const result = await window.chatoss.chat.runTurn")) + 40);
   assert(/thinkLevel: effort \|\| undefined/.test(block), "runTurn must pass thinkLevel whenever effort is chosen");
   assert(/think: canThink \|\| !!effort/.test(block), "runTurn must request reasoning when effort is chosen");
-  assert(!/c\.effort = canThink/.test(SRC.slice(SRC.indexOf("const effort = selectedEffort()"), SRC.indexOf("saveState();", SRC.indexOf("const effort = selectedEffort()")) + 20)),
+  assert(!/c\.effort = canThink/.test(SRC.slice(SRC.indexOf("const effort = TC.selectedEffort()"), SRC.indexOf("saveState();", SRC.indexOf("const effort = TC.selectedEffort()")) + 20)),
     "must not drop effort just because the model lacks a 'reasoning' capability string");
 });
 
@@ -135,7 +138,7 @@ test("subagent effort: effortForTarget validates against the target's current op
 
 test("subagent effort: effortOptionsForTarget uses ollama model thinkLevels, otherwise generic expanded set", () => {
   const fn = SRC.slice(SRC.indexOf("function effortOptionsForTarget"), SRC.indexOf("function populateEffortSelect"));
-  assert(/models\.find\(\(x\) => x\.id === targetId\)/.test(fn), "must look up the model by target id");
+  assert(/TC\.models\.find\(\(x\) => x\.id === targetId\)/.test(fn), "must look up the model by target id");
   assert(/m\.thinkLevels \u0026\u0026 m\.thinkLevels\.length/.test(fn), "must use model thinkLevels when present");
   assert(/directIds\.includes\(targetId\)/.test(fn), "must fall back to fixed options for direct CLI targets");
   assert(/extra-high/.test(fn) && /max/.test(fn), "generic fallback must include extra-high and max");
@@ -144,16 +147,16 @@ test("subagent effort: effortOptionsForTarget uses ollama model thinkLevels, oth
 test("subagent effort: spawnChosen applies a real codex flag for low/medium/high, guidance for extra levels", () => {
   const fn = SRC.slice(SRC.indexOf("async function spawnChosen"), SRC.indexOf("let session = null;", SRC.indexOf("async function spawnChosen")));
   assert(/--config 'model_reasoning_effort=\\""/.test(fn), "direct codex must get --config model_reasoning_effort");
-  assert(/CODEX_EFFORT_FLAG_VALUES\.has\(effort\)/.test(fn), "codex flag must only be applied for known-safe values");
+  assert(/TC\.CODEX_EFFORT_FLAG_VALUES\.has\(effort\)/.test(fn), "codex flag must only be applied for known-safe values");
   assert(/"extra-high"/.test(SRC) && /"max"/.test(SRC), "EFFORT_BRIEF must cover the expanded generic levels");
 });
 
 test("subagent effort: settings rows pair every target select with an effort select", () => {
   for (const id of ["always-effort", "complexity-effort-low", "complexity-effort-medium", "complexity-effort-high"]) {
     assert(HTML.includes('id="' + id + '"'), "settings effort select missing: " + id);
-    assert(SRC.includes('bindEffortSelect(el.' + id.replace(/-([a-z])/g, (_, c) => c.toUpperCase()) + ","), "bindEffortSelect not wired for " + id);
+    assert(SRC.includes('bindEffortSelect(TC.el.' + id.replace(/-([a-z])/g, (_, c) => c.toUpperCase()) + ","), "bindEffortSelect not wired for " + id);
   }
-  assert(/syncEffortRows\(\);/.test(SRC), "syncEffortRows must refresh rows on target change");
+  assert(/TC\.syncEffortRows\(\);/.test(SRC), "syncEffortRows must refresh rows on target change");
 });
 
 // ---------------------------------------------------------------------------
@@ -166,12 +169,12 @@ test("topbar: New Chat + New Project buttons exist and are wired; sidebar + butt
   assert(!/id="new-project-btn"/.test(HTML), "sidebar + New project button must be removed");
   assert(!/class="proj-titlebar"/.test(HTML) && !/Projects<\/span>\s*\+/.test(HTML.replace(/\n/g, " ")),
     "Projects titlebar + button must be gone");
-  assert(/el\.newChatBtn\.addEventListener\("click", newChatFromTopbar\)/.test(SRC), "New Chat handler not wired");
-  assert(/el\.newProjectTopBtn\.addEventListener\("click", newProject\)/.test(SRC), "New Project must reuse newProject()");
+  assert(/TC\.el\.newChatBtn\.addEventListener\("click", TC\.newChatFromTopbar\)/.test(SRC), "New Chat handler not wired");
+  assert(/TC\.el\.newProjectTopBtn\.addEventListener\("click", TC\.newProject\)/.test(SRC), "New Project must reuse newProject()");
   assert(!/el\.newProjectBtn\.addEventListener\("click", newProject\)/.test(SRC), "old sidebar newProjectBtn listener must be removed");
-  assert(/function syncTopNewButtons\(\)/.test(SRC) && /syncTopNewButtons\(\);/.test(SRC.replace(/function syncTopNewButtons\(\) \{[\s\S]*?\n\}/, "")),
+  assert(/function syncTopNewButtons\(\)/.test(SRC) && /TC\.syncTopNewButtons\(\);/.test(SRC.replace(/function syncTopNewButtons\(\) \{[\s\S]*?\n\}/, "")),
     "syncTopNewButtons must be called outside its own definition");
-  assert(/el\.newChatBtn\.disabled = !hasProject/.test(SRC), "New Chat must disable with no active project");
+  assert(/TC\.el\.newChatBtn\.disabled = !hasProject/.test(SRC), "New Chat must disable with no active project");
 });
 
 test("attachments: add-file button, attachment strip, and image preview modal exist", () => {
@@ -191,7 +194,7 @@ test("attachments: addFileFromPicker + addDroppedFile + buildMessageContent are 
   assert(/async function addDroppedFile\(/.test(SRC), "addDroppedFile must exist");
   assert(/function buildMessageContent\(/.test(SRC), "buildMessageContent must exist");
   assert(/window\.chatoss\.files\.onDrop\(/.test(SRC), "files.onDrop must be registered");
-  assert(/el\.addFileBtn\.addEventListener\("click", addFileFromPicker\)/.test(SRC), "add-file button must be wired");
+  assert(/TC\.el\.addFileBtn\.addEventListener\("click", TC\.addFileFromPicker\)/.test(SRC), "add-file button must be wired");
   // Multimodal content: images produce an array of text + image_url parts.
   const fn = SRC.slice(SRC.indexOf("function buildMessageContent"), SRC.indexOf("function clearAttachments"));
   assert(/type: "image_url"/.test(fn), "buildMessageContent must produce image_url parts for images");

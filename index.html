@@ -499,6 +499,35 @@
     </div>
   </div>
 
-  <script type="module" src="js/main.js"></script>
+  <!-- App scripts — classic scripts sharing the window.termCoder namespace,
+       loaded in dependency order. (ES module imports cannot be fetched in the
+       sandboxed preview frame — see REFACTOR_PLAN.md — so the modules are
+       classic scripts that register their exports on window.termCoder.) -->
+  <script src="js/04-dom.js"></script>
+  <script src="js/00-state.js"></script>
+  <script src="js/01-sessions.js"></script>
+  <script src="js/02-sqlite.js"></script>
+  <script src="js/03-history.js"></script>
+  <script src="js/05-util.js"></script>
+  <script src="js/06-tools.js"></script>
+  <script src="js/07-spawn.js"></script>
+  <script src="js/08-settings.js"></script>
+  <script src="js/09-complexity.js"></script>
+  <script src="js/10-project-branch.js"></script>
+  <script src="js/11-projects.js"></script>
+  <script src="js/12-markdown.js"></script>
+  <script src="js/13-chat.js"></script>
+  <script src="js/14-models.js"></script>
+  <script src="js/15-tokens.js"></script>
+  <script src="js/16-attachments.js"></script>
+  <script src="js/17-system-prompt.js"></script>
+  <script src="js/18-send.js"></script>
+  <script src="js/19-autofollow.js"></script>
+  <script src="js/20-terminal.js"></script>
+  <script src="js/21-askchoice.js"></script>
+  <script src="js/22-resizers.js"></script>
+  <script src="js/23-userterm.js"></script>
+  <script src="js/24-init.js"></script>
+  <script src="js/main.js"></script>
 </body>
 </html>

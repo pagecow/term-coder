@@ -9,10 +9,10 @@
 //      terminal grid, so currently-running terminals sit above ended cards
 //      and stay visible without scrolling.
 //
-// app.js is a browser module (top-level `window`/`document` references + an
-// auto-running `init()`), so it can't be `require`d whole in Node. Same
-// approach as audit-fixes.test.js: read the REAL app.js source as text and
-// assert the fix is present there (so a revert fails the test), then
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so it can't be `require`d whole in Node.
+// Same approach as audit-fixes.test.js: read the REAL module sources as text
+// and assert the fix is present there (so a revert fails the test), then
 // replicate the exact predicates/insertion logic VERBATIM and assert their
 // behavior.
 //
@@ -21,8 +21,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 // ---------------------------------------------------------------------------
 // Source-of-truth checks — the ordering fix must be present in app.js itself.
@@ -43,7 +44,7 @@ test("registerSession prepends new squares to the TOP of the terminal grid", () 
   const end = SRC.indexOf("sessions.set(session.id, rec);");
   assert(start !== -1 && end !== -1 && end > start, "registerSession body not found in app.js");
   const body = SRC.slice(start, end);
-  assert(body.includes("el.termGrid.insertBefore(square, el.termGrid.firstChild);"),
+  assert(body.includes("TC.el.termGrid.insertBefore(square, TC.el.termGrid.firstChild);"),
     "registerSession should insert the new square as the grid's first child (newest on top)");
   assert(!body.includes("el.termGrid.appendChild(square)"),
     "registerSession must not append new squares at the end of the grid anymore");

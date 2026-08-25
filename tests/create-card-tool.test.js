@@ -3,8 +3,9 @@
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 
 test("create_card tool definition exists and requires title", () => {
   assert(/name: "create_card"/.test(SRC), "create_card definition missing");

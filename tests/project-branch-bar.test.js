@@ -1,26 +1,28 @@
 // Tests for the project + git branch management bar (under the composer).
 //
-// app.js is a browser module, so these tests follow the same convention as
-// tests/token-estimator.test.js: read the REAL app.js source as text and
-// extract the pure branch-ordering/filtering helpers out of it, so the tests
-// fail if the source drifts. The DOM wiring (HTML/CSS) is verified by grepping
-// the real files.
+// The app is split into classic scripts under js/ (shared window.termCoder
+// namespace — see REFACTOR_PLAN.md), so these tests follow the same
+// convention as tests/token-estimator.test.js: read the REAL module sources as
+// text and extract the pure branch-ordering/filtering helpers out of them, so
+// the tests fail if the source drifts. The DOM wiring (HTML/CSS) is verified
+// by grepping the real files.
 //
 // Run: node tests/project-branch-bar.test.js   (no test runner, no deps)
 
 const fs = require("fs");
 const path = require("path");
 const { assert, test, run } = require("./harness.js");
+const { allModulesSrc } = require("./module-src.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
+const SRC = allModulesSrc();
 const HTML = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 const CSS = fs.readFileSync(path.join(__dirname, "..", "style.css"), "utf8");
 
-// Pull a pure function VERBATIM out of app.js and evaluate it in a sandbox.
+// Pull a pure function VERBATIM out of the modules and evaluate it in a sandbox.
 function extractFn(src, name) {
   const re = new RegExp("function " + name + "\\(([\\s\\S]*?)\\)\\s*\\{");
   const m = src.match(re);
-  assert(m, name + " declaration not found in app.js");
+  assert(m, name + " declaration not found in the modules");
   const open = src.indexOf("{", m.index + m[0].length - 1);
   let depth = 0, end = -1;
   for (let i = open; i < src.length; i++) {

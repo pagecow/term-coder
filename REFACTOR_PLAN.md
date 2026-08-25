@@ -705,9 +705,47 @@ The only true cycle risk is **tools ↔ spawn ↔ terminal** (tools calls spawn 
 - Line 20: `<script src="libs/xterm.js"></script>` (UMD global)
 - Line 21: `<script src="libs/xterm-addon-fit.js"></script>` (UMD global)
 - Line 22–26: inline `<script>` that flattens `window.FitAddon` for the bridge.
-- Line 502: **`<script type="module" src="app.js"></script>`** — the app entry point.
+- End of `<body>`: **26 classic `<script src="js/NN-*.js">` tags** — the app entry points.
 
-`app.js` is loaded as an **ES module** (`type="module"`), so it already runs in module scope (no globals leak) and can use `import`/`export`. The `js/` split relies on this: `js/main.js` is a module that imports the 24 sub-modules and calls `init()`. To activate the split, `index.html` line 502 must change from `src="app.js"` to `src="js/main.js"` (and `app.js` can then be retired).
+### Why classic scripts, not ES modules (the v1.23.0 breakage)
+
+The first modular release (v1.23.0) shipped the `js/` split as **ES modules**
+(`<script type="module" src="js/main.js">` with `import`/`export`). It broke in
+two ways:
+
+1. **Read-only import bindings.** Several modules reassigned bindings imported
+   from `00-state.js` (`state = …`, `models = …`, `running = …`,
+   `abortController = …`, `detection = …`, `trustMode = …`, `ollamaPath = …`).
+   In ES modules imported bindings are read-only, so the app died with
+   `Failed to start: Attempted to assign to readonly property.` Fixed by
+   mutating in place (`Object.assign(state, …)`, `models.splice(…)`) and by
+   adding setter functions (`setOllamaPath`, `updateRunning`, …) in
+   `00-state.js`.
+
+2. **The ChatOSS preview cannot fetch module imports.** The preview harness
+   serves the app as an `about:srcdoc` document in a Tauri webview (base URL
+   `tauri://localhost`) and inlines the entry module. Relative `import`
+   specifiers then resolve against `tauri://localhost` and the module fetches
+   fail (opaque-origin CORS), so the module graph never evaluates — the preview
+   shows the static skeleton plus a generic "Script error". Classic
+   `<script src>` tags load fine (that is how `libs/xterm.js` always worked).
+
+So the modules are now **classic scripts** that share the `window.termCoder`
+namespace (the same namespace the app already used for `askChoice` /
+`resolveSessionModel` / `getModelSelectionConfig`):
+
+- Each file is an IIFE: `(function () { "use strict"; const TC = window.termCoder = window.termCoder || {}; … })();`
+- `const` exports become getter properties on `TC`; `let` exports become
+  getter+setter properties (live bindings); functions are assigned directly.
+- Cross-module references read/write `TC.<name>`.
+- Load order in `index.html`: `04-dom.js` first (builds `el`), then
+  `00-state.js`, then `01`–`24` in numeric order, then `main.js` (calls
+  `TC.init()`). Order is not load-critical because all cross-module references
+  happen inside functions, but the numeric order is kept for readability.
+
+`app.js` (the 504 KB monolith) has been deleted; the tests in `tests/` read the
+module sources via `tests/module-src.js` (`moduleSrc` / `allModulesSrc` /
+`makeTC`).
 
 ---
 
