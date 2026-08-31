@@ -368,7 +368,6 @@
           <input id="set-cwd" class="form-input" type="text" placeholder="Blank = ask" />
         </label>
         <h3 class="settings-section-title">Model Selection Mode</h3>
-        <p class="tc-hint">Choose how sub-agent sessions pick their AI <strong>model</strong>. The model list comes from <code>ollama list</code> (local and cloud models) plus, when installed, the direct <code>claude</code> / <code>codex</code> coding CLIs — a direct CLI always runs its own built-in model. Every choice can also carry an <strong>Effort</strong> level, applied when the session starts: Codex gets its real <code>model_reasoning_effort</code> flag; agents without an effort flag get an effort instruction added to the task brief instead.</p>
         <div class="model-mode-radios" id="model-mode-radios">
           <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the model each time a session starts</span></label>
           <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific model</span><span class="radio-sub">Use one fixed AI model for every session</span></label>

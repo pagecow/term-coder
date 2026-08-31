@@ -294,6 +294,60 @@ test("T3: allOllamaModels handles empty/partial sources", () => {
   assert.deepStrictEqual(allOllamaModels(null, [{ name: "no-id", source: "local" }]), [], "local entry without id skipped");
 });
 
+// ---------------------------------------------------------------------------
+// T3b — ollama CLOUD models must be merged (v1.26.2 regression)
+// ---------------------------------------------------------------------------
+//
+// User report: the Model Selection dropdowns did not list the GLM 5.3 models.
+// Root cause proven by a LIVE PROBE of the running app: chat.listModels()
+// returns 9 models with sources {cloud: 7, local: 1, custom: 1} and DOES
+// contain glm-5.3:cloud / glm-5.3-flash:cloud (source "cloud") — but
+// allOllamaModels merged only source==="local" entries, so every ollama CLOUD
+// model was dropped. (`ollama list` locally only registers a cloud model
+// after it has been pulled — glm-5.2:cloud yes, glm-5.3:cloud no.)
+//
+// This test executes the REAL allOllamaModels from js/08-settings.js against
+// that exact live environment as the fixture.
+const SETTINGS_SRC = fs.readFileSync(path.join(__dirname, "..", "js", "08-settings.js"), "utf8");
+
+function runAllOllamaModelsReal(detection, models) {
+  const m = SETTINGS_SRC.match(/function allOllamaModels\(\) \{([\s\S]*?)\n\}/);
+  if (!m) throw new Error("allOllamaModels not found in 08-settings.js");
+  const TC = {
+    detection: detection,
+    models: models,
+  };
+  const fn = new Function("TC", m[1] + "\nreturn allOllamaModels();");
+  return fn(TC);
+}
+
+test("T3b: ollama CLOUD chat models (glm-5.3) are merged from the live model list", () => {
+  // EXACT shape captured from the real environment on 2026-09-01 (probe of the
+  // running app): sources {cloud:7, local:1, custom:1}.
+  const detection = {
+    models: ["kimi-k3:cloud", "deepseek-v4-pro:cloud", "deepseek-v4-flash:cloud", "glm-5.2:cloud", "kimi-k2.7-code:cloud", "qwen3.5:9b"],
+  };
+  const chatModels = [
+    { id: "kimi-k3:cloud", name: "Kimi K3", source: "cloud" },
+    { id: "deepseek-v4-pro:cloud", name: "DeepSeek V4 Pro", source: "cloud" },
+    { id: "deepseek-v4-flash:cloud", name: "DeepSeek V4 Flash", source: "cloud" },
+    { id: "glm-5.2:cloud", name: "GLM 5.2", source: "cloud" },
+    { id: "kimi-k2.7-code:cloud", name: "Kimi K2.7 Code", source: "cloud" },
+    { id: "glm-5.3-flash:cloud", name: "GLM 5.3 Flash", source: "cloud" },
+    { id: "glm-5.3:cloud", name: "GLM 5.3", source: "cloud" },
+    { id: "qwen3.5:9b", name: "Qwen 3.5 9B", source: "local" },
+    { id: "some-custom-model", name: "Custom", source: "custom" },
+  ];
+  const merged = runAllOllamaModelsReal(detection, chatModels);
+  assert(merged.includes("glm-5.3:cloud"), "glm-5.3:cloud (source cloud, ollama cloud id) MUST be listed");
+  assert(merged.includes("glm-5.3-flash:cloud"), "glm-5.3-flash:cloud MUST be listed");
+  assert(merged.includes("qwen3.5:9b"), "local models still merged");
+  assert(!merged.includes("some-custom-model"), "custom-source models are skipped (not ollama-runnable)");
+  // A cloud-TAGGED model whose id is NOT ollama-shaped stays out.
+  assert(!merged.includes("totally-other-provider"), "cloud source without an ollama ':cloud' id is skipped");
+  assert.strictEqual(new Set(merged).size, merged.length, "merged list must be deduped");
+});
+
 test("T3: availableOllamaModels falls back to FALLBACK_MODELS only when both sources are empty", () => {
   const FALLBACK = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
   assert.deepStrictEqual(availableOllamaModels(null, [], FALLBACK), FALLBACK, "empty sources -> fallback list");

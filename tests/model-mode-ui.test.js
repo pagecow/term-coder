@@ -111,14 +111,20 @@ test("settings copy: the MODEL SELECTION MODE section is model-worded, not targe
   const end = html.indexOf('Folder trust</h3>');
   assert(start !== -1 && end > start, "section present");
   const section = html.slice(start, end);
-  assert(!/>\s*Target\s*</.test(section), "the Always panel must not be labeled 'Target'");
-  assert(/<span class="form-label">Model<\/span>/.test(section), "the Always panel is labeled 'Model'");
+  assert(!/pick their launch target/.test(section), "no 'launch target' wording anywhere in the section");
   assert(!/Always use a specific target/.test(section), "radio title must say 'model'");
   assert(/Always use a specific model/.test(section), "radio title says 'Always use a specific model'");
   assert(!/Pick the target each time/.test(section), "Manual sub must say 'model'");
   assert(!/Assign a target to each level/.test(section), "complexity sub must say 'model'");
-  assert(!/pick their launch target/.test(section), "intro must not name a 'launch target'");
-  assert(/selects an AI model/.test(section) || /AI <strong>model<\/strong>/.test(section), "intro is AI-model framed");
+  assert(!/>\s*Target\s*</.test(section), "the Always panel must not be labeled 'Target'");
+  assert(/<span class="form-label">Model<\/span>/.test(section), "the Always panel is labeled 'Model'");
+  // v1.26.2: the descriptive intro paragraph was removed per user request —
+  // the radio rows are self-explanatory.
+  const title = html.slice(html.lastIndexOf("<h3", start), start + '.length');
+  assert(!/<p class="tc-hint">Choose how sub-agent sessions/.test(section), "intro paragraph must be gone (self-explanatory section)");
+  // The section falls straight from the heading into the radio group.
+  const between = html.slice(start, html.indexOf('model-mode-radios', start));
+  assert(!/<p /.test(between), "no paragraph between the section title and the radios");
 });
 
 run();

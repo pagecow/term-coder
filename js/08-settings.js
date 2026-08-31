@@ -111,12 +111,18 @@ function openReleasesPage() {
 
 // ---------- Model Selection Mode ----------
 // The COMPLETE ollama model list: the terminal-detected models (`ollama list`
-// via detectTools) PLUS every local model the ChatOSS chat model list reports
+// via detectTools) PLUS the ollama models the ChatOSS chat model list reports
 // (the same source the model picker at the top of the AI chat section uses).
-// The terminal probe can miss models (truncated output, PATH quirks, a stale
-// persisted snapshot), so the chat list is the authoritative superset.
-// detection.models first (terminal-verified), then chat-local models, deduped
-// by id. Falls back to FALLBACK_MODELS when both sources are empty.
+// The terminal probe only lists models registered in the local ollama store —
+// a cloud model like glm-5.3:cloud shows up in `ollama list` only after it has
+// been pulled, while chat.listModels() reports it as soon as it exists in the
+// user's ollama account. LIVE-PROVEN (v1.26.2 probe of the real environment):
+// chat models carry source "local" (registry models) or "cloud" (ollama cloud
+// models, whose ids end in ":cloud" — glm-5.3:cloud, kimi-k3:cloud, …), so
+// BOTH are merged; "custom" (user-added models from other providers) is still
+// skipped because `ollama run` cannot launch them. detection.models first
+// (terminal-verified), then chat models, deduped by id. Falls back to
+// FALLBACK_MODELS when both sources are empty.
 function allOllamaModels() {
   const seen = new Set();
   const out = [];
@@ -125,7 +131,10 @@ function allOllamaModels() {
   };
   for (const m of (TC.detection && TC.detection.models) || []) push(m);
   for (const m of TC.models) {
-    if (m && m.source === "local" && m.id) push(m.id);
+    if (!m || !m.id) continue;
+    const chatLocal = m.source === "local";
+    const chatCloud = m.source === "cloud" && String(m.id).endsWith(":cloud");
+    if (chatLocal || chatCloud) push(m.id);
   }
   return out;
 }
