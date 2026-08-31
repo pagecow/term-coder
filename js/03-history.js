@@ -98,6 +98,7 @@ function historyReopenConversation(cid) {
       TC.state.activeProjectId = p.id;
       TC.state.activeConversationId = c.id;
       if (TC.state.projectOpen) delete TC.state.projectOpen[p.id]; // reveal like selectProject
+      TC.markConversationRead(c); // opened → seen
       TC.saveState();
       closeHistoryBrowser();
       TC.renderProjects();

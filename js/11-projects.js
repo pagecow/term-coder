@@ -165,17 +165,14 @@ function renderProjects() {
       for (const c of shown) {
         const ci = document.createElement("div");
         ci.className = "conversation-item" + (c.id === TC.state.activeConversationId ? " selected" : "");
-        // Live progress dot — the "most urgent" activity across this
-        // conversation's sessions, so parallel agents are visible at a glance
-        // even from another project's body.
-        const cAct = conversationActivity(c);
-        if (cAct && cAct !== "EXITED") {
-          const cdot = document.createElement("span");
-          cdot.className = "conv-dot";
-          cdot.dataset.status = cAct === "ERROR LOOP" ? "error" : cAct === "NEEDS INPUT" ? "input" : cAct === "WORKING" ? "working" : cAct === "IDLE" ? "idle" : "starting";
-          cdot.title = cAct + " — session in this conversation";
-          ci.appendChild(cdot);
-        }
+        ci.dataset.convId = c.id;
+        // Progress indicator container — filled by paintConvIndicator (3
+        // jumping dots / orange / red / green / hollow). Kept in place even
+        // when empty so the 2s ticker can repaint it without a full re-render.
+        const ind = document.createElement("span");
+        ind.className = "conv-indicator";
+        ind.dataset.convIndicator = c.id;
+        ci.appendChild(ind);
         const cn = document.createElement("span");
         cn.className = "conv-name";
         cn.textContent = c.name;
@@ -300,6 +297,9 @@ function renderProjects() {
   // the items are in the DOM — the old per-item call ran before appendChild,
   // so its isConnected guard silently skipped it.
   paintProjSessions();
+  // And one pass fills the conversation progress indicators (dots/jumping
+  // dots) for every freshly rendered conversation row.
+  paintConvIndicators();
 }
 
 // ---------- Sidebar Sessions section ----------
@@ -410,6 +410,81 @@ function conversationActivity(c) {
     if (r > bestR) { bestR = r; best = a; }
   }
   return best;
+}
+
+// ---------- Conversation progress indicator ----------
+// The indicator LEFT of each conversation row, in priority order:
+//   3 jumping dots  — an agent in this conversation is running (WORKING/STARTING)
+//   orange dot      — NEEDS INPUT: an agent is waiting for the user to answer
+//   red dot         — ERROR LOOP: an agent is stuck retrying a failing call
+//   green dot       — finished, and there are messages the user hasn't seen
+//   hollow dot      — finished, everything read
+function conversationProgress(c) {
+  if (!c) return { kind: "none" };
+  const act = conversationActivity(c);
+  if (act === "ERROR LOOP") return { kind: "dot", status: "error", label: "ERROR LOOP — the agent is stuck retrying a failing call" };
+  if (act === "NEEDS INPUT") return { kind: "dot", status: "input", label: "NEEDS INPUT — the agent is waiting for you to answer" };
+  if (act === "WORKING" || act === "STARTING") return { kind: "running", label: act + " — the agent is running" };
+  // Finished (or no live session): green while unread, hollow once seen.
+  // readUpTo = how many messages the user last saw. Legacy conversations
+  // created before this tracking existed are treated as read so the user's
+  // whole history doesn't light up green on first launch.
+  if (c.readUpTo === undefined || c.readUpTo === null) return { kind: "dot", status: "read", label: "Finished" };
+  if ((c.messages || []).length > c.readUpTo) return { kind: "dot", status: "unread", label: "Finished — new messages to read" };
+  return { kind: "dot", status: "read", label: "Finished" };
+}
+
+// Render the indicator node(s) for a progress state into `container`
+// (a data-conv-indicator span). Works for both fresh renders and in-place
+// repaints by the 2s status ticker.
+function paintConvIndicator(container, prog) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (prog.kind === "running") {
+    const wrap = document.createElement("span");
+    wrap.className = "conv-dots";
+    wrap.title = prog.label;
+    for (let i = 0; i < 3; i++) {
+      const d = document.createElement("span");
+      d.className = "conv-jump-dot";
+      wrap.appendChild(d);
+    }
+    container.appendChild(wrap);
+    return;
+  }
+  if (prog.kind === "dot") {
+    const cdot = document.createElement("span");
+    cdot.className = "conv-dot";
+    cdot.dataset.status = prog.status;
+    cdot.title = prog.label;
+    container.appendChild(cdot);
+  }
+}
+
+// Update every conversation indicator row in place (no file-tree rebuild).
+// The 2s status ticker calls this so WORKING → IDLE → unread transitions show
+// up live without the old full renderProjects() flicker.
+function paintConvIndicators() {
+  if (!TC.el.projectList) return;
+  for (const mark of TC.el.projectList.querySelectorAll("[data-conv-indicator]")) {
+    // Search every project: indicators live inside open (possibly non-active)
+    // project bodies. Falls back to the indexed project when the marker is
+    // scoped to one (see conv row: data-conv-indicator = conversation id).
+    let conv = null;
+    for (const p of TC.state.projects) {
+      conv = p.conversations.find((c) => c.id === mark.dataset.convIndicator);
+      if (conv) break;
+    }
+    paintConvIndicator(mark, conversationProgress(conv));
+  }
+}
+
+// Mark a conversation as read up to its current message count (persisted with
+// the rest of state). Called on open/switch and when the active conversation
+// finishes rendering.
+function markConversationRead(c) {
+  if (!c || !c.messages) return;
+  c.readUpTo = c.messages.length;
 }
 
 // ---------- File tree ----------
@@ -976,6 +1051,8 @@ function selectConversation(pid, cid) {
   keepProjectOpen(TC.state.activeProjectId);
   TC.state.activeProjectId = pid;
   TC.state.activeConversationId = cid;
+  // Opening a conversation marks it read (clears the green "unread" dot).
+  markConversationRead(TC.getConversation(pid, cid));
   TC.saveState();
   renderProjects();
   TC.renderChat();
@@ -1146,6 +1223,9 @@ TC.setProjectOpen = setProjectOpen;
 TC.keepProjectOpen = keepProjectOpen;
 TC.jumpToSession = jumpToSession;
 TC.conversationActivity = conversationActivity;
+TC.conversationProgress = conversationProgress;
+TC.paintConvIndicators = paintConvIndicators;
+TC.markConversationRead = markConversationRead;
 TC.renderProjects = renderProjects;
 TC.sessionsForActiveConversation = sessionsForActiveConversation;
 TC.paintProjSessions = paintProjSessions;

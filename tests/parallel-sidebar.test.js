@@ -177,12 +177,16 @@ test("conversation dot: most-urgent activity wins across a conversation's sessio
   assert(conversationActivity(TC, { id: "none" }) === null, "a conversation with no sessions shows no dot");
 });
 
-test("sidebar conversation rows carry the live status dot", () => {
-  assert(/const cAct = conversationActivity\(c\);/.test(PROJ), "renderProjects must classify the conversation");
-  assert(/cdot\.className = "conv-dot";/.test(PROJ), "dot element missing");
-  assert(/if \(cAct && cAct !== "EXITED"\)/.test(PROJ), "EXITED conversations must not show a dot");
-  assert(/\.conversation-item \.conv-dot\[data-status="working"\]/.test(CSS), "dot palette missing for working");
-  assert(/\.conversation-item \.conv-dot\[data-status="error"\]/.test(CSS), "dot palette missing for error");
+test("sidebar conversation rows carry the live progress indicator", () => {
+  assert(/ind\.dataset\.convIndicator = c\.id;/.test(PROJ), "each conversation row must carry an indicator container");
+  assert(/paintConvIndicators\(\);/.test(PROJ), "renderProjects must paint the indicators");
+  assert(/paintConvIndicator\(container, prog\.kind === "running"[\s\S]*conv-jump-dot/.test(PROJ.replace(/\n/g, " ")) ||
+         (/function paintConvIndicator\(container, prog\) {[\s\S]*?conv-jump-dot/.test(PROJ)),
+    "the running state must render the 3 jumping dots");
+  assert(/\.conversation-item \.conv-dot\[data-status="unread"\] { background: var\(--green\)/.test(CSS), "green dot for finished & unread");
+  assert(/\.conversation-item \.conv-dot\[data-status="read"\] { background: transparent/.test(CSS), "hollow dot for finished & read");
+  assert(/\.conversation-item \.conv-dot\[data-status="input"\] { background: var\(--amber\)/.test(CSS), "orange dot for needs-input");
+  assert(/@keyframes conv-jump/.test(CSS), "jumping-dot animation missing");
 });
 
 test("files tree stays active-project-only (singleton tree) while bodies are multi-open", () => {

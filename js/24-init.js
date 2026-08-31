@@ -170,8 +170,10 @@ async function init() {
 
   // Chat scroll tracking — show the "Jump to latest" button when scrolled up,
   // and pause auto-scroll while streaming so the user can read history.
-  if (TC.el.chatScroll) {
-    TC.el.chatScroll.addEventListener("scroll", TC.chatScrollListener, { passive: true });
+  // The listener lives on #chat-log (the element that actually scrolls —
+  // #chat-scroll is overflow: hidden), so the jump button actually appears.
+  if (TC.el.chatLog) {
+    TC.el.chatLog.addEventListener("scroll", TC.chatScrollListener, { passive: true });
   }
   if (TC.el.chatJumpBtn) {
     TC.el.chatJumpBtn.addEventListener("click", () => TC.scrollChatBottom(true));

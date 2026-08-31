@@ -1207,6 +1207,34 @@ async function toolHandler(name, args) {
         // and spawn with the saved default directly. Only direct-CLI defaults
         // ("raw:claude" etc.) map to a concrete target without further input;
         // anything else falls through to the modal as before.
+        //
+        // Model Selection Mode is authoritative for non-manual modes: in
+        // "always" / "complexity" the user's configured target launches
+        // DIRECTLY — a pinned Default agent must not veto it (it used to, so
+        // the orchestrator spawned Claude even when Settings said Always =
+        // <ollama model>). Manual mode keeps the remembered-default fast path.
+        const msMode = (TC.modelSelection && TC.modelSelection.modelSelectionMode) || "manual";
+        if (msMode !== "manual") {
+          let target = null;
+          try {
+            target = await TC.resolveSessionModel(args.taskPrompt || "");
+          } catch (e) {
+            if (e && e.code === "NO_MODELS") {
+              return "No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.";
+            }
+            throw e;
+          }
+          if (!target) return "Cancelled by user — do not start the session; ask the user how to proceed or stop.";
+          const session = await TC.spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", target });
+          if (!session) return "Terminal permission denied. Approve it in the system prompt and try again.";
+          if (session.error) return session.error;
+          const rec2 = TC.sessions.get(session.id);
+          if (rec2) rec2.fromOrchestrator = true;
+          return "session " + session.id + " started: " + session.label + " in " + session.cwd +
+            " (launched with the configured " + (msMode === "always" ? "\"Always use a specific target\"" : "Select-by-complexity") + " target — no dialog shown). " +
+            "The app types and submits your taskPrompt automatically once the agent is ready. " +
+            "Monitor it with wait_for_session (returns when its turn finishes) — do NOT wait for the process to exit; coding CLIs are REPLs and never do.";
+        }
         const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
         const defTarget = defId ? TC.findLaunchTarget(defId) : null;
         if (defTarget) {
@@ -1802,22 +1830,38 @@ async function toolHandler(name, args) {
         if (!tasks.length) return "Error: pass tasks: [{ name, prompt }, ...].";
         if (tasks.length > 8) return "Error: at most 8 tasks per batch.";
         const base = p.folderPath.replace(/\/+$/, "");
-        // ONE launch choice for the whole batch: the saved default if pinned,
-        // otherwise a single spawn dialog (batchMode — no session spawned yet).
-        const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
-        const defTarget = defId ? TC.findLaunchTarget(defId) : null;
+        // ONE launch choice for the whole batch: in non-manual Model Selection
+        // Mode the configured target applies to every task (no dialog); in
+        // manual mode the saved default if pinned, otherwise a single spawn
+        // dialog (batchMode — no session spawned yet).
+        const msMode = (TC.modelSelection && TC.modelSelection.modelSelectionMode) || "manual";
         let cli = "";
-        let target = defId || null;
-        if (!defTarget) {
-          const choice = await TC.openSpawnModal({
-            source: "tool",
-            cwd: base,
-            prompt: "BATCH: " + tasks.length + " parallel subtasks — pick the launch to use for ALL of them.",
-            batchMode: true,
-          });
-          if (!choice) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
-          cli = choice.cli || "";
-          target = choice.target || null;
+        let target = null;
+        if (msMode !== "manual") {
+          try {
+            target = await TC.resolveSessionModel(tasks[0] ? String(tasks[0].prompt || "") : "");
+          } catch (e) {
+            if (e && e.code === "NO_MODELS") {
+              return "No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.";
+            }
+            throw e;
+          }
+          if (!target) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
+        } else {
+          const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
+          const defTarget = defId ? TC.findLaunchTarget(defId) : null;
+          target = defId || null;
+          if (!defTarget) {
+            const choice = await TC.openSpawnModal({
+              source: "tool",
+              cwd: base,
+              prompt: "BATCH: " + tasks.length + " parallel subtasks — pick the launch to use for ALL of them.",
+              batchMode: true,
+            });
+            if (!choice) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
+            cli = choice.cli || "";
+            target = choice.target || null;
+          }
         }
         const results = [];
         for (const t of tasks) {

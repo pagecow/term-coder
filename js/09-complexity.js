@@ -138,18 +138,20 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
   const ids = targets.map((t) => t.id);
   const opts = targets.map((t) => ({ label: t.label, value: t.id }));
 
-  // ---- Saved default launch takes priority over the mode branches. ----
-  // The "Default agent" Settings picker and the spawn-modal "Remember as
-  // default" checkbox both persist into settings.cliDefault (exposed here as
-  // cfg.cliDefault). When the user pinned a default that maps to a CURRENTLY
-  // AVAILABLE launch target, apply it automatically and skip the pill picker —
-  // this is the fix for the orchestrator re-asking which launch to use on every
-  // session even after a default was set. "Ask me every time" (and values that
-  // don't map to a concrete target, e.g. the bare ollama-tool names that still
-  // need a model) resolve to null here and fall through to the Model Selection
-  // Mode logic below, so the picker still appears exactly when it should.
-  const defId = TC.cliDefaultToTargetId(cfg.cliDefault);
-  if (defId && ids.includes(defId)) return defId;
+  // ---- Saved default launch applies ONLY in Manual mode. ----
+  // The "Default agent" Settings picker + the spawn-modal "Remember as default"
+  // checkbox persist into settings.cliDefault (exposed here as cfg.cliDefault).
+  // It is a manual-mode convenience ("remember my pick so the picker doesn't
+  // re-ask"), NOT a master override: when the user explicitly chose Always or
+  // Select-by-complexity in Settings, that choice must win — previously a
+  // pinned default silently vetoed the Always target, so "Always use a
+  // specific target" appeared to ignore the model the user picked. Manual
+  // mode keeps the short-circuit (no re-asking every session); "Ask me every
+  // time" and values that don't map to a concrete target fall through.
+  if (cfg.mode === "manual") {
+    const defId = TC.cliDefaultToTargetId(cfg.cliDefault);
+    if (defId && ids.includes(defId)) return defId;
+  }
 
   // ---- Always: use the configured fixed target, no prompt. ----
   if (cfg.mode === "always") {

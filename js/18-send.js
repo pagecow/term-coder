@@ -336,6 +336,11 @@ async function runOrchestratorTurn(c) {
       TC.saveState();
       TC.renderMessage(c.messages[c.messages.length - 1]);
       TC.maybeScrollChatBottom();
+      // If the user is still watching THIS conversation, the turn it just
+      // finished is seen; if they switched away mid-run, leave it unread so
+      // the sidebar shows the green "finished, unread" dot.
+      if (TC.activeConversation() === c && TC.markConversationRead) TC.markConversationRead(c);
+      if (TC.paintConvIndicators) TC.paintConvIndicators();
     }
   } catch (e) {
     typingRow.remove();

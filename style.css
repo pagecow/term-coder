@@ -756,7 +756,7 @@ body.is-resizing-row .term-mount { pointer-events: none; }
 .proj-session-row[data-status="working"] .proj-session-dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(16,163,127,0.15); animation: proj-dot-pulse 1.6s ease-in-out infinite; }
 .proj-session-row[data-status="idle"] .proj-session-dot { background: var(--muted); }
 .proj-session-row[data-status="starting"] .proj-session-dot { background: var(--chat-tool-running); }
-.proj-session-row[data-status="input"] .proj-session-dot { background: var(--chat-tool-running); box-shadow: 0 0 0 3px rgba(201,138,43,0.15); }
+.proj-session-row[data-status="input"] .proj-session-dot { background: var(--amber); box-shadow: 0 0 0 3px rgba(201,138,43,0.18); }
 .proj-session-row[data-status="error"] .proj-session-dot { background: var(--danger); box-shadow: 0 0 0 3px rgba(224,62,62,0.14); }
 .proj-session-row[data-status="exited"] .proj-session-dot { background: var(--border-strong); }
 @keyframes proj-dot-pulse {
@@ -772,22 +772,48 @@ body.is-resizing-row .term-mount { pointer-events: none; }
   white-space: nowrap;
 }
 
-/* Per-conversation progress dot in the sidebar (multi-open projects): the
-   "most urgent" activity across the conversation's sessions, same palette as
-   .proj-session-dot so the two lists read as one system. */
+/* Per-conversation progress indicator in the sidebar (multi-open projects):
+   3 jumping dots = agent running · orange = waiting for the user · red =
+   error loop · green = finished & unread · hollow = finished & read. */
+.conversation-item .conv-indicator {
+  flex: none;
+  width: 14px;
+  height: 10px;
+  margin-right: 2px;
+  display: inline-flex;
+  align-items: center;
+}
 .conversation-item .conv-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex: none;
-  margin-right: 2px;
   background: var(--muted);
 }
-.conversation-item .conv-dot[data-status="working"] { background: var(--accent); animation: proj-dot-pulse 1.6s ease-in-out infinite; }
-.conversation-item .conv-dot[data-status="idle"] { background: var(--muted); }
-.conversation-item .conv-dot[data-status="starting"] { background: var(--chat-tool-running); }
-.conversation-item .conv-dot[data-status="input"] { background: var(--chat-tool-running); }
+.conversation-item .conv-dot[data-status="input"] { background: var(--amber); box-shadow: 0 0 0 2px rgba(201,138,43,0.18); }
 .conversation-item .conv-dot[data-status="error"] { background: var(--danger); }
+.conversation-item .conv-dot[data-status="unread"] { background: var(--green); box-shadow: 0 0 0 2px rgba(16,163,127,0.18); }
+.conversation-item .conv-dot[data-status="read"] { background: transparent; border: 1.4px solid var(--muted); }
+/* The running indicator: three dots bouncing in sequence (same motion as the
+   chat typing indicator, sized for a 10px-tall sidebar row). */
+.conversation-item .conv-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.conversation-item .conv-jump-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: conv-jump 1s ease-in-out infinite;
+}
+.conversation-item .conv-jump-dot:nth-child(2) { animation-delay: .15s; }
+.conversation-item .conv-jump-dot:nth-child(3) { animation-delay: .3s; }
+@keyframes conv-jump {
+  0%, 60%, 100% { transform: translateY(0); opacity: .45; }
+  30% { transform: translateY(-3.5px); opacity: 1; }
+}
 
 /* App-generated event message (auto-follow waking the orchestrator). Rendered in
    the user slot because that is the only role the chat API accepts, so it must
@@ -1679,11 +1705,14 @@ body.is-resizing-row .term-mount { pointer-events: none; }
 }
 
 /* ---------- Jump to latest button ---------- */
+/* Bottom-RIGHT of the chat column: the user's eye scans the composer corner,
+   and a centered pill used to cover the middle of the message column. */
 .chat-jump-btn {
   position: absolute;
   bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 22px;
+  left: auto;
+  transform: none;
   z-index: 5;
   display: inline-flex;
   align-items: center;

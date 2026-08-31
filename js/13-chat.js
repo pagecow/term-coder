@@ -305,18 +305,30 @@ let chatAutoScroll = true;
 // chatAutoScroll is exported (read by other modules); only this module may
 // REBIND it, so other modules set it through this mutator.
 function setChatAutoScroll(v) { chatAutoScroll = v; }
+// The REAL scrolling container is #chat-log (overflow-y: auto). Its parent
+// #chat-scroll is overflow: hidden and NEVER scrolls — wiring the scroll logic
+// to chatScroll made every pin a silent no-op (long conversations opened at
+// the top and "Jump to latest" never appeared). Prefer chatLog; keep
+// chatScroll as a fallback for any future layout where the roles swap.
+function chatScroller() {
+  if (TC.el.chatLog) return TC.el.chatLog;
+  return TC.el.chatScroll;
+}
 function chatScrollListener() {
-  if (!TC.el.chatScroll) return;
-  const sc = TC.el.chatScroll;
+  const sc = chatScroller();
+  if (!sc) return;
   const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60;
   chatAutoScroll = atBottom;
   if (TC.el.chatJumpBtn) TC.el.chatJumpBtn.classList.toggle("hidden", atBottom);
 }
 function scrollChatBottom(smooth) {
-  if (!TC.el.chatScroll) { if (TC.el.chatLog) TC.el.chatLog.scrollTop = TC.el.chatLog.scrollHeight; return; }
-  const sc = TC.el.chatScroll;
+  const sc = chatScroller();
+  if (!sc) return;
+  // Explicit behavior: CSS gives .chat-log `scroll-behavior: smooth`, which
+  // would turn every "instant" pin during streaming into a laggy animation.
+  // "instant" pins immediately; the jump button animates.
   if (smooth) { sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" }); }
-  else { sc.scrollTop = sc.scrollHeight; }
+  else { sc.scrollTo({ top: sc.scrollHeight, behavior: "instant" }); }
   chatAutoScroll = true;
   if (TC.el.chatJumpBtn) TC.el.chatJumpBtn.classList.add("hidden");
 }
@@ -372,6 +384,13 @@ function renderChat() {
   chatAutoScroll = true;
   scrollChatBottom(false);
   updateChatEmpty();
+  // The conversation being rendered is the one the user is looking at —
+  // anything that arrived while it was in the background is now seen.
+  if (TC.markConversationRead && c === TC.activeConversation()) {
+    const before = c.readUpTo;
+    TC.markConversationRead(c);
+    if (before !== c.readUpTo) TC.paintConvIndicators();
+  }
   TC.renderTokenEstimator();
 }
 function renderMessage(m) {
