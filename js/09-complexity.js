@@ -144,8 +144,8 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
   // It is a manual-mode convenience ("remember my pick so the picker doesn't
   // re-ask"), NOT a master override: when the user explicitly chose Always or
   // Select-by-complexity in Settings, that choice must win — previously a
-  // pinned default silently vetoed the Always target, so "Always use a
-  // specific target" appeared to ignore the model the user picked. Manual
+  // pinned default silently vetoed the Always model, so "Always use a
+  // specific model" appeared to ignore the model the user picked. Manual
   // mode keeps the short-circuit (no re-asking every session); "Ask me every
   // time" and values that don't map to a concrete target fall through.
   if (cfg.mode === "manual") {

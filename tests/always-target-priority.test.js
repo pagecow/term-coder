@@ -1,5 +1,5 @@
-// Regression test: "Always use a specific target" must actually launch the
-// target the user picked — model AND effort.
+// Regression test: "Always use a specific model" must actually launch the
+// model the user picked — model AND effort.
 //
 // Root cause: resolveSessionModel applied the legacy "Default agent" pin
 // (settings.cliDefault, e.g. "raw:claude") BEFORE the mode branches, and the

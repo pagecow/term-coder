@@ -21,7 +21,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.26.0";
+const APP_VERSION = "1.26.1";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the

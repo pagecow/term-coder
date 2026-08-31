@@ -229,11 +229,15 @@ function launchTargetChoiceOptions() {
   return availableLaunchTargets().map((t) => ({ label: t.label, value: t.id }));
 }
 
-// Populate a <select> with the available launch targets (direct CLIs +
-// ollama models) and select `selected` (if present in the list). Renders an
-// empty placeholder option when nothing is available so the picker is never
-// silently blank. Direct CLIs are grouped under an optgroup so they read as a
-// distinct choice from the ollama models.
+// Populate a <select> with the available model choices and select `selected`
+// (if present in the list). Renders an empty placeholder option when nothing
+// is available so the picker is never silently blank.
+//
+// Ordering is MODEL-FIRST on purpose: this section is about picking an AI model
+// for coding sessions, so ollama models come first and the direct CLIs (which
+// run their own built-in model) are the clearly-labeled secondary group. When
+// the saved value is missing/unknown the panel defaults to the FIRST OLLAMA
+// MODEL — never to a direct CLI — so the user always lands on a model choice.
 function populateModelSelect(selectEl, selected) {
   if (!selectEl) return;
   const targets = availableLaunchTargets();
@@ -247,20 +251,9 @@ function populateModelSelect(selectEl, selected) {
     return;
   }
   const ids = targets.map((t) => t.id);
-  // Direct CLIs first (if any), under a labeled group.
   const direct = targets.filter((t) => t.kind === "direct");
   const ollama = targets.filter((t) => t.kind === "ollama");
-  if (direct.length) {
-    const grp = document.createElement("optgroup");
-    grp.label = "Direct CLI (no ollama)";
-    for (const t of direct) {
-      const opt = document.createElement("option");
-      opt.value = t.id;
-      opt.textContent = t.id + "  (direct)";
-      grp.appendChild(opt);
-    }
-    selectEl.appendChild(grp);
-  }
+  // AI models first — model selection is the point of this panel.
   if (ollama.length) {
     const grp = document.createElement("optgroup");
     grp.label = "Ollama models";
@@ -272,9 +265,24 @@ function populateModelSelect(selectEl, selected) {
     }
     selectEl.appendChild(grp);
   }
-  // Restore the saved selection if it's still available, else first target.
+  // Direct CLIs last, clearly labeled: each runs its OWN built-in model, so
+  // choosing one is still a model choice — it just isn't an ollama model id.
+  if (direct.length) {
+    const grp = document.createElement("optgroup");
+    grp.label = "Direct CLI (runs its own model)";
+    for (const t of direct) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.id + "  (direct CLI)";
+      grp.appendChild(opt);
+    }
+    selectEl.appendChild(grp);
+  }
+  // Restore the saved selection if it's still available; otherwise default to
+  // the first ollama model (falling back to the first direct CLI when ollama
+  // has nothing).
   if (selected && ids.includes(selected)) selectEl.value = selected;
-  else selectEl.value = ids[0];
+  else selectEl.value = (ollama[0] || direct[0]).id;
 }
 
 // ---------- Sub-agent effort (per launch target) ----------

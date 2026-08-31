@@ -368,21 +368,21 @@
           <input id="set-cwd" class="form-input" type="text" placeholder="Blank = ask" />
         </label>
         <h3 class="settings-section-title">Model Selection Mode</h3>
-        <p class="tc-hint">Choose how sub-agent sessions pick their launch target. Options include the direct <code>claude</code> / <code>codex</code> CLIs (when installed) and ollama models from <code>ollama list</code>. Each target can also carry an <strong>Effort</strong> level: applied when the session starts — Codex gets its real <code>model_reasoning_effort</code> flag; agents without an effort flag (claude / opencode / ollama) get an effort instruction added to the task brief instead.</p>
+        <p class="tc-hint">Choose how sub-agent sessions pick their AI <strong>model</strong>. The model list comes from <code>ollama list</code> (local and cloud models) plus, when installed, the direct <code>claude</code> / <code>codex</code> coding CLIs — a direct CLI always runs its own built-in model. Every choice can also carry an <strong>Effort</strong> level, applied when the session starts: Codex gets its real <code>model_reasoning_effort</code> flag; agents without an effort flag get an effort instruction added to the task brief instead.</p>
         <div class="model-mode-radios" id="model-mode-radios">
-          <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the target each time a session starts</span></label>
-          <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific target</span><span class="radio-sub">Use one fixed target for every session</span></label>
-          <label class="radio-row"><input type="radio" name="model-mode" value="complexity" /><span class="radio-label">Select by complexity</span><span class="radio-sub">Assign a target to each level (low / medium / high)</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="manual" /><span class="radio-label">Manual</span><span class="radio-sub">Pick the model each time a session starts</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="always" /><span class="radio-label">Always use a specific model</span><span class="radio-sub">Use one fixed AI model for every session</span></label>
+          <label class="radio-row"><input type="radio" name="model-mode" value="complexity" /><span class="radio-label">Select by complexity</span><span class="radio-sub">Assign a model to each level (low / medium / high)</span></label>
         </div>
 
         <div class="model-mode-panel" id="model-mode-manual">
-          <p class="tc-hint">You'll be asked to pick a launch target (claude / codex direct, or an ollama model) each time a session starts. Effort levels saved in the other modes still apply per target when it launches.</p>
+          <p class="tc-hint">You'll be asked to pick the model for each session as it starts — an ollama model, or a direct CLI that runs its own built-in model. Effort levels saved in the other modes still apply per model when it launches.</p>
         </div>
 
         <div class="model-mode-panel hidden" id="model-mode-always">
           <div class="target-effort-grid">
             <label class="form-row">
-              <span class="form-label">Target</span>
+              <span class="form-label">Model</span>
               <select id="always-model" class="form-input"></select>
             </label>
             <label class="form-row form-row-effort">
