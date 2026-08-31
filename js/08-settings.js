@@ -321,9 +321,9 @@ function effortOptionsForTarget(targetId) {
   const directIds = ["claude", "codex", "opencode"];
   if (targetId && directIds.includes(targetId)) {
     return [{ value: "", label: "Model default" },
-      { value: "low", label: "Low — fast & pragmatic" },
-      { value: "medium", label: "Medium — balanced" },
-      { value: "high", label: "High — deep reasoning" }];
+      { value: "low", label: "Low" },
+      { value: "medium", label: "Medium" },
+      { value: "high", label: "High" }];
   }
   const m = TC.models.find((x) => x.id === targetId);
   if (m && m.thinkLevels && m.thinkLevels.length) {
@@ -334,9 +334,9 @@ function effortOptionsForTarget(targetId) {
     return opts;
   }
   return [{ value: "", label: "Model default" },
-    { value: "low", label: "Low — fast & pragmatic" },
-    { value: "medium", label: "Medium — balanced" },
-    { value: "high", label: "High — deep reasoning" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
     { value: "extra-high", label: "Extra high" },
     { value: "max", label: "Max" }];
 }

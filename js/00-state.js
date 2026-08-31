@@ -21,7 +21,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.26.2";
+const APP_VERSION = "1.27.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -115,9 +115,9 @@ const MS_KEYS = ["modelSelectionMode", "alwaysModel", "complexityModelLow", "com
 // real --config model_reasoning_effort flag that accepts these exact values.
 const SUBAGENT_EFFORT_OPTIONS_BASE = [
   { value: "", label: "Model default" },
-  { value: "low", label: "Low — fast & pragmatic" },
-  { value: "medium", label: "Medium — balanced" },
-  { value: "high", label: "High — deep reasoning" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
 ];
 
 // Values that are safe to pass directly to Codex's --config model_reasoning_effort
