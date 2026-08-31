@@ -63,7 +63,9 @@ function startAutoFollow() {
   // handle was discarded, so this interval could never be stopped.
   if (statusRefreshTimer) clearInterval(statusRefreshTimer);
   statusRefreshTimer = setInterval(() => {
-    if (TC.el.projSessionsBody && TC.el.projSessionsBody.isConnected) TC.paintProjSessions();
+    // Repaint EVERY open project's Sessions list (multi-open sidebar), not
+    // just the active project's.
+    if (TC.el.projectList && TC.el.projectList.querySelector("[data-proj-sessions]")) TC.paintProjSessions();
   }, 2000);
 }
 

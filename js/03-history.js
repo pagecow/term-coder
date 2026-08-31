@@ -94,9 +94,10 @@ function historyReopenConversation(cid) {
   for (const p of TC.state.projects) {
     const c = p.conversations.find((x) => x.id === cid);
     if (c) {
+      TC.keepProjectOpen(TC.state.activeProjectId);
       TC.state.activeProjectId = p.id;
       TC.state.activeConversationId = c.id;
-      TC.collapsedProjects.delete(p.id);
+      if (TC.state.projectOpen) delete TC.state.projectOpen[p.id]; // reveal like selectProject
       TC.saveState();
       closeHistoryBrowser();
       TC.renderProjects();

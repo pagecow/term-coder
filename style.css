@@ -772,6 +772,23 @@ body.is-resizing-row .term-mount { pointer-events: none; }
   white-space: nowrap;
 }
 
+/* Per-conversation progress dot in the sidebar (multi-open projects): the
+   "most urgent" activity across the conversation's sessions, same palette as
+   .proj-session-dot so the two lists read as one system. */
+.conversation-item .conv-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  margin-right: 2px;
+  background: var(--muted);
+}
+.conversation-item .conv-dot[data-status="working"] { background: var(--accent); animation: proj-dot-pulse 1.6s ease-in-out infinite; }
+.conversation-item .conv-dot[data-status="idle"] { background: var(--muted); }
+.conversation-item .conv-dot[data-status="starting"] { background: var(--chat-tool-running); }
+.conversation-item .conv-dot[data-status="input"] { background: var(--chat-tool-running); }
+.conversation-item .conv-dot[data-status="error"] { background: var(--danger); }
+
 /* App-generated event message (auto-follow waking the orchestrator). Rendered in
    the user slot because that is the only role the chat API accepts, so it must
    look clearly unlike something the user typed. */

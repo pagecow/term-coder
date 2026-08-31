@@ -21,7 +21,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.23.2";
+const APP_VERSION = "1.24.0";
 // CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
 // This is the SINGLE source of truth for the ollama-launch entries offered in
 // the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
@@ -70,6 +70,11 @@ let state = {
   activeSessionId: null,
   termView: "squares", // "squares" | "columns" | "rows" — layout of the sessions panel
   convShown: {},       // project id -> how many conversations are visible (pagination)
+  projectOpen: {},     // project id -> bool. Several project bodies can be open at
+                       // once (parallel agents): the ACTIVE project's body shows
+                       // unless the user explicitly collapsed it (false); a
+                       // non-active project shows only when explicitly opened
+                       // (true). Persisted, so open projects survive a restart.
   currentBranch: null, // active project's current git branch (last known), refreshed on demand
 };
 let settings = {

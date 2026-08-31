@@ -12,6 +12,7 @@ async function init() {
     // defaults the old code spelled out here.
     if (saved) Object.assign(TC.state, saved);
     if (!TC.state.sectionCollapsed) TC.state.sectionCollapsed = {};
+    if (!TC.state.projectOpen) TC.state.projectOpen = {};
   } catch (e) { console.warn("restore state", e); }
   // Hydrate conversations + messages from the private SQLite DB (the durable
   // history store). scopedData may be stale or lost after an orchestration

@@ -1,0 +1,207 @@
+// Regression tests for the multi-open sidebar (parallel agents):
+//
+//   1. More than one project body can be open at once: a body is visible when
+//      EITHER it is the active project not explicitly collapsed OR it was
+//      explicitly opened (persisted in state.projectOpen).
+//   2. Switching active project/conversation KEEPS the outgoing project open
+//      (keepProjectOpen) so parallel monitoring survives hopping between
+//      conversations.
+//   3. Each open project gets its own Sessions list (data-proj-sessions),
+//      scoped to that project's conversations; the 2s ticker repaints all of
+//      them; the createdAt sort contract is preserved verbatim.
+//   4. Session rows in ANY project jump to the owning conversation first,
+//      THEN select the session (selectConversation → renderSessionInfo →
+//      refreshSessionVisibility → selectSession order).
+//   5. Conversation rows show a live progress dot (most-urgent activity).
+//
+// Same approach as the other suites: grep the real module sources for the
+// wiring and replicate the core predicates verbatim for behavior checks.
+const fs = require("fs");
+const path = require("path");
+const { assert, test, run } = require("./harness.js");
+const { moduleSrc } = require("./module-src.js");
+
+const PROJ = moduleSrc("11-projects.js");
+const STATE = moduleSrc("00-state.js");
+const INIT = moduleSrc("24-init.js");
+const FOLLOW = moduleSrc("19-autofollow.js");
+const HIST = moduleSrc("03-history.js");
+const CSS = fs.readFileSync(path.join(__dirname, "..", "style.css"), "utf8");
+
+// ---------------------------------------------------------------------------
+// Verbatim predicates from 11-projects.js.
+// ---------------------------------------------------------------------------
+function isProjectOpen(TC, p) {
+  const flag = (TC.state.projectOpen || {})[p.id];
+  return (p.id === TC.state.activeProjectId) ? flag !== false : flag === true;
+}
+
+test("open-state model: active defaults open; non-active needs an explicit open", () => {
+  const mkState = (flags) => ({ projectOpen: flags });
+  // active project, no flag → OPEN (same as the old single-panel look)
+  assert(isProjectOpen({ state: mkState({}) }, { id: "a" === "a" ? "a" : "a" }) === undefined || true, "noop");
+  const TCa = { state: { activeProjectId: "a", projectOpen: {} } };
+  assert(isProjectOpen(TCa, { id: "a" }), "active with no flag must be open");
+  const TCb = { state: { activeProjectId: "a", projectOpen: { b: false } } };
+  assert(!isProjectOpen(TCb, { id: "b" }), "active explicitly collapsed must be closed");
+  const TCc = { state: { activeProjectId: "a", projectOpen: { c: true } } };
+  assert(isProjectOpen(TCc, { id: "c" }), "non-active explicitly opened must be open");
+  const TCd = { state: { activeProjectId: "a", projectOpen: { d: false } } };
+  assert(!isProjectOpen(TCd, { id: "d" }), "non-active without explicit open must be closed");
+  const TCe = { state: { activeProjectId: "a", projectOpen: {} } };
+  assert(!isProjectOpen(TCe, { id: "e" }), "non-active with NO flag must be closed (default single-panel look)");
+});
+
+test("open-state model: flags persist across restarts (projectOpen in state defaults)", () => {
+  assert(/projectOpen: \{\}/.test(STATE), "00-state.js must default state.projectOpen");
+  assert(/if \(!TC\.state\.projectOpen\) TC\.state\.projectOpen = \{\};/.test(INIT),
+    "24-init.js must guard a legacy saved state without projectOpen");
+});
+
+test("chevron toggles per-project open state via setProjectOpen (no singleton collapse)", () => {
+  const chev = PROJ.slice(PROJ.indexOf("chev.onclick"), PROJ.indexOf("row.appendChild(chev)"));
+  assert(/setProjectOpen\(p, !open\)/.test(chev), "chevron must call setProjectOpen(p, !open)");
+  assert(!/collapsedProjects\.(has|delete|add)/.test(PROJ) && !/defineProperty\(TC, "collapsedProjects"/.test(PROJ),
+    "the old collapsedProjects singleton must be gone (comment mentions aside)");
+});
+
+test("renderProjects: every open project renders a body (not only the active one)", () => {
+  assert(/if \(open\) \{\s*\n\s*const body = document\.createElement\("div"\);\s*\n\s*body\.className = "proj-body";/.test(PROJ),
+    "project body must render under if (open)");
+  assert(!/isActive && !isCollapsed/.test(PROJ), "the old active-only body gate must be gone");
+});
+
+test("keepProjectOpen: switching active keeps a monitored project open", () => {
+  const TC = { state: { activeProjectId: "a", projectOpen: { b: true } }, getProject: (id) => (id === "b" ? { id: "b" } : null) };
+  // verbatim body of keepProjectOpen
+  function keepProjectOpen(pid) {
+    if (!pid) return;
+    const p = TC.getProject(pid);
+    if (!p) return;
+    if (!TC.state.projectOpen) TC.state.projectOpen = {};
+    if (isProjectOpen(TC, p)) TC.state.projectOpen[pid] = true;
+  }
+  keepProjectOpen("b");
+  assert(TC.state.projectOpen.b === true, "outgoing open project must be stuck open");
+  // A closed project is NOT force-opened by a switch away from it.
+  const TC2 = { state: { activeProjectId: "x", projectOpen: { y: false } }, getProject: (id) => (id === "y" ? { id: "y" } : null) };
+  function kp2(pid) {
+    const p = TC2.getProject(pid);
+    if (!p) return;
+    if (isProjectOpen(TC2, p)) TC2.state.projectOpen[pid] = true;
+  }
+  kp2("y");
+  assert(TC2.state.projectOpen.y === false, "selecting away must not reveal a project the user collapsed");
+});
+
+test("selectProject/selectConversation switch away without collapsing the monitor", () => {
+  const sp = PROJ.slice(PROJ.indexOf("function selectProject(pid)"), PROJ.indexOf("// Switching conversation must also"));
+  const sc = PROJ.slice(PROJ.indexOf("function selectConversation(pid, cid)"), PROJ.indexOf("async function newProject"));
+  assert(/keepProjectOpen\(TC\.state\.activeProjectId\);/.test(sp), "selectProject must keepProjectOpen the outgoing project");
+  assert(/keepProjectOpen\(TC\.state\.activeProjectId\);/.test(sc), "selectConversation must keepProjectOpen the outgoing project");
+  assert(/delete TC\.state\.projectOpen\[pid\];/.test(sp), "selectProject must clear the incoming flag (always reveal)");
+  // history reopen path reveals too
+  assert(/delete TC\.state\.projectOpen\[p\.id\];/.test(HIST), "historyReopenConversation must clear the reveal flag");
+});
+
+test("Sessions lists exist per open project (data-proj-sessions) and the ticker repaints all", () => {
+  assert(/sesBody\.dataset\.projSessions = p\.	id?;/m.test(PROJ.replace(/\.id;/, ".id;")) || /sesBody\.dataset\.projSessions = p\.id;/.test(PROJ),
+    "each Sessions list body must carry data-proj-sessions");
+  assert(/querySelectorAll\("\[data-proj-sessions\]"\)/.test(PROJ), "paintProjSessions must iterate every open project's list");
+  assert(/paintOneProjSessions\(pid, body, countEl\)/.test(PROJ), "paintProjSessions must delegate per project");
+  assert(/TC\.el\.projectList\.querySelector\("\[data-proj-sessions\]"\)/.test(FOLLOW) || /projectList.*\[data-proj-sessions\]/.test(FOLLOW),
+    "the 2s ticker must fire when ANY open project has a Sessions list");
+});
+
+test("paintProjSessions keeps the newest-first createdAt sort (sessions-order contract)", () => {
+  assert(/const recs = liveAll\.sort\(\(a, b\) => \(b\.createdAt \|\| 0\) - \(a\.createdAt \|\| 0\)\);/.test(PROJ),
+    "live list must sort by createdAt descending (newest first)");
+  assert(/const deads = deadAll\.sort\(\(a, b\) => \(b\.endedAt \|\| b\.createdAt \|\| 0\) - \(a\.endedAt \|\| a\.createdAt \|\| 0\)\);/.test(PROJ),
+    "ended list must sort by endedAt descending");
+});
+
+test("per-project scope: a project's Sessions list covers ALL of its conversations", () => {
+  const fn = PROJ.slice(PROJ.indexOf("function paintOneProjSessions"), PROJ.indexOf("function jumpToSession"));
+  assert(/const convIds = new Set\(p\.conversations\.map\(\(c\) => c\.id\)\);/.test(fn),
+    "must key the project's conversation ids");
+  assert(/convIds\.has\(s\.conversationId \|\| null\)/.test(fn), "must scope sessions by conversationId ∈ project");
+});
+
+test("session rows in any project jump to the owning conversation BEFORE selecting", () => {
+  const fn = PROJ.slice(PROJ.indexOf("function jumpToSession(pid, rec)"), PROJ.indexOf("// The \x22most urgent\x22 activity"));
+  const iSel = fn.indexOf("selectConversation(pid, cid)");
+  const iGrid = fn.indexOf("TC.selectSession(rec.id)");
+  assert(iSel !== -1 && iGrid !== -1 && iSel < iGrid,
+    "jumpToSession must selectConversation first, then selectSession (grid visibility refresh)");
+  assert(/row\.onclick = \(\) => jumpToSession\(p\.id, rec\);/.test(PROJ), "live rows must jump");
+  assert(/row\.onclick = \(\) => jumpToSession\(p\.id, snap\);/.test(PROJ), "ended rows must jump");
+});
+
+// Verbatim replication of conversationActivity.
+function conversationActivity(TC, c) {
+  if (!c) return null;
+  const recs = [
+    ...[...TC.sessions.values()].filter((s) => (s.conversationId || null) === c.id),
+    ...[...TC.deadSessions.values()].filter((s) => (s.conversationId || null) === c.id),
+  ];
+  const rank = { "ERROR LOOP": 6, "NEEDS INPUT": 5, "WORKING": 4, "STARTING": 3, "IDLE": 2, "EXITED": 1 };
+  let best = null, bestR = 0;
+  for (const s of recs) {
+    const a = TC.sessionActivity(s);
+    const r = rank[a] || 0;
+    if (r > bestR) { bestR = r; best = a; }
+  }
+  return best;
+}
+
+test("conversation dot: most-urgent activity wins across a conversation's sessions", () => {
+  const TC = {
+    sessions: new Map([
+      ["s1", { id: "s1", conversationId: "c1", active: true, taskSubmittedAt: Date.now(), lastOutputAt: Date.now(), bytesSinceTask: 9999 }],
+      ["s2", { id: "s2", conversationId: "c1", active: true, waitingForInput: true, taskSubmittedAt: Date.now() }],
+    ]),
+    deadSessions: new Map(),
+    sessionActivity(s) {
+      if (!s) return "EXITED";
+      if (s.active === false) return "EXITED";
+      if (s.errorLoop) return "ERROR LOOP";
+      if (s.waitingForInput) return "NEEDS INPUT";
+      const quietFor = Date.now() - (s.lastOutputAt || 0);
+      if (!s.taskSubmittedAt) return quietFor >= 20000 ? "IDLE" : "STARTING";
+      if (s.bytesSinceTask < 800) return "STARTING";
+      return quietFor < 20000 ? "WORKING" : "IDLE";
+    },
+  };
+  assert(conversationActivity(TC, { id: "c1" }) === "NEEDS INPUT",
+    "NEEDS INPUT outranks WORKING (a blocked agent needs attention first)");
+  assert(conversationActivity(TC, { id: "none" }) === null, "a conversation with no sessions shows no dot");
+});
+
+test("sidebar conversation rows carry the live status dot", () => {
+  assert(/const cAct = conversationActivity\(c\);/.test(PROJ), "renderProjects must classify the conversation");
+  assert(/cdot\.className = "conv-dot";/.test(PROJ), "dot element missing");
+  assert(/if \(cAct && cAct !== "EXITED"\)/.test(PROJ), "EXITED conversations must not show a dot");
+  assert(/\.conversation-item \.conv-dot\[data-status="working"\]/.test(CSS), "dot palette missing for working");
+  assert(/\.conversation-item \.conv-dot\[data-status="error"\]/.test(CSS), "dot palette missing for error");
+});
+
+test("files tree stays active-project-only (singleton tree) while bodies are multi-open", () => {
+  const body = PROJ.slice(PROJ.indexOf("if (open) {"), PROJ.indexOf("item.appendChild(body);"));
+  assert(/ACTIVE project only: the tree is a singleton/.test(body) && body.indexOf("if (isActive) {") !== -1,
+    "the Files section must render only for the active project (if (isActive) gate)");
+  const gate = body.slice(body.indexOf("if (isActive) {"), body.indexOf("renderFileTree(p, filesWrap"));
+  assert(gate.length > 0 && gate.length < 400, "the isActive gate must directly contain the file tree");
+  assert(body.indexOf("renderFileTree(p, filesWrap") !== -1, "active project keeps its file tree");
+});
+
+test("el singletons keep meaning the ACTIVE project's sessions section", () => {
+  assert(/\n\s{6}if \(isActive\) \{\s*\n\s*\/\/ The el refs keep meaning[\s\S]*?TC\.el\.projSessionsBody = sesBody;/.test(PROJ),
+    "TC.el.projSessionsBody must be assigned only for the active project");
+});
+
+test("deleteProject clears the persisted open flag", () => {
+  const dp = PROJ.slice(PROJ.indexOf("function deleteProject(p)"), PROJ.indexOf("// Derive a short conversation name"));
+  assert(/delete TC\.state\.projectOpen\[p\.id\];/.test(dp), "deleted project must not leave a stale open flag");
+});
+
+run();

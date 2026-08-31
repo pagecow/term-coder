@@ -3,10 +3,41 @@
 (function () {
 "use strict";
 const TC = window.termCoder = window.termCoder || {};
-let collapsedProjects = new Set();
+
+// ── Multi-open project bodies ────────────────────────────────────────────────
+// Several projects can be expanded at once so the user can run agents in
+// parallel and hop between conversations to check on them. Open-state is
+// PERSISTED in state.projectOpen (pid -> bool):
+//   • ACTIVE project: body shows unless the user explicitly collapsed it
+//     (flag === false).
+//   • NON-active project: body shows only when the user explicitly opened it
+//     (flag === true) — so the visual default matches the old single-panel
+//     behavior, and opening extra projects is a deliberate, durable act.
+// (The old in-memory `collapsedProjects` Set is gone; state.projectOpen
+// replaces it and survives an app restart, which the Set never did.)
+function isProjectOpen(p) {
+  const flag = (TC.state.projectOpen || {})[p.id];
+  return (p.id === TC.state.activeProjectId) ? flag !== false : flag === true;
+}
+function setProjectOpen(p, open) {
+  if (!TC.state.projectOpen) TC.state.projectOpen = {};
+  TC.state.projectOpen[p.id] = !!open;
+  TC.saveState();
+  renderProjects();
+}
+// When the active project is about to STOP being active (the user is switching
+// to another project or conversation), remember it as open if its body is
+// currently visible — monitoring it should survive the switch.
+function keepProjectOpen(pid) {
+  if (!pid) return;
+  const p = TC.getProject(pid);
+  if (!p) return;
+  if (!TC.state.projectOpen) TC.state.projectOpen = {};
+  if (isProjectOpen(p)) TC.state.projectOpen[pid] = true;
+}
 // Codex-style sidebar: bold project rows with folder glyph + chevron, hover
-// actions on the right, and the selected project's content (Conversations +
-// Files tree) nested underneath with an indentation guide.
+// actions on the right, and the open projects' content (Conversations +
+// Sessions) nested underneath with an indentation guide.
 function renderProjects() {
   TC.el.projectList.innerHTML = "";
   if (!TC.state.projects.length) {
@@ -38,27 +69,26 @@ function renderProjects() {
   }
   for (const p of TC.state.projects) {
     const isActive = p.id === TC.state.activeProjectId;
-    const isCollapsed = collapsedProjects.has(p.id);
+    const open = isProjectOpen(p);
     const item = document.createElement("div");
-    item.className = "project-item" + (isActive ? " selected" : "") + (isCollapsed ? " is-collapsed" : "");
+    item.className = "project-item" + (isActive ? " selected" : "") + (open ? " is-open" : " is-collapsed");
 
     const row = document.createElement("div");
     row.className = "project-row";
 
-    // Chevron — ALWAYS a collapse toggle now. Clicking it expands/collapses this
-    // project's body without changing the active conversation.
+    // Chevron — ALWAYS a collapse toggle. Clicking it expands/collapses this
+    // project's body without changing the active conversation; expanding a
+    // non-active project does NOT switch the main view — both stay open so
+    // parallel agents remain visible side by side.
     const chev = document.createElement("span");
-    chev.className = "proj-chev" + (isCollapsed ? " is-collapsed" : "");
-    chev.title = isCollapsed ? "Expand project" : "Collapse project";
+    chev.className = "proj-chev" + (open ? "" : " is-collapsed");
+    chev.title = open ? "Collapse project" : "Expand project";
     chev.setAttribute("role", "button");
-    chev.setAttribute("aria-expanded", String(!isCollapsed));
+    chev.setAttribute("aria-expanded", String(open));
     chev.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 10 8l-4.5 4.5"/></svg>';
     chev.onclick = (e) => {
       e.stopPropagation();
-      if (collapsedProjects.has(p.id)) collapsedProjects.delete(p.id);
-      else collapsedProjects.add(p.id);
-      TC.saveState();
-      renderProjects();
+      setProjectOpen(p, !open);
     };
     row.appendChild(chev);
 
@@ -109,7 +139,9 @@ function renderProjects() {
     row.onclick = () => selectProject(p.id);
     item.appendChild(row);
 
-    if (isActive && !isCollapsed) {
+    // EVERY open project gets its body — not just the active one — so the user
+    // can monitor conversations and agent progress across projects at once.
+    if (open) {
       const body = document.createElement("div");
       body.className = "proj-body";
 
@@ -133,6 +165,17 @@ function renderProjects() {
       for (const c of shown) {
         const ci = document.createElement("div");
         ci.className = "conversation-item" + (c.id === TC.state.activeConversationId ? " selected" : "");
+        // Live progress dot — the "most urgent" activity across this
+        // conversation's sessions, so parallel agents are visible at a glance
+        // even from another project's body.
+        const cAct = conversationActivity(c);
+        if (cAct && cAct !== "EXITED") {
+          const cdot = document.createElement("span");
+          cdot.className = "conv-dot";
+          cdot.dataset.status = cAct === "ERROR LOOP" ? "error" : cAct === "NEEDS INPUT" ? "input" : cAct === "WORKING" ? "working" : cAct === "IDLE" ? "idle" : "starting";
+          cdot.title = cAct + " — session in this conversation";
+          ci.appendChild(cdot);
+        }
         const cn = document.createElement("span");
         cn.className = "conv-name";
         cn.textContent = c.name;
@@ -196,17 +239,25 @@ function renderProjects() {
       // Section collapse state — Files and Sessions start COLLAPSED and stay
       // that way until the user expands one (persisted per project).
       const sec = (TC.state.sectionCollapsed && TC.state.sectionCollapsed[p.id]) || {};
-      const filesCollapsed = sec.files !== false;
-      const sessionsCollapsed = sec.sessions !== false;
 
       // File tree (live, expandable, collapsible) — same group styling.
-      const filesWrap = document.createElement("div");
-      filesWrap.className = "file-tree" + (filesCollapsed ? " is-collapsed" : "");
-      renderFileTree(p, filesWrap, { collapsed: filesCollapsed });
-      body.appendChild(filesWrap);
+      // ACTIVE project only: the tree is a singleton (one cache, one watcher,
+      // one container). Non-active open projects intentionally render just
+      // Conversations + Sessions — that body is the monitoring view; picking
+      // the project (its row) brings up its Files tree in the main columns.
+      if (isActive) {
+        const filesCollapsed = sec.files !== false;
+        const filesWrap = document.createElement("div");
+        filesWrap.className = "file-tree" + (filesCollapsed ? " is-collapsed" : "");
+        renderFileTree(p, filesWrap, { collapsed: filesCollapsed });
+        body.appendChild(filesWrap);
+      }
 
-      // Sessions group — live agent status (click selects in the grid).
+      // Sessions group — live agent status for THIS project (all of its
+      // conversations), so each open project watches its own agents. Clicking a
+      // row switches to that conversation and selects the session in the grid.
       // Collapsible like Files; the count badge stays visible when collapsed.
+      const sessionsCollapsed = sec.sessions !== false;
       const sesWrap = document.createElement("div");
       sesWrap.className = "proj-group proj-sessions-group" + (sessionsCollapsed ? " is-collapsed" : "");
       const sesHead = document.createElement("div");
@@ -228,28 +279,35 @@ function renderProjects() {
       sesHead.onclick = () => toggleProjSection(p.id, "sessions");
       const sesBody = document.createElement("div");
       sesBody.className = "proj-sessions-list";
+      sesBody.dataset.projSessions = p.id;   // paintProjSessions paints EVERY open project's list
+      sesCount.dataset.projSessionsCount = p.id;
       sesWrap.appendChild(sesHead);
       sesWrap.appendChild(sesBody);
       body.appendChild(sesWrap);
-      TC.el.projSessionsBody = sesBody;
-      TC.el.projSessionsCount = sesCount;
-      paintProjSessions();
+      if (isActive) {
+        // The el refs keep meaning "the ACTIVE project's sessions section"
+        // (legacy consumers read them); every body carries data-* attributes.
+        TC.el.projSessionsBody = sesBody;
+        TC.el.projSessionsCount = sesCount;
+      }
 
       item.appendChild(body);
     }
 
     TC.el.projectList.appendChild(item);
   }
+  // One paint pass repaints every open project's Sessions list. Called AFTER
+  // the items are in the DOM — the old per-item call ran before appendChild,
+  // so its isConnected guard silently skipped it.
+  paintProjSessions();
 }
 
 // ---------- Sidebar Sessions section ----------
 // Live agent status mirror in the Projects column, refreshed every 2s by the
-// auto-follow ticker. Clicking a row selects that session in the terminal grid.
-//
-// Sessions are scoped to the conversation that was active when they were
-// spawned (rec.conversationId). Only the ACTIVE conversation's sessions are
-// shown here, so a new chat / a different conversation starts with an empty
-// Sessions section instead of inheriting the previous conversation's terminals.
+// auto-follow ticker. EVERY open project has its own list (scoped to that
+// project's conversations), so parallel agents in different projects are all
+// visible at once. Clicking a row switches to that conversation and selects
+// the session in the terminal grid.
 function sessionsForActiveConversation() {
   const cid = TC.state.activeConversationId;
   const live = [...TC.sessions.values()].filter((s) => (s.conversationId || null) === cid);
@@ -258,11 +316,21 @@ function sessionsForActiveConversation() {
 }
 
 function paintProjSessions() {
-  const body = TC.el.projSessionsBody;
-  if (!body || !body.isConnected) return;
-  const { live: liveAll, dead: deadAll } = sessionsForActiveConversation();
-  const total = liveAll.length + deadAll.length;
-  if (TC.el.projSessionsCount) TC.el.projSessionsCount.textContent = String(total);
+  const bodies = TC.el.projectList.querySelectorAll("[data-proj-sessions]");
+  for (const body of bodies) {
+    const pid = body.dataset.projSessions;
+    const countEl = TC.el.projectList.querySelector('[data-proj-sessions-count="' + (window.CSS && window.CSS.escape ? CSS.escape(pid) : pid) + '"]');
+    paintOneProjSessions(pid, body, countEl);
+  }
+}
+
+function paintOneProjSessions(pid, body, countEl) {
+  const p = TC.getProject(pid);
+  if (!body || !body.isConnected || !p) return;
+  const convIds = new Set(p.conversations.map((c) => c.id));
+  const liveAll = [...TC.sessions.values()].filter((s) => convIds.has(s.conversationId || null));
+  const deadAll = [...TC.deadSessions.values()].filter((s) => convIds.has(s.conversationId || null));
+  if (countEl) countEl.textContent = String(liveAll.length + deadAll.length);
 
   body.innerHTML = "";
   // Newest session first (by createdAt, which is immutable — unlike lastOutputAt,
@@ -273,7 +341,7 @@ function paintProjSessions() {
   if (!recs.length && !deads.length) {
     const note = document.createElement("div");
     note.className = "proj-sessions-empty";
-    note.textContent = "No sessions in this conversation";
+    note.textContent = "No sessions in this project";
     body.appendChild(note);
     return;
   }
@@ -295,7 +363,7 @@ function paintProjSessions() {
     row.appendChild(dot);
     row.appendChild(nm);
     row.title = act + (rec.worktreeBranch ? " · branch " + rec.worktreeBranch : "");
-    row.onclick = () => { TC.selectSession(rec.id); };
+    row.onclick = () => jumpToSession(p.id, rec);
     body.appendChild(row);
   }
   for (const snap of deads) {
@@ -310,9 +378,38 @@ function paintProjSessions() {
     row.appendChild(dot);
     row.appendChild(nm);
     row.title = (snap.merged ? "Merged · " : "Ended · ") + (snap.worktreeBranch ? "branch " + snap.worktreeBranch : "output preserved");
-    row.onclick = () => { TC.selectSession(snap.id); };
+    row.onclick = () => jumpToSession(p.id, snap);
     body.appendChild(row);
   }
+}
+
+// sidebar row (any open project) → open that session's conversation, THEN
+// select it in the terminal grid. selectConversation → renderSessionInfo →
+// refreshSessionVisibility makes the square visible before selectSession runs.
+function jumpToSession(pid, rec) {
+  const cid = rec && rec.conversationId;
+  if (cid && TC.getConversation(pid, cid)) selectConversation(pid, cid);
+  TC.selectSession(rec.id);
+}
+
+// The "most urgent" activity across a conversation's sessions — used for the
+// per-conversation progress dot in the sidebar. Rank order matters: an agent
+// stuck in an error loop outranks one asking for input, which outranks a
+// healthy working agent.
+function conversationActivity(c) {
+  if (!c) return null;
+  const recs = [
+    ...[...TC.sessions.values()].filter((s) => (s.conversationId || null) === c.id),
+    ...[...TC.deadSessions.values()].filter((s) => (s.conversationId || null) === c.id),
+  ];
+  const rank = { "ERROR LOOP": 6, "NEEDS INPUT": 5, "WORKING": 4, "STARTING": 3, "IDLE": 2, "EXITED": 1 };
+  let best = null, bestR = 0;
+  for (const s of recs) {
+    const a = TC.sessionActivity(s);
+    const r = rank[a] || 0;
+    if (r > bestR) { bestR = r; best = a; }
+  }
+  return best;
 }
 
 // ---------- File tree ----------
@@ -846,10 +943,14 @@ function confirmDelete(fn, btn) {
 }
 
 function selectProject(pid) {
+  // The outgoing active project is remembered as open, so hopping between
+  // conversations of parallel agents never collapses a project the user is
+  // monitoring.
+  keepProjectOpen(TC.state.activeProjectId);
   TC.state.activeProjectId = pid;
   // Selecting a project always reveals its body — a hidden one would make the
   // click look broken.
-  collapsedProjects.delete(pid);
+  if (TC.state.projectOpen) delete TC.state.projectOpen[pid];
   const p = TC.getProject(pid);
   const cur = TC.getConversation(pid, TC.state.activeConversationId);
   if (!cur) {
@@ -868,8 +969,11 @@ function selectProject(pid) {
   }).catch(() => {});
 }
 // Switching conversation must also refresh the footer line, which names the
-// active conversation — it used to keep showing the previous one.
+// active conversation — it used to keep showing the previous one. Also remembers
+// the outgoing project as open: the user is switching BETWEEN conversations of
+// parallel agents, and the project they leave stays visible for monitoring.
 function selectConversation(pid, cid) {
+  keepProjectOpen(TC.state.activeProjectId);
   TC.state.activeProjectId = pid;
   TC.state.activeConversationId = cid;
   TC.saveState();
@@ -900,6 +1004,7 @@ function deleteProject(p) {
   // Remove the project + its conversations from the SQLite history store so
   // they don't resurrect on the next hydrateFromSqlite().
   TC.sqliteDeleteProject(p.id);
+  if (TC.state.projectOpen) delete TC.state.projectOpen[p.id];
   if (TC.state.activeProjectId === p.id) {
     TC.state.activeProjectId = TC.state.projects.length ? TC.state.projects[0].id : null;
     const np = TC.getProject(TC.state.activeProjectId);
@@ -967,9 +1072,10 @@ function newConversation(p) {
   // until they actually post something in it.
   const draft = p.conversations.find((c) => !conversationHasPosts(c));
   if (draft) {
+    keepProjectOpen(TC.state.activeProjectId);
     TC.state.activeProjectId = p.id;
     TC.state.activeConversationId = draft.id;
-    collapsedProjects.delete(p.id);
+    if (TC.state.projectOpen) delete TC.state.projectOpen[p.id];
     TC.saveState();
     renderProjects();
     TC.renderChat();
@@ -980,9 +1086,10 @@ function newConversation(p) {
   // from the user's first message in sendMessage (see nameFromFirstMessage).
   const c = { id: TC.uuid(), name: "Conversation " + (p.conversations.length + 1), messages: [], modelId: null, effort: null, boardId: null, attachments: [] };
   p.conversations.push(c);
+  keepProjectOpen(TC.state.activeProjectId);
   TC.state.activeProjectId = p.id;
   TC.state.activeConversationId = c.id;
-  collapsedProjects.delete(p.id);
+  if (TC.state.projectOpen) delete TC.state.projectOpen[p.id];
   TC.saveState();
   renderProjects();
   TC.renderChat();
@@ -1034,7 +1141,11 @@ Object.defineProperty(TC, "MAX_CHILDREN", { get: () => MAX_CHILDREN, configurabl
 Object.defineProperty(TC, "fileTree", { get: () => fileTree, configurable: true });
 Object.defineProperty(TC, "editorState", { get: () => editorState, configurable: true });
 Object.defineProperty(TC, "isBinaryExt", { get: () => isBinaryExt, configurable: true });
-Object.defineProperty(TC, "collapsedProjects", { get: () => collapsedProjects, set: (v) => { collapsedProjects = v; }, configurable: true });
+TC.isProjectOpen = isProjectOpen;
+TC.setProjectOpen = setProjectOpen;
+TC.keepProjectOpen = keepProjectOpen;
+TC.jumpToSession = jumpToSession;
+TC.conversationActivity = conversationActivity;
 TC.renderProjects = renderProjects;
 TC.sessionsForActiveConversation = sessionsForActiveConversation;
 TC.paintProjSessions = paintProjSessions;
