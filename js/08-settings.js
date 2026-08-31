@@ -453,9 +453,13 @@ function persistTrustMode() {
   catch (e) { console.warn("persistTrustMode", e); }
 }
 // Reflect the persisted trustMode into the settings UI radio group.
+// NOTE: `trustMode` is scoped inside 00-state.js's IIFE — since the v1.23.1
+// classic-script conversion a bare `trustMode` reference from this module is a
+// ReferenceError (it used to be a file-scope global in the old monolithic
+// app.js). Always read it through the TC namespace accessor.
 function applyTrustModeToUi() {
   if (!TC.el.trustModeRadios) return;
-  const radio = TC.el.trustModeRadios.querySelector(`input[name="trust-mode"][value="${trustMode || "ask"}"]`);
+  const radio = TC.el.trustModeRadios.querySelector(`input[name="trust-mode"][value="${TC.trustMode || "ask"}"]`);
   if (radio) radio.checked = true;
 }
 // Read the settings-UI trust radio back into trustMode and persist it.
