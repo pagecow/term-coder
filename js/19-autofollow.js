@@ -65,10 +65,11 @@ function startAutoFollow() {
   statusRefreshTimer = setInterval(() => {
     // Repaint EVERY open project's Sessions list (multi-open sidebar), not
     // just the active project's — and refresh the conversation progress
-    // indicators in place (WORKING → IDLE → unread transitions) without a
-    // full sidebar rebuild.
+    // indicators + the per-project activity badges (row-level, so collapsed
+    // projects signal activity too) in place without a full sidebar rebuild.
     if (TC.el.projectList && TC.el.projectList.querySelector("[data-proj-sessions]")) TC.paintProjSessions();
     TC.paintConvIndicators();
+    TC.paintProjActivity();
   }, 2000);
 }
 

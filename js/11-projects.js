@@ -108,6 +108,16 @@ function renderProjects() {
     name.appendChild(nameText);
     row.appendChild(name);
 
+    // Activity badge — live "how many agents are busy in this project" count,
+    // shown on the ROW so a COLLAPSED project still signals activity (the user
+    // runs agents in several projects at once and collapses the ones they are
+    // not reading). Painted by paintProjActivity() every 2s via the status
+    // ticker; hidden entirely when nothing is active.
+    const actBadge = document.createElement("span");
+    actBadge.className = "proj-activity-badge hidden";
+    actBadge.dataset.projActivity = p.id;
+    row.appendChild(actBadge);
+
     // Hover actions — new chat (+) first, then pencil; delete shows after a beat.
     const acts = document.createElement("div");
     acts.className = "proj-actions";
@@ -300,6 +310,9 @@ function renderProjects() {
   // And one pass fills the conversation progress indicators (dots/jumping
   // dots) for every freshly rendered conversation row.
   paintConvIndicators();
+  // Plus the per-project activity badges on the rows (collapsed projects
+  // signal activity too — the badge lives on the row, not in the body).
+  paintProjActivity();
 }
 
 // ---------- Sidebar Sessions section ----------
@@ -476,6 +489,59 @@ function paintConvIndicators() {
       if (conv) break;
     }
     paintConvIndicator(mark, conversationProgress(conv));
+  }
+}
+
+// ---------- Per-project activity badge ----------
+// A live count of the BUSY agents in a project, painted on the project row
+// itself (data-proj-activity badge) so even a COLLAPSED project signals
+// activity. "Busy" = any live session in the project that is not settled:
+// WORKING, STARTING, NEEDS INPUT, or ERROR LOOP. The badge shows the total
+// busy count and is COLORED by the most urgent state present (error loop red >
+// needs-input amber > running accent-blue) with a tooltip breaking it down.
+// Repainted in place every 2s by the status ticker — no sidebar rebuild.
+function projectActivitySummary(p) {
+  const empty = { running: 0, starting: 0, input: 0, error: 0, active: 0 };
+  if (!p) return empty;
+  const convIds = new Set(p.conversations.map((c) => c.id));
+  let running = 0, starting = 0, input = 0, error = 0;
+  for (const s of TC.sessions.values()) {
+    if (!convIds.has(s.conversationId || null)) continue;
+    const act = TC.sessionActivity(s);
+    if (act === "WORKING") running++;
+    else if (act === "STARTING") starting++;
+    else if (act === "NEEDS INPUT") input++;
+    else if (act === "ERROR LOOP") error++;
+  }
+  return { running, starting, input, error, active: running + starting + input + error };
+}
+function paintProjActivity() {
+  if (!TC.el.projectList) return;
+  for (const badge of TC.el.projectList.querySelectorAll("[data-proj-activity]")) {
+    const p = TC.getProject(badge.dataset.projActivity);
+    const sum = projectActivitySummary(p);
+    if (!sum.active) {
+      badge.classList.add("hidden");
+      badge.removeAttribute("data-urgent");
+      badge.textContent = "";
+      badge.title = "";
+      continue;
+    }
+    badge.classList.remove("hidden");
+    badge.textContent = String(sum.active);
+    if (sum.error) {
+      badge.dataset.urgent = "error";
+      badge.title = sum.error + " agent(s) stuck in an error loop" +
+        (sum.input ? " · " + sum.input + " waiting for your answer" : "") +
+        (sum.running + sum.starting ? " · " + (sum.running + sum.starting) + " running" : "");
+    } else if (sum.input) {
+      badge.dataset.urgent = "input";
+      badge.title = sum.input + " agent(s) waiting for your answer" +
+        (sum.running + sum.starting ? " · " + (sum.running + sum.starting) + " running" : "");
+    } else {
+      badge.dataset.urgent = "running";
+      badge.title = (sum.running + sum.starting) + " agent(s) running in this project";
+    }
   }
 }
 
@@ -1225,6 +1291,8 @@ TC.jumpToSession = jumpToSession;
 TC.conversationActivity = conversationActivity;
 TC.conversationProgress = conversationProgress;
 TC.paintConvIndicators = paintConvIndicators;
+TC.projectActivitySummary = projectActivitySummary;
+TC.paintProjActivity = paintProjActivity;
 TC.markConversationRead = markConversationRead;
 TC.renderProjects = renderProjects;
 TC.sessionsForActiveConversation = sessionsForActiveConversation;

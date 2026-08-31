@@ -208,4 +208,84 @@ test("deleteProject clears the persisted open flag", () => {
   assert(/delete TC\.state\.projectOpen\[p\.id\];/.test(dp), "deleted project must not leave a stale open flag");
 });
 
+// ---------------------------------------------------------------------------
+// Per-project activity badge — a busy-agent count ON the project row so even a
+// COLLAPSED project signals activity.
+// ---------------------------------------------------------------------------
+function projectActivitySummary(TC, p) {
+  const empty = { running: 0, starting: 0, input: 0, error: 0, active: 0 };
+  if (!p) return empty;
+  const convIds = new Set(p.conversations.map((c) => c.id));
+  let running = 0, starting = 0, input = 0, error = 0;
+  for (const s of TC.sessions.values()) {
+    if (!convIds.has(s.conversationId || null)) continue;
+    const act = TC.sessionActivity(s);
+    if (act === "WORKING") running++;
+    else if (act === "STARTING") starting++;
+    else if (act === "NEEDS INPUT") input++;
+    else if (act === "ERROR LOOP") error++;
+  }
+  return { running, starting, input, error, active: running + starting + input + error };
+}
+
+test("activity badge: counts busy agents per project, scoped to its conversations", () => {
+  const TC = {
+    sessions: new Map([
+      ["s1", { id: "s1", conversationId: "p1c1", working: true }],
+      ["s2", { id: "s2", conversationId: "p1c2", waiting: true }],
+      ["s3", { id: "s3", conversationId: "p2c1", working: true }],
+      ["s4", { id: "s4", conversationId: "p2c1", idle: true }],       // settled → not busy
+      ["s5", { id: "s5", conversationId: null, working: true }],      // no conversation → nowhere
+    ]),
+    sessionActivity(s) {
+      if (s.working) return "WORKING";
+      if (s.waiting) return "NEEDS INPUT";
+      if (s.errloop) return "ERROR LOOP";
+      if (s.beginning) return "STARTING";
+      return "IDLE";
+    },
+  };
+  const p1 = { conversations: [{ id: "p1c1" }, { id: "p1c2" }] };
+  const sum1 = projectActivitySummary(TC, p1);
+  assert(sum1.running === 1 && sum1.input === 1 && sum1.active === 2,
+    "p1 badge must count its working + needs-input agents (2)");
+  const p2 = { conversations: [{ id: "p2c1" }] };
+  const sum2 = projectActivitySummary(TC, p2);
+  assert(sum2.active === 1, "p2 badge must count only its busy agent (1) — settled sessions don't count");
+  assert(projectActivitySummary(TC, null).active === 0, "no project → zero");
+  const emptyP = { conversations: [] };
+  assert(projectActivitySummary(TC, emptyP).active === 0, "project with no conversations → zero");
+});
+
+test("activity badge: renders on every project row (collapsed included) and repaints via the ticker", () => {
+  assert(/actBadge\.dataset\.projActivity = p\.id;/.test(PROJ),
+    "renderProjects must stamp data-proj-activity on every project row");
+  // The badge element is created OUTSIDE any `if (open)` gate — find its
+  // creation and confirm it sits before the body gate in the loop.
+  const rowBadgeIdx = PROJ.indexOf("actBadge.className = \"proj-activity-badge hidden\"");
+  const bodyGateIdx = PROJ.indexOf("if (open) {");
+  const rowLoopIdx = PROJ.indexOf("for (const p of TC.state.projects) {");
+  assert(rowLoopIdx !== -1 && rowBadgeIdx !== -1 && rowBadgeIdx > rowLoopIdx && rowBadgeIdx < bodyGateIdx,
+    "the badge must be created for every project, not only open ones");
+  assert(/badge\.dataset\.urgent = "error";/.test(PROJ) && /badge\.dataset\.urgent = "input";/.test(PROJ),
+    "paintProjActivity must color the badge by most-urgent state");
+  assert(/badge\.classList\.add\("hidden"\);[\s\S]*?badge\.textContent = "";/.test(PROJ),
+    "badge must hide entirely when nothing is busy");
+  assert(/TC\.paintProjActivity\(\);/.test(FOLLOW),
+    "the 2s status ticker must repaint the badges (collapsed projects stay live)");
+  assert(/TC\.paintProjActivity = paintProjActivity;/.test(PROJ), "paintProjActivity must be exported on TC");
+  assert(/TC\.projectActivitySummary = projectActivitySummary;/.test(PROJ), "projectActivitySummary must be exported on TC");
+  assert(/TC\.getProject\(badge\.dataset\.projActivity\)/.test(PROJ),
+    "paintProjActivity must resolve the project by the badge's data attr");
+  assert(/\.proj-activity-badge/.test(CSS), "badge CSS must exist");
+  assert(/\.proj-activity-badge\[data-urgent="input"\]/.test(CSS) && /\.proj-activity-badge\[data-urgent="error"\]/.test(CSS),
+    "badge CSS must have the amber (needs input) and red (error loop) urgency variants");
+});
+
+test("renderProjects paints the badges immediately (not just on the next tick)", () => {
+  const tail = PROJ.slice(PROJ.indexOf("// Plus the per-project activity badges"));
+  assert(/paintProjActivity\(\);/.test(tail),
+    "renderProjects must end with a paintProjActivity() pass after the DOM is built");
+});
+
 run();

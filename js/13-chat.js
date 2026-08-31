@@ -389,7 +389,13 @@ function renderChat() {
   if (TC.markConversationRead && c === TC.activeConversation()) {
     const before = c.readUpTo;
     TC.markConversationRead(c);
-    if (before !== c.readUpTo) TC.paintConvIndicators();
+    if (before !== c.readUpTo) {
+      // readUpTo moved — persist immediately. This path runs on conversation
+      // switches, not streaming, so an extra save here is cheap; without it
+      // a quit right after reading left the conversation green on next boot.
+      TC.saveState();
+      TC.paintConvIndicators();
+    }
   }
   TC.renderTokenEstimator();
 }
