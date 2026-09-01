@@ -186,4 +186,57 @@ test("wiring: bar renders on project select and initial load", () => {
   assert(/renderProjectBranchBar\(\);/.test(sel), "selectProject must refresh the bar");
 });
 
+// ---------------------------------------------------------------------------
+// 7. v1.28.4 regressions: slow branch bar + dead "Create new branch…" button
+// ---------------------------------------------------------------------------
+
+test("wiring: pbGit runs git directly first, login shell only as fallback", () => {
+  // Regression (v1.28.4): every probe paid ~1.2s of zsh login-shell startup,
+  // so two sequential probes made the chip/popup take 3-5s. The fast path must
+  // exec the bare command first and only fall back to loginShell on failure.
+  const pbGit = SRC.slice(SRC.indexOf("async function pbGit"), SRC.indexOf("// In-memory cache"));
+  assert(/terminal\.exec\(cmd, \{ cwd: p\.folderPath \}\)/.test(pbGit),
+    "must exec the bare command first (no zsh wrapper)");
+  assert(/terminal\.exec\(TC\.loginShell\(cmd\), \{ cwd: p\.folderPath \}\)/.test(pbGit),
+    "must fall back to the login shell when the fast path fails");
+  assert(/r === null \|\| r\.exitCode !== 0/.test(pbGit),
+    "must fall back on ANY failure (a CLT shim errors with exit 1, not 127)");
+});
+
+test("wiring: branch data is cached and the popup renders instantly", () => {
+  // The popup must render cached branches (or a loading hint) BEFORE awaiting
+  // the git fetch, instead of sitting empty for seconds.
+  assert(/const pbCache = new Map\(\)/.test(SRC), "branch cache map missing");
+  assert(/pbCache\.set\(pid, data\)/.test(SRC), "pbFetchBranches must populate the cache");
+  assert(/pbCache\.get\(p\.id\)/.test(SRC), "popup must read the cache before fetching");
+  assert(/Loading branches…/.test(SRC), "popup must show a loading hint when there is no cache");
+});
+
+test("wiring: last-known branch is persisted per project", () => {
+  // The chip must show the persisted branch for the newly selected project
+  // immediately instead of resetting to "—" and waiting for git.
+  assert(/projectBranches: \{\}/.test(SRC), "state must default projectBranches to {}");
+  assert(/TC\.state\.projectBranches\[pid\] = data\.current/.test(SRC),
+    "pbFetchBranches must persist the branch per project");
+  const sel = SRC.slice(SRC.indexOf("function selectProject"), SRC.indexOf("function selectConversation"));
+  assert(/projectBranches\[pid\]/.test(sel),
+    "selectProject must show the persisted branch for the selected project");
+});
+
+test("wiring: create-branch button stops propagation before replacing the popover", () => {
+  // Regression (v1.28.4): the create handler replaced the popover's contents,
+  // detaching the button mid-click; the document outside-click handler then saw
+  // a target outside the bar (contains() is false for detached nodes) and
+  // closed the popover instantly — the button looked dead.
+  const open = SRC.slice(SRC.indexOf("async function pbOpenBranchSelector"), SRC.indexOf("// Switch the active project"));
+  assert(/createBtn\.onclick = \(e\) => \{/.test(open),
+    "create handler must receive the click event");
+  assert(/e\.stopPropagation\(\);/.test(open),
+    "create handler must stopPropagation before replacing the popover contents");
+  assert(/replaced = true;/.test(open),
+    "create handler must flag create-row mode so a late fetch render can't clobber it");
+  assert(/if \(replaced \|\| pbOpen !== "branch"\) return;/.test(open),
+    "a fetch resolving after the popover closed or switched modes must not re-render");
+});
+
 run();

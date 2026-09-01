@@ -1104,9 +1104,13 @@ function selectProject(pid) {
   TC.renderSessionInfo();
   TC.renderProjectBranchBar();
   // Refresh the branch chip for the newly selected project (async, non-blocking).
-  TC.state.currentBranch = null;
-  TC.pbFetchBranches().then((data) => {
-    if (data && data.current) { TC.state.currentBranch = data.current; TC.renderProjectBranchBar(); }
+  // Show the last-known branch for THIS project immediately (persisted per
+  // project), then refresh from git in the background — the chip used to sit on
+  // "—" for ~3-5s while two zsh login-shell probes ran.
+  TC.state.currentBranch = (TC.state.projectBranches && TC.state.projectBranches[pid]) || null;
+  TC.renderProjectBranchBar();
+  TC.pbFetchBranches().then(() => {
+    TC.renderProjectBranchBar();
   }).catch(() => {});
 }
 // Switching conversation must also refresh the footer line, which names the

@@ -23,7 +23,7 @@ const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.28.3";
+const APP_VERSION = "1.28.4";
 // CLIs that "chatoss launch" can start (from the ChatOSS Settings → Launch
 // screen). This is the SINGLE source of truth for the chatoss-launch entries
 // offered in the spawn-modal dropdown (buildCliOptions) and in the Settings
@@ -83,6 +83,9 @@ let state = {
                        // non-active project shows only when explicitly opened
                        // (true). Persisted, so open projects survive a restart.
   currentBranch: null, // active project's current git branch (last known), refreshed on demand
+  projectBranches: {}, // project id -> last-known branch name. Persisted so the branch
+                       // chip shows instantly on restart/project switch instead of
+                       // waiting ~2.5s for a zsh login-shell git probe.
 };
 let settings = {
   cliDefault: "ask",       // 'ask' | 'opencode' | 'claude-code' | 'codex' — which

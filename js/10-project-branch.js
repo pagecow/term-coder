@@ -89,7 +89,16 @@ async function pbGit(cmd) {
   const p = TC.getProject(TC.state.activeProjectId);
   if (!p || !p.folderPath) return null;
   try {
-    const r = await window.chatoss.terminal.exec(TC.loginShell(cmd), { cwd: p.folderPath });
+    // Fast path: run git directly. The sandboxed shell's PATH is minimal, but
+    // git usually resolves there (Apple's /usr/bin/git on macOS) and this skips
+    // the ~1.2s zsh login-shell startup PER COMMAND — two sequential probes
+    // made the branch chip take ~3-5s to appear. Fall back to the login shell
+    // on ANY failure: a machine where git only exists on the full user PATH,
+    // or a shim that errors without Xcode CLT (exit 1, not 127).
+    let r = await window.chatoss.terminal.exec(cmd, { cwd: p.folderPath });
+    if (r === null || r.exitCode !== 0) {
+      r = await window.chatoss.terminal.exec(TC.loginShell(cmd), { cwd: p.folderPath });
+    }
     if (r === null) return null;
     if (r.exitCode !== 0) return null;
     return (r.output || "").trim();
@@ -98,11 +107,19 @@ async function pbGit(cmd) {
   }
 }
 
+// In-memory cache of the last successful branch fetch, keyed by project id, so
+// the selector popup renders instantly and refreshes in the background.
+const pbCache = new Map(); // project id -> { current, branches }
+
 // Fetch the current branch + full branch list for the active project.
 // Returns { current, branches } or null when the project isn't a git repo.
+// On success the result is cached (pbCache) and the last-known branch is
+// persisted per project (state.projectBranches) so the chip and popup render
+// instantly next time.
 async function pbFetchBranches() {
   const p = TC.getProject(TC.state.activeProjectId);
   if (!p || !p.folderPath) return null;
+  const pid = p.id;
   const current = await pbGit("git branch --show-current");
   // The --format value is single-quoted INSIDE the command string. loginShell
   // wraps commands in `zsh -lic "…"`, and those outer double quotes are stripped
@@ -112,7 +129,17 @@ async function pbFetchBranches() {
   const raw = await pbGit("git for-each-ref --format='%(refname:short)' refs/heads");
   if (raw === null) return null;
   const branches = raw.split("\n").map((s) => s.trim()).filter(Boolean);
-  return { current: current || null, branches };
+  const data = { current: current || null, branches };
+  pbCache.set(pid, data);
+  if (data.current) {
+    // Per-project record is always safe to write; the global chip value only
+    // when this project is still the active one (the fetch is async and the
+    // user may have switched projects while it ran).
+    TC.state.projectBranches[pid] = data.current;
+    if (TC.state.activeProjectId === pid) TC.state.currentBranch = data.current;
+    TC.saveState();
+  }
+  return data;
 }
 
 // Render the two chips from current state (project name + last-known branch).
@@ -214,6 +241,7 @@ async function pbOpenBranchSelector() {
   let allBranches = [];
   let current = null;
   let mainBranch = null;
+  let replaced = false; // true once the create button swaps the popover into create-row mode
 
   const renderList = () => {
     const q = search.value;
@@ -258,8 +286,15 @@ async function pbOpenBranchSelector() {
 
   search.addEventListener("input", renderList);
 
-  createBtn.onclick = () => {
+  createBtn.onclick = (e) => {
+    // stopPropagation is REQUIRED: this handler replaces the popover's contents,
+    // which detaches the button mid-click. The document-level outside-click
+    // handler would then see a target that is no longer inside the bar
+    // (contains() is false for detached nodes) and close the popover instantly,
+    // making "Create new branch…" look like a dead button.
+    e.stopPropagation();
     // Replace the list with an inline "new branch" input row.
+    replaced = true;
     pop.innerHTML = "";
     const row = document.createElement("div");
     row.className = "pb-create-row";
@@ -295,20 +330,42 @@ async function pbOpenBranchSelector() {
     });
   };
 
+  // Render instantly from the cache (or a loading hint), then refresh from git
+  // in the background — the popup used to sit empty for ~3-5s while two
+  // sequential zsh login-shell probes ran.
+  const cached = pbCache.get(p.id);
+  if (cached) {
+    allBranches = cached.branches;
+    current = cached.current;
+    mainBranch = detectMainBranch(allBranches);
+    renderList();
+  } else {
+    const loading = document.createElement("div");
+    loading.className = "pb-empty";
+    loading.textContent = "Loading branches…";
+    list.appendChild(loading);
+  }
+
   // Load branches from git.
   const data = await pbFetchBranches();
+  // The user may have closed the popover or switched it into create-row mode
+  // while the fetch ran — don't clobber either state with a late render.
+  if (replaced || pbOpen !== "branch") return;
   if (data === null) {
-    list.innerHTML = "";
-    const empty = document.createElement("div");
-    empty.className = "pb-empty";
-    empty.textContent = "Not a git repository (or git unavailable).";
-    list.appendChild(empty);
+    // Keep showing the cached list when the refresh fails (stale beats blank);
+    // only report "not a git repository" when we have nothing at all.
+    if (!cached) {
+      list.innerHTML = "";
+      const empty = document.createElement("div");
+      empty.className = "pb-empty";
+      empty.textContent = "Not a git repository (or git unavailable).";
+      list.appendChild(empty);
+    }
     return;
   }
   allBranches = data.branches;
   current = data.current;
   mainBranch = detectMainBranch(allBranches);
-  if (current) TC.state.currentBranch = current;
   renderProjectBranchBar();
   renderList();
   search.focus();
