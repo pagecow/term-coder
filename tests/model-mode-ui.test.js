@@ -1,22 +1,19 @@
-// Regression test — Model Selection Mode: model-worded UI + model-first select.
+// Regression test — Model Selection Mode: model-worded UI + a flat ChatOSS
+// model list (v1.28).
 //
-// User report (v1.26.0): selecting "Always use a specific target" showed a
-// TARGET dropdown reading "claude (direct)" — the section is supposed to be
-// about picking an AI MODEL and its Effort level.
-//
-// Root causes fixed in v1.26.1:
-//   1. populateModelSelect ordered direct CLIs FIRST and defaulted a blank
-//      saved value to ids[0] (= "claude", the direct CLI), so every freshly
-//      configured panel (Always / complexity) opened on a CLI, not a model.
-//   2. The whole Settings section used "target" wording even though it is the
-//      AI-model picker (label "Target", radio "Always use a specific target",
-//      subs "Pick the target…", intro "pick their launch target").
+// History: v1.26.1 fixed the section to be model-worded and model-first when
+// targets were "direct CLIs + ollama models". v1.28 makes every launch target
+// a CHATOSS MODEL (`chatoss launch <tool> --model <id>` serves the ChatOSS
+// model list), so the select is a FLAT list of available ChatOSS models — no
+// groups, no direct-CLI section — and the defaults land on the ChatOSS default
+// model (or the first available model).
 //
 // Contract pinned here:
-//   - the dropdown's first group is "Ollama models" and defaults to the first
-//     ollama model when nothing valid is saved (direct CLIs remain available
-//     as a clearly-labeled secondary group — each runs its own model);
-//   - a saved id still wins over the default;
+//   - the dropdown lists every AVAILABLE ChatOSS model (local / cloud /
+//     custom all qualify; unavailable rows are skipped) with no grouping;
+//   - a saved model id still wins over the default;
+//   - a blank/unknown saved value lands on the ChatOSS default model, then
+//     the first available model — never blank;
 //   - the Settings MODEL SELECTION MODE section copy says "model", not "target".
 
 const fs = require("fs");
@@ -26,83 +23,97 @@ const { moduleSrc, makeTC } = require("./module-src.js");
 
 // Execute the REAL populateModelSelect from js/08-settings.js against a fake
 // <select>. TC stub mirrors the namespace pieces the function touches:
-// TC.detection.{claude,claudePath,codex,codexPath,opencode,opencodePath} and
-// TC.models.
-function runPopulate(detection, ollamaModels, selected) {
+// TC.models (the ChatOSS chat model list) and TC.defaultModelId.
+function runPopulate(models, selected, defaultModelId) {
   const src = moduleSrc("08-settings.js");
   const m = src.match(/function populateModelSelect\(selectEl, selected\) \{([\s\S]*?)\n\}/);
   if (!m) throw new Error("populateModelSelect not found in 08-settings.js");
   const body = m[1];
-  const node = (tag) => ({ tagName: String(tag).toUpperCase(), children: [], _text: "", label: undefined,
+  const node = (tag) => ({ tagName: String(tag).toUpperCase(), children: [], textContent: "", label: undefined,
     appendChild(c) { this.children.push(c); return c; } });
   const select = { innerHTML: "", value: undefined, children: [],
     appendChild(c) { this.children.push(c); return c; } };
   const document = { createElement: (tag) => node(tag) };
   const TC = Object.assign(makeTC(), {
-    detection,
-    models: ollamaModels.map((id) => ({ id, thinkLevels: ["low", "medium", "high", "max"] })),
+    models,
+    defaultModelId: defaultModelId === undefined ? null : defaultModelId,
   });
-  // Faithful replica of availableLaunchTargets() in the same file — the real
-  // detection order/direct-first assembly, scoped to the stubbed environment.
-  const availableLaunchTargets = () => {
-    const out = [];
-    if (detection.claude && detection.claudePath) out.push({ kind: "direct", id: "claude", bin: detection.claudePath });
-    if (detection.codex && detection.codexPath) out.push({ kind: "direct", id: "codex", bin: detection.codexPath });
-    if (detection.opencode && detection.opencodePath) out.push({ kind: "direct", id: "opencode", bin: detection.opencodePath });
-    for (const model of ollamaModels) out.push({ kind: "ollama", id: model, model });
-    return out;
+  // The REAL availableSessionModels + sessionModelLabel from the same module,
+  // extracted and executed so the list logic is not hand-copied.
+  const extract = (name) => {
+    const re = new RegExp("function " + name + "\\(([^)]*)\\)\\s*\\{");
+    const mm = re.exec(src);
+    if (!mm) throw new Error(name + " not found in 08-settings.js");
+    let i = mm.index + mm[0].length, depth = 1;
+    while (i < src.length && depth > 0) {
+      const ch = src[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    // eslint-disable-next-line no-new-func
+    return new Function("TC", "return (function " + name + "(" + mm[1] + ") {" + src.slice(mm.index + mm[0].length, i - 1) + "});")(TC);
   };
-  const fn = new Function("selectEl", "selected", "TC", "document", "availableLaunchTargets", body);
-  fn(select, selected === undefined ? "" : selected, TC, document, availableLaunchTargets);
+  const availableSessionModels = extract("availableSessionModels");
+  const sessionModelLabel = extract("sessionModelLabel");
+  const fn = new Function("selectEl", "selected", "TC", "document", "availableSessionModels", "sessionModelLabel", body);
+  fn(select, selected === undefined ? "" : selected, TC, document, availableSessionModels, sessionModelLabel);
   return { select };
 }
 
-// Fake <option>/<optgroup> value lookup: direct children (optgroup) carry
-// .children; options carry .value.
+// Fake <option> value lookup.
 function flatOptions(select) {
-  const out = [];
-  for (const node of select.children) {
-    if (node.children && node.children.length) {
-      out.push({ group: node.label, values: node.children.map((o) => o.value) });
-    } else {
-      out.push({ group: null, values: [node.value] });
-    }
-  }
-  return out;
+  return select.children.map((o) => o.value);
 }
 
-test("model select: ollama models are the FIRST group; default lands on the first model", () => {
-  const det = { claude: true, claudePath: "/usr/bin/claude", codex: false, opencode: false };
-  const { select } = runPopulate(det, ["deepseek-v4-flash:cloud", "glm-5.2:cloud", "deepseek-v4-pro:cloud"], "");
-  const groups = flatOptions(select);
-  const directGroups = groups.filter((g) => /Direct CLI/i.test(g.group || "")).length;
-  assert.strictEqual(directGroups, 1, "direct CLIs remain available as one labeled group");
-  const modelGroup = groups.find((g) => g.group === "Ollama models");
-  assert(modelGroup, "model group present");
-  assert.strictEqual(groups.indexOf(modelGroup), 0, "OLLAMA MODELS MUST BE THE FIRST GROUP (was: direct CLIs first)");
-  if (select.value === "claude") throw new Error("blank saved value must NOT default to a direct CLI; got: " + select.value);
-  assert.strictEqual(select.value, modelGroup.values[0],
-    "blank saved value must default to the FIRST OLLAMA MODEL, got: " + select.value);
-  // Direct option text: id + clear "(direct CLI)" marker.
-  const directGroup = groups.find((g) => /Direct CLI/i.test(g.group || ""));
-  assert.deepStrictEqual(directGroup.values, ["claude"]);
+const MODELS = [
+  { id: "deepseek-v4-flash:cloud", name: "DeepSeek V4 Flash", source: "cloud", available: true },
+  { id: "glm-5.2:cloud", name: "GLM 5.2", source: "cloud", available: true },
+  { id: "qwen3-coder", name: "Qwen3 Coder", source: "local", available: true },
+  { id: "custom-gpt", name: "My Custom GPT", source: "custom", available: true },
+  { id: "broken-model", name: "Broken", source: "local", available: false },
+];
+
+test("model select: flat list of available ChatOSS models, no groups, no CLIs", () => {
+  const { select } = runPopulate(MODELS, "", "qwen3-coder");
+  const values = flatOptions(select);
+  assert.deepStrictEqual(values,
+    ["deepseek-v4-flash:cloud", "glm-5.2:cloud", "qwen3-coder", "custom-gpt"],
+    "every AVAILABLE model is listed (local/cloud/custom all qualify): " + JSON.stringify(values));
+  for (const opt of select.children) {
+    assert(!/direct/i.test(opt.textContent || ""), "no direct-CLI options remain");
+  }
+  assert(!select.children.some((c) => c.children && c.children.length), "no optgroups — the list is flat");
 });
 
-test("model select: a saved target id still wins over the model-first default", () => {
-  const det = { claude: true, claudePath: "/usr/bin/claude", codex: false, opencode: false };
-  const { select } = runPopulate(det, ["deepseek-v4-flash:cloud", "glm-5.2:cloud"], "claude");
-  assert.strictEqual(select.value, "claude", "saved id must be restored even when it is a direct CLI");
-  const { select: sel2 } = runPopulate(det, ["deepseek-v4-flash:cloud", "glm-5.2:cloud"], "glm-5.2:cloud");
-  assert.strictEqual(sel2.value, "glm-5.2:cloud", "saved ollama model wins");
+test("model select: the ChatOSS default model wins when nothing valid is saved", () => {
+  const { select } = runPopulate(MODELS, "", "qwen3-coder");
+  assert.strictEqual(select.value, "qwen3-coder",
+    "a blank saved value lands on the ChatOSS default model, got: " + select.value);
+  const { select: noDefault } = runPopulate(MODELS, "", null);
+  assert.strictEqual(noDefault.value, "deepseek-v4-flash:cloud",
+    "with no default known, the FIRST available model wins, got: " + noDefault.value);
 });
 
-test("model select: with only direct CLIs detected it still picks a usable target", () => {
-  const det = { claude: true, claudePath: "/usr/bin/claude", codex: false, opencode: false };
-  const { select } = runPopulate(det, [], "");
-  const groups = flatOptions(select);
-  const directGroup = groups.find((g) => /Direct CLI/i.test(g.group || ""));
-  assert.strictEqual(groups.indexOf(directGroup), 0, "only group when no ollama models");
-  assert.strictEqual(select.value, "claude", "falls back to the first direct CLI when ollama has nothing");
+test("model select: a saved model id still wins over the default", () => {
+  const { select } = runPopulate(MODELS, "glm-5.2:cloud", "qwen3-coder");
+  assert.strictEqual(select.value, "glm-5.2:cloud", "saved model wins over the default");
+  const { select: gone } = runPopulate(MODELS, "deleted-model", "qwen3-coder");
+  assert.strictEqual(gone.value, "qwen3-coder",
+    "a saved id that no longer exists falls back to the default, not to a stale option");
+});
+
+test("model select: unavailable models are never offered", () => {
+  const { select } = runPopulate([{ id: "broken", available: false }, { id: "ok", available: true }], "broken", null);
+  assert.strictEqual(select.value, "ok", "an unavailable saved id falls back to an available model");
+  assert(!flatOptions(select).includes("broken"), "unavailable rows are skipped");
+});
+
+test("model select: empty list renders an explanatory placeholder, never blank", () => {
+  const { select } = runPopulate([], "", null);
+  assert.strictEqual(flatOptions(select)[0], "", "the placeholder option has an empty value");
+  assert(select.children[0].textContent, "placeholder must explain itself: " + JSON.stringify(select.children[0].textContent));
+  assert(/Re-scan|ChatOSS/i.test(select.children[0].textContent), "placeholder mentions Re-scan/ChatOSS");
 });
 
 test("settings copy: the MODEL SELECTION MODE section is model-worded, not target-worded", () => {
@@ -118,13 +129,11 @@ test("settings copy: the MODEL SELECTION MODE section is model-worded, not targe
   assert(!/Assign a target to each level/.test(section), "complexity sub must say 'model'");
   assert(!/>\s*Target\s*</.test(section), "the Always panel must not be labeled 'Target'");
   assert(/<span class="form-label">Model<\/span>/.test(section), "the Always panel is labeled 'Model'");
-  // v1.26.2: the descriptive intro paragraph was removed per user request —
-  // the radio rows are self-explanatory.
-  const title = html.slice(html.lastIndexOf("<h3", start), start + '.length');
-  assert(!/<p class="tc-hint">Choose how sub-agent sessions/.test(section), "intro paragraph must be gone (self-explanatory section)");
   // The section falls straight from the heading into the radio group.
   const between = html.slice(start, html.indexOf('model-mode-radios', start));
   assert(!/<p /.test(between), "no paragraph between the section title and the radios");
+  // The manual-mode panel mentions chatoss launch (the model is passed that way).
+  assert(/chatoss launch/.test(section), "the manual-mode hint explains the model is applied via chatoss launch");
 });
 
 run();

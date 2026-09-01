@@ -37,14 +37,17 @@ function realEffortOptionsForTarget() {
   return fn;
 }
 
-test("settings effortOptionsForTarget (real fn): direct-CLI options are bare names", () => {
+test("settings effortOptionsForTarget (real fn): an unknown model gets the bare generic set", () => {
   const TC = {
     models: [{ id: "glm-5.3:cloud", thinkLevels: ["low", "medium", "high", "max"] }],
     detection: {},
   };
-  const opts = realEffortOptionsForTarget()("claude", TC);
-  assert.deepStrictEqual(opts.map((o) => o.label), ["Model default", "Low", "Medium", "High"],
-    "direct-CLI effort options must be bare names: " + JSON.stringify(opts));
+  // v1.28: targets are ChatOSS model ids — an id with no model entry (list not
+  // loaded yet) falls back to the generic bare-name set.
+  const opts = realEffortOptionsForTarget()("some-model-id-not-in-list", TC);
+  assert.deepStrictEqual(opts.map((o) => o.label),
+    ["Model default", "Low", "Medium", "High", "Extra high", "Max"],
+    "generic effort options must be bare names: " + JSON.stringify(opts));
 });
 
 test("settings effortOptionsForTarget (real fn): ollama thinkLevels are bare too", () => {

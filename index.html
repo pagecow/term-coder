@@ -291,7 +291,7 @@
         <button id="spawn-cancel-x" class="icon-button" type="button" title="Cancel" aria-label="Cancel">&times;</button>
       </header>
       <div class="tc-card-body">
-        <p class="tc-hint">Launch a coding agent in its own terminal. After you click Start, pick a launch target — claude / codex directly, or an ollama model.</p>
+        <p class="tc-hint">Launch a coding agent in its own terminal via <code>chatoss launch</code> — pick the agent below; the model comes from Model Selection Mode. Requires the chatoss command: ChatOSS Settings → Launch → <strong>Install chatoss command</strong>.</p>
         <label class="form-row">
           <span class="form-label">Agent</span>
           <select id="spawn-cli" class="form-input"></select>
@@ -351,12 +351,9 @@
           <span class="form-label">Default agent</span>
           <select id="set-cli" class="form-input">
             <option value="ask">Ask me every time</option>
-            <option value="opencode">ollama launch opencode (OpenCode)</option>
-            <option value="claude">ollama launch claude (Claude Code)</option>
-            <option value="codex">ollama launch codex (Codex)</option>
-            <option value="raw:opencode">opencode (direct binary)</option>
-            <option value="raw:claude">claude (direct binary)</option>
-            <option value="raw:codex">codex (direct binary)</option>
+            <option value="opencode">chatoss launch opencode (OpenCode)</option>
+            <option value="claude-code">chatoss launch claude-code (Claude Code)</option>
+            <option value="codex">chatoss launch codex (Codex)</option>
           </select>
         </label>
         <label class="form-row hidden" id="set-model-row">
@@ -375,7 +372,7 @@
         </div>
 
         <div class="model-mode-panel" id="model-mode-manual">
-          <p class="tc-hint">You'll be asked to pick the model for each session as it starts — an ollama model, or a direct CLI that runs its own built-in model. Effort levels saved in the other modes still apply per model when it launches.</p>
+          <p class="tc-hint">You'll be asked to pick the ChatOSS model for each session as it starts — it's passed to the agent via <code>chatoss launch --model</code>. Effort levels saved in the other modes still apply per model when it launches.</p>
         </div>
 
         <div class="model-mode-panel hidden" id="model-mode-always">
@@ -445,7 +442,7 @@
           <div class="detected-scanning">Scanning…</div>
         </div>
         <button id="rescan-btn" class="btn btn-ghost btn-small" type="button">Re-scan</button>
-        <p class="tc-hint">Detection runs <code>which</code> / <code>ollama list</code> via the terminal API.</p>
+        <p class="tc-hint">Detection runs <code>which</code> via the terminal API to find the chatoss command and the coding CLIs.</p>
 
         <h3 class="settings-section-title">Updates</h3>
         <p class="tc-hint">Term Coder can't replace its own files — when an update is available, open the releases page to install it.</p>

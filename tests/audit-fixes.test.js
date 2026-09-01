@@ -22,29 +22,29 @@ const { allModulesSrc } = require("./module-src.js");
 const SRC = allModulesSrc();
 
 // ---------------------------------------------------------------------------
-// D2 — OLLAMA_LAUNCH_TOOLS is the single source of truth for buildCliOptions.
-// Parse the constant out of the REAL source and verify it has exactly the 6
-// offered tools (no openclaw/droid) and that every id is unique. This catches
-// drift between the constant and the dropdown.
+// D2 — CHATOSS_LAUNCH_TOOLS is the single source of truth for buildCliOptions.
+// Parse the constant out of the REAL source and verify it has exactly the 3
+// chatoss launch tools (no openclaw/droid/chatgpt) and that every id is
+// unique. This catches drift between the constant and the dropdown.
 // ---------------------------------------------------------------------------
-function parseOllamaLaunchTools(src) {
+function parseChatossLaunchTools(src) {
   // The constant is declared as `const OLLAMA_LAUNCH_TOOLS = [ {...}, ... ];`.
   // Pull the array literal and evaluate it in a safe sandbox (it contains only
   // plain object literals with string fields).
-  const m = src.match(/const OLLAMA_LAUNCH_TOOLS = (\[[\s\S]*?\]);/);
-  assert(m, "OLLAMA_LAUNCH_TOOLS declaration not found in app.js");
+  const m = src.match(/const CHATOSS_LAUNCH_TOOLS = (\[[\s\S]*?\]);/);
+  assert(m, "CHATOSS_LAUNCH_TOOLS declaration not found");
   // eslint-disable-next-line no-new-func
   return Function('"use strict"; return (' + m[1] + ');')();
 }
 
-test("D2: OLLAMA_LAUNCH_TOOLS lists exactly the 3 offered tools, ollama launch first (no chatgpt/hermes/copilot)", () => {
-  const tools = parseOllamaLaunchTools(SRC);
+test("D2: CHATOSS_LAUNCH_TOOLS lists exactly the 3 chatoss launch tools (no chatgpt/hermes/copilot)", () => {
+  const tools = parseChatossLaunchTools(SRC);
   const ids = tools.map((t) => t.id);
-  // The default-agents spec: ONLY opencode, claude, codex — ollama launch
-  // options first, in that order (the direct-binary options follow in
-  // buildCliOptions).
-  assert.deepStrictEqual(ids, ["opencode", "claude", "codex"],
-    "OLLAMA_LAUNCH_TOOLS ids drifted from the 3 offered tools: " + JSON.stringify(ids));
+  // The v1.28 spec: ONLY opencode, claude-code, codex — the chatoss launch
+  // tools, in that order; each `tool` is the argument chatoss launch takes.
+  assert.deepStrictEqual(ids, ["opencode", "claude-code", "codex"],
+    "CHATOSS_LAUNCH_TOOLS ids drifted from the 3 chatoss tools: " + JSON.stringify(ids));
+  assert.deepStrictEqual(tools.map((t) => t.tool), ids, "id and chatoss tool argument must agree");
   // chatgpt/hermes/copilot were trimmed per the default-agents spec.
   assert(!ids.includes("chatgpt"), "chatgpt should have been trimmed (default-agents spec)");
   assert(!ids.includes("hermes"), "hermes should have been trimmed (default-agents spec)");
@@ -54,15 +54,15 @@ test("D2: OLLAMA_LAUNCH_TOOLS lists exactly the 3 offered tools, ollama launch f
     assert(typeof t.id === "string" && t.id.length > 0, "tool missing id: " + JSON.stringify(t));
     assert(typeof t.label === "string" && t.label.length > 0, "tool missing label: " + JSON.stringify(t));
   }
-  assert.strictEqual(new Set(ids).size, ids.length, "duplicate tool ids in OLLAMA_LAUNCH_TOOLS");
+  assert.strictEqual(new Set(ids).size, ids.length, "duplicate tool ids in CHATOSS_LAUNCH_TOOLS");
 });
 
-test("D2: buildCliOptions derives its ollama-launch entries from the constant", () => {
-  // The fix wired buildCliOptions to loop over OLLAMA_LAUNCH_TOOLS. Verify the
+test("D2: buildCliOptions derives its chatoss-launch entries from the constant", () => {
+  // The fix wired buildCliOptions to loop over CHATOSS_LAUNCH_TOOLS. Verify the
   // source contains that loop (not the old per-tool push() calls), so the
   // constant is genuinely the source of truth and the two can't drift.
-  assert(/for \(const tool of TC\.OLLAMA_LAUNCH_TOOLS\)/.test(SRC),
-    "buildCliOptions should loop over OLLAMA_LAUNCH_TOOLS (D2 source-of-truth wiring)");
+  assert(/for \(const tool of TC\.CHATOSS_LAUNCH_TOOLS\)/.test(SRC),
+    "buildCliOptions should loop over CHATOSS_LAUNCH_TOOLS (D2 source-of-truth wiring)");
   // The old hardcoded pushes for openclaw/droid must be gone.
   assert(!/push\("openclaw"/.test(SRC), "stale openclaw push() still present (D2)");
   assert(!/push\("droid"/.test(SRC), "stale droid push() still present (D2)");
@@ -335,15 +335,15 @@ test("B3: a genuine user cancel of the pill picker returns null (NOT NO_MODELS)"
   assert.strictEqual(alwaysNoAlwaysWithTargets, null, "user cancel in always-fallback picker must return null (B3)");
 });
 
-test("B3: resolveSessionModel source throws NO_MODELS in all three no-target paths", () => {
-  // Verify the actual app.js source throws the recognizable error (with the
-  // code) in the Manual, Always, and Complexity no-target branches, and that
+test("B3: resolveSessionModel source throws NO_MODELS in all three no-model paths", () => {
+  // Verify the actual source throws the recognizable error (with the
+  // code) in the Manual, Always, and Complexity no-model branches, and that
   // onSpawnStart distinguishes e.code === "NO_MODELS" from a plain null.
   const noModelsThrows = (SRC.match(/e\.code = "NO_MODELS"/g) || []).length;
   assert(noModelsThrows >= 3, "expected >=3 NO_MODELS throws (Manual/Always/Complexity), found " + noModelsThrows + " (B3)");
   assert(/if \(e && e\.code === "NO_MODELS"\)/.test(SRC),
     "onSpawnStart must branch on e.code === 'NO_MODELS' to keep the modal open (B3)");
-  assert(/No models detected — run Re-scan in Settings, or switch Model Selection Mode\./.test(SRC),
+  assert(/No ChatOSS models available — run Re-scan in Settings, or open ChatOSS and pick a model\./.test(SRC),
     "onSpawnStart must show the actionable status message for the no-models case (B3)");
 });
 

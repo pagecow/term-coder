@@ -16,26 +16,29 @@ function buildCliOptions() {
   const push = (value, label, detected) => {
     opts.push({ value, label: detected ? label : label + " (not detected)" });
   };
-  // D2: the ollama-launch entries come from OLLAMA_LAUNCH_TOOLS (the single
-  // source of truth) so the constant and the dropdown can never drift apart.
-  // `detected` here reflects whether ollama itself is available (these all
-  // launch THROUGH ollama), matching the previous per-line behavior.
-  for (const tool of TC.OLLAMA_LAUNCH_TOOLS) {
-    push(tool.id, tool.label, TC.detection.ollama);
+  // v1.28: chatoss launch is the ONLY launch path. The dropdown lists exactly
+  // the tools CHATOSS_LAUNCH_TOOLS names — the single source of truth — so the
+  // constant and the dropdown can never drift apart (D2). `detected` reflects
+  // whether the `chatoss` command itself is installed (all three tools launch
+  // through it, so they share one install state).
+  for (const tool of TC.CHATOSS_LAUNCH_TOOLS) {
+    push(tool.id, tool.label, TC.detection.chatoss);
   }
-  // Direct binaries (launch the real CLI without ollama), only if installed.
-  // These are a manual fallback; the model picker also offers claude/codex
-  // directly as launch targets. Order matches the default-agents spec:
-  // opencode, claude, codex.
-  if (TC.detection.opencode) push("raw:opencode", "opencode  (direct binary)", true);
-  if (TC.detection.claude) push("raw:claude", "claude  (direct binary)", true);
-  if (TC.detection.codex) push("raw:codex", "codex  (direct binary)", true);
   return opts;
 }
 
+// The message shown whenever the `chatoss` command is missing — it is REQUIRED
+// for Term Coder to launch agents. Kept here (next to the spawn flow) and
+// reused by the spawn modal, the Settings detected list, and the orchestrator
+// tool results.
+function chatossMissingMessage() {
+  return "The chatoss command isn't installed. Open ChatOSS Settings, click Launch, then click \"Install chatoss command\" — that must have been clicked for Term Coder to launch agents. Then click Re-scan and try again.";
+}
+
 function syncSpawnModelRow() {
-  // "ollama launch <tool>" opens its own model picker inside the terminal, so
-  // there's no separate model dropdown — always hide that row.
+  // The agent's model is resolved through Model Selection Mode and passed to
+  // `chatoss launch <tool> --model <id>` — there is no separate model dropdown
+  // in this modal, so always hide that row.
   TC.el.spawnModelRow.classList.add("hidden");
   TC.el.spawnModel.disabled = true;
 }
@@ -77,15 +80,22 @@ function openSpawnModal(opts) {
         opt.textContent = o.label;
         TC.el.spawnCli.appendChild(opt);
       }
+      // cliHint from the tool call wins, then the saved Default agent
+      // (normalized so legacy values from older builds still resolve), then
+      // the first chatoss tool (opencode).
       let preselectCli = (opts.cliHint || "").trim() || null;
-      if (!preselectCli && TC.settings.cliDefault && TC.settings.cliDefault !== "ask" && cliOpts.some((o) => o.value === TC.settings.cliDefault)) {
-        preselectCli = TC.settings.cliDefault;
+      if (!preselectCli) {
+        const norm = TC.normalizeCliDefault(TC.settings.cliDefault);
+        if (norm && cliOpts.some((o) => o.value === norm)) preselectCli = norm;
       }
       if (!preselectCli || !cliOpts.some((o) => o.value === preselectCli)) {
-        preselectCli = TC.detection.claude ? "claude" : (TC.detection.codex ? "codex" : (cliOpts[0] ? cliOpts[0].value : "claude"));
+        preselectCli = cliOpts[0] ? cliOpts[0].value : null;
       }
-      TC.el.spawnCli.value = preselectCli;
+      if (preselectCli) TC.el.spawnCli.value = preselectCli;
       syncSpawnModelRow();
+      // The `chatoss` command is REQUIRED — if it isn't installed, say so up
+      // front instead of letting the first Start fail with a dead terminal.
+      TC.el.spawnStatus.textContent = TC.detection.chatoss ? "" : chatossMissingMessage();
 
       // cwd: tool call > settings default > active project folder
       let cwd = (opts.cwd || "").trim();
@@ -131,36 +141,37 @@ async function onSpawnStart() {
 
   // ---- Route the session model through the configured Model Selection Mode ----
   // window.termCoder.resolveSessionModel(taskPrompt) encapsulates all three
-  // modes (manual / always / complexity) and returns the model to use, or null
-  // to cancel. The manual mode renders a pill picker inside the chat stream via
-  // askChoice, so hide the spawn modal while the choice is pending so the pills
-  // are visible and clickable.
+  // modes (manual / always / complexity) and returns the ChatOSS model id to
+  // pass to `chatoss launch <tool> --model <id>`, or null to cancel. The manual
+  // mode renders a pill picker inside the chat stream via askChoice, so hide the
+  // spawn modal while the choice is pending so the pills are visible and
+  // clickable.
   TC.el.spawnModal.classList.add("hidden");
-  let target = null;
+  let model = null;
   let noModels = false;
   try {
-    // resolveSessionModel returns a LAUNCH TARGET id — a direct CLI name
-    // ("claude"/"codex") or an ollama model name. spawnChosen routes on it.
-    target = await window.termCoder.resolveSessionModel(prompt);
+    // resolveSessionModel returns a ChatOSS MODEL id; the agent (tool) comes
+    // from the dropdown above. spawnChosen combines the two.
+    model = await window.termCoder.resolveSessionModel(prompt);
   } catch (e) {
     console.warn("resolveSessionModel", e);
-    // B3: when there are NO detected models/targets at all (Manual/Always/
+    // B3: when there are NO ChatOSS models available at all (Manual/Always/
     // Complexity), resolveSessionModel throws an error with code "NO_MODELS"
     // instead of returning null (which would silently cancel). Show an
     // actionable message and keep the spawn modal open so the user can
     // cancel/retry, rather than auto-dismissing it with no explanation.
     if (e && e.code === "NO_MODELS") {
       noModels = true;
-      target = null;
+      model = null;
     }
   }
-  if (!target) {
+  if (!model) {
     if (noModels) {
       // Re-show the modal (it was hidden to make room for the pill picker) with
       // an actionable status message. Do NOT dismiss — let the user cancel or
       // go run Re-scan in Settings.
       TC.el.spawnModal.classList.remove("hidden");
-      TC.el.spawnStatus.textContent = "No models detected — run Re-scan in Settings, or switch Model Selection Mode.";
+      TC.el.spawnStatus.textContent = "No ChatOSS models available — run Re-scan in Settings, or open ChatOSS and pick a model.";
       TC.el.spawnStart.disabled = false;
     } else {
       // Dismissed / cancelled by the user — close silently.
@@ -170,26 +181,20 @@ async function onSpawnStart() {
   }
 
   if (remember) {
-    // Remember the CHOSEN LAUNCH TARGET, not merely the spawn-modal dropdown
-    // tool. The launch target id (from resolveSessionModel) is what the next
-    // session applies automatically — for a direct-CLI launch that's "claude" /
-    // "codex" / "opencode", persisted as the set-cli-style "raw:<id>" value so
+    // Remember the chosen AGENT (the chatoss launch tool from the dropdown) —
     // it round-trips through the Settings "Default agent" picker (the two
-    // controls share the cliDefault value space and must agree). Ollama launches
-    // (target is an ollama model) have no self-contained set-cli value, so fall
-    // back to the dropdown's ollama-tool id — consistent with the picker, and
-    // auto-applied only when it maps to a concrete target.
-    const tgt = TC.findLaunchTarget(target);
-    TC.settings.cliDefault = (tgt && tgt.kind === "direct") ? ("raw:" + tgt.id) : cli;
+    // controls share the cliDefault value space and must agree). The MODEL is
+    // governed by Model Selection Mode, not by this checkbox.
+    TC.settings.cliDefault = cli;
     TC.settings.cwdDefault = cwd;
     TC.saveSettings();
   }
 
   // Batch mode (spawn_batch): the modal collected ONE launch choice for a whole
-  // batch of parallel subtasks — resolve with the choice (including the target)
+  // batch of parallel subtasks — resolve with the choice (including the model)
   // WITHOUT spawning a session here; the batch tool spawns each task itself.
   if (spawnModalOpts && spawnModalOpts.batchMode) {
-    closeSpawnModal({ cli, cwd, prompt, target });
+    closeSpawnModal({ cli, cwd, prompt, model });
     return;
   }
 
@@ -197,7 +202,7 @@ async function onSpawnStart() {
   TC.el.spawnStatus.textContent = "Starting…";
   TC.el.spawnModal.classList.remove("hidden");
   try {
-    const session = await spawnChosen({ cli, cwd, prompt, target });
+    const session = await spawnChosen({ cli, cwd, prompt, model });
     if (!session) {
       TC.el.spawnStatus.textContent = "Terminal permission denied. Approve it in the system prompt and try again, or cancel.";
       TC.el.spawnStart.disabled = false;
@@ -220,74 +225,71 @@ function onSpawnCancel() {
 }
 
 async function spawnChosen(choice) {
-  // choice.target is the launch-target id from resolveSessionModel — either a
-  // direct CLI name ("claude"/"codex") or an ollama model name. choice.cli is
-  // the ollama launch tool from the spawn-modal dropdown (used only for the
-  // ollama path) or a "raw:<bin>" manual override.
+  // v1.28: EVERY sub-agent session starts through the `chatoss` command —
+  // `chatoss launch <tool> [--model <id>]` — which drives the real coding CLI
+  // (OpenCode / Claude Code / Codex) with its model provider wired to ChatOSS.
+  // The old `ollama launch` path and the direct-binary (raw:) path are gone.
   //
-  // ALWAYS spawn through a login shell so `ollama` (and any user-installed CLI)
-  // resolves on the full PATH — the sandboxed default shell has a minimal PATH,
-  // which is exactly what caused "Unable to spawn ollama … not found in PATH".
-  let inner, label;
-  // effortTargetId: which launch-target id to look the effort up under. The raw:
-  // dropdown path names a binary directly, so its id IS the bin name.
-  let effortTargetId = null;
-  let codexFlagApplied = false; // true once --config model_reasoning_effort is on the command line
-  // Manual raw-binary override from the dropdown (kept for backward compat and
-  // for CLIs not yet covered by the launch-target picker).
-  if (choice.cli && choice.cli.startsWith("raw:")) {
-    const bin = choice.cli.slice(4);
-    effortTargetId = bin;
-    inner = "exec " + bin;
-    label = bin + " · " + TC.basename(choice.cwd);
-  } else {
-    // Route by the chosen launch target.
-    const target = TC.findLaunchTarget(choice.target);
-    if (target) effortTargetId = target.id;
-    if (target && target.kind === "direct") {
-      // ── Direct CLI launch ── run the REAL binary via the terminal capability,
-      // NOT through ollama. Uses the resolved absolute path (claudePath /
-      // codexPath / opencodePath) so it survives the sandbox's minimal PATH.
-      inner = "exec " + JSON.stringify(target.bin);
-      label = target.id + " · " + TC.basename(choice.cwd);
-    } else {
-      // ── Ollama launch path (existing) ── the dropdown's tool selects the
-      // agent; the target id (an ollama model name) is passed as --model.
-      const bin = TC.ollamaPath || "ollama";
-      const tool = choice.cli || "claude";
-      inner = "exec " + JSON.stringify(bin) + " launch " + tool;
-      // Apply the resolved model as a CLI flag so the launched agent uses it
-      // instead of opening its own model picker. choice.model is kept as a
-      // back-compat fallback for any caller still passing the old field.
-      const model = target ? target.model : choice.model;
-      if (model) {
-        inner += " --model " + JSON.stringify(model);
-      }
-      label = tool + " · " + TC.basename(choice.cwd);
-    }
+  //   choice.cli   — the agent tool id from the spawn-modal dropdown
+  //                 ("opencode" | "claude-code" | "codex"); "" resolves to the
+  //                 saved Default agent, then the first chatoss tool.
+  //   choice.model — the ChatOSS model id from resolveSessionModel (back-compat:
+  //                  choice.target is still honored), passed as --model.
+  //
+  // ALWAYS spawn through a login shell so `chatoss` (installed by the user via
+  // ChatOSS Settings → Launch) resolves on the full PATH — the sandboxed
+  // default shell has a minimal PATH.
+  //
+  // The chatoss command is REQUIRED for Term Coder to work. When detection ran
+  // and it is missing, fail fast with the install guidance instead of spawning
+  // a terminal that dies with "command not found".
+  if (!TC.chatossPath && !(TC.detection && TC.detection.denied)) {
+    return { error: chatossMissingMessage() };
   }
 
-  // ── Per-target effort level (Settings → Model Selection Mode) ──
-  // Direct Codex has a REAL reasoning-effort flag that accepts low/medium/high
-  // (verified OpenAI codex CLI values). Apply it on the command line ONLY when
-  // the chosen effort is one of those safe values — if a future model exposes a
-  // non-codex level like "max" for a codex target, we fall back to a guidance
-  // line instead of passing an invalid flag. Every other agent (claude /
-  // opencode / anything under `ollama launch`) has no effort flag, so the level
-  // is expressed as a guidance line appended to the task brief — universal and
-  // harmless on CLIs that don't parse it. Effort values are validated against
-  // the target's option list before storage, so interpolating them is safe.
+  // ── Resolve the agent tool ──
+  const toolIds = TC.CHATOSS_LAUNCH_TOOLS.map((t) => t.id);
+  const defaultTool = TC.normalizeCliDefault(TC.settings.cliDefault) || toolIds[0];
+  // Normalize the incoming cli too — dropdown emits tool ids, but older callers
+  // (cliHint, orchestrator tools) may still say "claude".
+  const cliNorm = choice.cli ? TC.normalizeCliDefault(String(choice.cli)) : "ask";
+  let tool = (cliNorm !== "ask" && toolIds.includes(cliNorm)) ? cliNorm : "";
+  if (!tool) tool = toolIds.includes(defaultTool) ? defaultTool : toolIds[0];
+  const toolEntry = TC.CHATOSS_LAUNCH_TOOLS.find((t) => t.id === tool) || TC.CHATOSS_LAUNCH_TOOLS[0];
+  tool = toolEntry.tool; // the argument chatoss launch takes
+
+  // ── Resolve the model (ChatOSS model id → --model) ──
+  // choice.model is the id from resolveSessionModel; choice.target is the old
+  // field name, still honored for callers that pass it. When neither is set,
+  // fall back to the ChatOSS default model so the launched CLI skips its own
+  // interactive model picker (autoDriveStartup types the task prompt into
+  // whatever is on screen, so an in-terminal picker would swallow it).
+  const model = (choice.model || choice.target || TC.defaultModelId || "").trim();
+  const bin = TC.chatossPath || "chatoss";
+  let inner = "exec " + JSON.stringify(bin) + " launch " + JSON.stringify(tool);
+  if (model) inner += " --model " + JSON.stringify(model);
+  const label = tool + " · " + TC.basename(choice.cwd);
+  // effortTargetId: the MODEL id the effort level was saved under.
+  const effortTargetId = model || null;
+
+  // ── Per-model effort level (Settings → Model Selection Mode) ──
+  // A Codex agent has a REAL reasoning-effort flag that accepts low/medium/high
+  // (verified OpenAI codex CLI values) — chatoss launch passes extra args
+  // through, so it lands on the real codex command line. Every other agent
+  // (opencode / claude-code) has no effort flag, so the level is expressed as a
+  // guidance line appended to the task brief — universal and harmless on CLIs
+  // that don't parse it. Effort values are validated against the model's option
+  // list before storage, so interpolating them is safe.
   const effort = TC.effortForTarget(effortTargetId);
   let effectivePrompt = choice.prompt;
   if (effort) {
-    const isCodex = /^exec "?[^"]*codex/.test(inner);
+    const isCodex = tool === "codex";
     if (isCodex && TC.CODEX_EFFORT_FLAG_VALUES.has(effort)) {
       inner += " --config 'model_reasoning_effort=\"" + effort + "\"'";
-      codexFlagApplied = true;
     } else if (TC.EFFORT_BRIEF[effort] && effectivePrompt) {
       effectivePrompt = effectivePrompt + "\n\n[" + TC.EFFORT_BRIEF[effort] + "]";
     } else if (effectivePrompt) {
-      // Unknown/custom level (e.g. "max" on a non-codex target with no EFFORT_BRIEF entry):
+      // Unknown/custom level (e.g. "max" on a model with no EFFORT_BRIEF entry):
       // append a generic instruction so the level is not silently dropped.
       effectivePrompt = effectivePrompt + "\n\n[Reasoning effort level: " + effort + "]";
     }
@@ -322,12 +324,10 @@ async function spawnChosen(choice) {
 // ---------- Settings panel ----------
 function renderDetectedList() {
   if (!TC.el.detectedList) return;
-  // Read the LIVE detection object — the same source the launch-target pickers
-  // (and the chat pill picker) consume via availableOllamaModels() — NOT the
-  // persisted settings.detected snapshot. The snapshot can be stale (restored
-  // from an older app version) and then disagrees with the pickers, which is
-  // exactly the "Settings shows fewer models than the chat picker" bug.
-  const d = TC.detection || { codex: false, claude: false, ollama: false, opencode: false, models: [], denied: false };
+  // Read the LIVE detection object. The persisted settings.detected snapshot
+  // can be stale (restored from an older app version) and then disagrees with
+  // the pickers, so always render what detection actually found.
+  const d = TC.detection || { chatoss: false, codex: false, claude: false, opencode: false, denied: false };
   TC.el.detectedList.innerHTML = "";
   const row = (name, ok) => {
     const div = document.createElement("div");
@@ -339,41 +339,28 @@ function renderDetectedList() {
     div.appendChild(document.createTextNode(" " + name + (ok ? " installed" : " not found")));
     TC.el.detectedList.appendChild(div);
   };
-  row("codex", !!d.codex);
-  row("claude", !!d.claude);
-  row("ollama", !!d.ollama);
-  row("opencode", !!d.opencode);
-  // Show the resolved direct-CLI paths so the user can confirm the real
-  // binaries were found (these are what "claude"/"codex"/"opencode" launch
-  // targets use).
-  if (d.claude && d.claudePath) {
+  // chatoss comes FIRST and is REQUIRED — every agent launches through
+  // `chatoss launch`, which only exists after the user clicks "Install
+  // chatoss command" in ChatOSS Settings → Launch.
+  row("chatoss (required)", !!d.chatoss);
+  if (d.chatoss && d.chatossPath) {
     const div = document.createElement("div");
     div.className = "detected-item";
-    div.textContent = "  claude direct: " + d.claudePath;
+    div.textContent = "  chatoss: " + d.chatossPath;
     TC.el.detectedList.appendChild(div);
   }
-  if (d.codex && d.codexPath) {
+  if (!d.chatoss) {
     const div = document.createElement("div");
     div.className = "detected-item";
-    div.textContent = "  codex direct: " + d.codexPath;
+    div.style.color = "var(--danger)";
+    div.textContent = chatossMissingMessage();
     TC.el.detectedList.appendChild(div);
   }
-  if (d.opencode && d.opencodePath) {
-    const div = document.createElement("div");
-    div.className = "detected-item";
-    div.textContent = "  opencode direct: " + d.opencodePath;
-    TC.el.detectedList.appendChild(div);
-  }
-  // The COMPLETE ollama model list (terminal detection + local models from the
-  // ChatOSS chat model list — the same source the model picker at the top of
-  // the AI chat section uses), so Settings shows every detected model.
-  const ollamaModels = TC.allOllamaModels();
-  if (d.ollama || ollamaModels.length) {
-    const div = document.createElement("div");
-    div.className = "detected-item";
-    div.textContent = "ollama models (" + ollamaModels.length + "): " + (ollamaModels.join(", ") || "(none)");
-    TC.el.detectedList.appendChild(div);
-  }
+  // The underlying coding CLIs are informational — `chatoss launch` drives
+  // them, Term Coder never spawns them directly.
+  row("claude-code CLI", !!d.claude);
+  row("codex CLI", !!d.codex);
+  row("opencode CLI", !!d.opencode);
   if (d.denied) {
     const div = document.createElement("div");
     div.className = "detected-item";
@@ -384,11 +371,11 @@ function renderDetectedList() {
 }
 
 function openSettings() {
-  // Fall back to "ask" when the saved default isn't among the current options
-  // (e.g. a legacy "ollama" value from an older build) — otherwise the select
-  // renders blank and Save would silently clear the default.
-  const cliValues = Array.from(TC.el.setCli.options).map((o) => o.value);
-  TC.el.setCli.value = cliValues.includes(TC.settings.cliDefault) ? TC.settings.cliDefault : "ask";
+  // Normalize the saved Default agent (legacy "claude" / "raw:*" / ollama-model
+  // values from older builds map to the chatoss tools, anything unrecognized
+  // falls back to "ask") — otherwise the select renders blank and Save would
+  // silently clear the default.
+  TC.el.setCli.value = TC.normalizeCliDefault(TC.settings.cliDefault) || "ask";
   TC.el.setCwd.value = TC.settings.cwdDefault || "";
   renderDetectedList();
   TC.applyModelSelectionModeToUi();
@@ -421,6 +408,7 @@ function saveSettingsFromPanel() {
 // in sync with app.json's "version".
 // --- exports ---
 TC.buildCliOptions = buildCliOptions;
+TC.chatossMissingMessage = chatossMissingMessage;
 TC.syncSpawnModelRow = syncSpawnModelRow;
 TC.openSpawnModal = openSpawnModal;
 TC.closeSpawnModal = closeSpawnModal;

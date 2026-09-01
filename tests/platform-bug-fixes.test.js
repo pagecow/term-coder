@@ -75,14 +75,17 @@ test("degenerate state is surfaced to the orchestrator", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Remember defaults — skip the modal when a default is pinned
+// 4. Remember defaults — the saved Default agent preselects the spawn modal
+//    dropdown; the modal still appears in manual mode (the user confirms
+//    every spawn), but the choice is remembered.
 // ---------------------------------------------------------------------------
 
-test("start_cli_session skips the spawn modal when a default launch is pinned", () => {
-  assert(/const defId = TC\.cliDefaultToTargetId\(TC\.settings\.cliDefault\)/.test(SRC),
-    "start_cli_session must read the saved default");
-  assert(/using your saved default launch — no dialog shown/.test(SRC),
-    "the skip path must report that no dialog was shown");
+test("start_cli_session honors the saved Default agent via the spawn modal", () => {
+  // Manual mode opens the modal, and openSpawnModal preselects cliDefault.
+  assert(/TC\.normalizeCliDefault\(TC\.settings\.cliDefault\)/.test(SRC),
+    "the preselect must use the normalized saved Default agent");
+  assert(/"Remember as defaults"/.test(SRC) || /spawnRemember/.test(SRC),
+    "the remember checkbox still exists");
 });
 
 // ---------------------------------------------------------------------------
@@ -116,8 +119,8 @@ test("spawn_batch tool is defined and handled", () => {
 
 test("spawn_batch creates a worktree AND spawns a session per task in one call", () => {
   assert(/git worktree add/.test(SRC), "batch must create worktrees");
-  assert(/spawnChosen\(\{ cli, cwd: wtPath, prompt, target \}\)/.test(SRC),
-    "batch must spawn each agent in its worktree");
+  assert(/spawnChosen\(\{ cli, cwd: wtPath, prompt, model \}\)/.test(SRC),
+    "batch must spawn each agent in its worktree with the resolved model");
   assert(/worktreeMeta\.set\(branch, \{ wtPath, parentBranch: mainBranch, projectPath: base \}\)/.test(SRC),
     "batch must track worktree metadata for later merges");
 });
@@ -129,23 +132,30 @@ test("spawn modal supports batchMode (one choice, no session spawned)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. Default agents list — ollama launch first, only 3 targets
+// 7. Default agents list — chatoss launch tools only (v1.28)
 // ---------------------------------------------------------------------------
 
-test("Settings default-agent picker lists ollama launch first, only opencode/claude/codex", () => {
+test("Settings default-agent picker lists ask + the three chatoss launch tools", () => {
   const setCli = HTML.slice(HTML.indexOf('<select id="set-cli"'), HTML.indexOf("</select>", HTML.indexOf('<select id="set-cli"')) + 9);
   const values = [...setCli.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepStrictEqual(values, ["ask", "opencode", "claude", "codex", "raw:opencode", "raw:claude", "raw:codex"],
+  assert.deepStrictEqual(values, ["ask", "opencode", "claude-code", "codex"],
     "set-cli options drifted: " + JSON.stringify(values));
   assert(!/chatgpt|hermes|copilot/.test(setCli), "chatgpt/hermes/copilot must be gone from the picker");
+  assert(!/ollama/.test(setCli), "no ollama launch options may remain");
+  assert(!/raw:/.test(setCli), "no direct-binary options may remain");
 });
 
-test("buildCliOptions offers direct binaries in opencode, claude, codex order", () => {
+test("buildCliOptions derives from CHATOSS_LAUNCH_TOOLS in opencode, claude-code, codex order", () => {
   const fn = SRC.slice(SRC.indexOf("function buildCliOptions"), SRC.indexOf("function syncSpawnModelRow"));
-  const order = [];
-  for (const m of fn.matchAll(/push\("raw:([a-z]+)"/g)) order.push(m[1]);
-  assert.deepStrictEqual(order, ["opencode", "claude", "codex"],
-    "direct-binary order drifted: " + JSON.stringify(order));
+  assert(/for \(const tool of TC\.CHATOSS_LAUNCH_TOOLS\)/.test(fn),
+    "the dropdown must derive from the single source of truth");
+  assert(!/raw:/.test(fn), "no direct-binary entries may be built");
+  const stateSrc = fs.readFileSync(path.join(__dirname, "..", "js", "00-state.js"), "utf8");
+  const m = stateSrc.match(/const CHATOSS_LAUNCH_TOOLS = (\[[\s\S]*?\]);/);
+  assert(m, "CHATOSS_LAUNCH_TOOLS not found");
+  const tools = Function('"use strict"; return (' + m[1] + ');')();
+  assert.deepStrictEqual(tools.map((t) => t.id), ["opencode", "claude-code", "codex"],
+    "tool order drifted: " + JSON.stringify(tools));
 });
 
 run();

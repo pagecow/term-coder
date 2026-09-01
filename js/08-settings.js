@@ -110,130 +110,84 @@ function openReleasesPage() {
 }
 
 // ---------- Model Selection Mode ----------
-// The COMPLETE ollama model list: the terminal-detected models (`ollama list`
-// via detectTools) PLUS the ollama models the ChatOSS chat model list reports
-// (the same source the model picker at the top of the AI chat section uses).
-// The terminal probe only lists models registered in the local ollama store —
-// a cloud model like glm-5.3:cloud shows up in `ollama list` only after it has
-// been pulled, while chat.listModels() reports it as soon as it exists in the
-// user's ollama account. LIVE-PROVEN (v1.26.2 probe of the real environment):
-// chat models carry source "local" (registry models) or "cloud" (ollama cloud
-// models, whose ids end in ":cloud" — glm-5.3:cloud, kimi-k3:cloud, …), so
-// BOTH are merged; "custom" (user-added models from other providers) is still
-// skipped because `ollama run` cannot launch them. detection.models first
-// (terminal-verified), then chat models, deduped by id. Falls back to
-// FALLBACK_MODELS when both sources are empty.
-function allOllamaModels() {
+// The COMPLETE list of ChatOSS models the app can launch a sub-agent with.
+// `chatoss launch <tool> --model <id>` serves the same model list the ChatOSS
+// chat model picker uses, so every source (local registry models, cloud models,
+// and user-added custom models) is eligible. Unavailable rows (available:false)
+// are skipped. Returns display-friendly model ids; empty when ChatOSS reports
+// nothing usable.
+function availableSessionModels() {
   const seen = new Set();
   const out = [];
   const push = (m) => {
     if (m && !seen.has(m)) { seen.add(m); out.push(m); }
   };
-  for (const m of (TC.detection && TC.detection.models) || []) push(m);
   for (const m of TC.models) {
     if (!m || !m.id) continue;
-    const chatLocal = m.source === "local";
-    const chatCloud = m.source === "cloud" && String(m.id).endsWith(":cloud");
-    if (chatLocal || chatCloud) push(m.id);
+    if (m.available === false) continue;
+    push(m.id);
   }
   return out;
 }
 
-// Returns the auto-detected ollama model ids (a copy of allOllamaModels()),
-// falling back to FALLBACK_MODELS when detection is empty.
-function availableOllamaModels() {
-  const m = allOllamaModels();
-  return m.length ? m : TC.FALLBACK_MODELS.slice();
+// Display label for a ChatOSS model id in the launch pickers: prefer the
+// model's display name, fall back to the raw id.
+function sessionModelLabel(id) {
+  const m = TC.models.find((x) => x.id === id);
+  if (m && m.name) return m.name + " (" + id + ")";
+  return id;
 }
 
-// ── Direct-CLI + ollama launch targets ──
-// A single unified list of everything the user can launch as a sub-agent
-// session. Each entry is a "target" the model picker (resolveSessionModel) and
-// the spawn logic (spawnChosen) both understand:
+// ── Launch targets ──
+// A "launch target" is now a CHATOSS MODEL: the id resolveSessionModel returns
+// and spawnChosen passes to `chatoss launch <tool> --model <id>`. The agent
+// (opencode / claude-code / codex) is chosen separately — via the spawn-modal
+// dropdown or the Settings "Default agent" picker — so every entry here is
+// just a model the user can pin:
 //
-//   { kind: "direct", id, label, bin }   — run the real claude/codex binary
-//                                          directly via the terminal capability
-//                                          (NOT through ollama).
-//   { kind: "ollama", id, label, model } — launch through `ollama launch
-//                                          <tool> --model <model>` (existing path).
+//   { kind: "chatoss", id, label, model } — model id as shown/launched.
 //
-// `id` is the stable value stored in settings (alwaysModel / complexityModel*).
-// Direct CLIs use ids "claude", "codex", and "opencode"; ollama models use their
-// model name. kind is derived from the id with targetKind() so a bare id
-// round-trips.
+// `id` is the stable value stored in settings (alwaysModel / complexityModel*)
+// and the key effort levels are saved under.
 function availableLaunchTargets() {
-  const out = [];
-  // Direct CLIs first — these are the "I have a direct account" options and
-  // are the most distinct from the ollama path, so they read as the headline
-  // choices. Only listed when the binary is actually installed.
-  if (TC.detection.claude && TC.detection.claudePath) {
-    out.push({ kind: "direct", id: "claude", label: "claude  (Claude Code, direct)", bin: TC.detection.claudePath });
-  }
-  if (TC.detection.codex && TC.detection.codexPath) {
-    out.push({ kind: "direct", id: "codex", label: "codex  (Codex, direct)", bin: TC.detection.codexPath });
-  }
-  if (TC.detection.opencode && TC.detection.opencodePath) {
-    out.push({ kind: "direct", id: "opencode", label: "opencode  (OpenCode, direct)", bin: TC.detection.opencodePath });
-  }
-  // Ollama models — the existing launch path. Each becomes its own target so
-  // picking one launches through ollama with that model.
-  for (const model of availableOllamaModels()) {
-    out.push({ kind: "ollama", id: model, label: model + "  (ollama)", model });
-  }
-  return out;
+  return availableSessionModels().map((id) => ({
+    kind: "chatoss",
+    id,
+    label: sessionModelLabel(id),
+    model: id,
+  }));
 }
 
-// Look up a launch target by its stable id. Returns the target object or null.
+// Look up a launch target by its stable id (a ChatOSS model id). Returns the
+// target object or null.
 function findLaunchTarget(id) {
   if (!id) return null;
   return availableLaunchTargets().find((t) => t.id === id) || null;
 }
 
-// Given a target id, return its kind ("direct" | "ollama") or null when not
-// found / not a known target. Used to route the spawn command without needing
-// the full target object.
-function targetKind(id) {
-  const t = findLaunchTarget(id);
-  return t ? t.kind : null;
-}
-
-// Map a persisted "default launch" value — the shared value space of the
+// Map a persisted "Default agent" value — the shared value space of the
 // Settings "Default agent" picker (#set-cli) and the spawn-modal "Remember as
-// default" checkbox — to a launch-target id, or null when it must NOT be
-// auto-applied on session start.
+// defaults" checkbox — to a chatoss launch TOOL id, or "ask" when unrecognized.
 //
-//   "raw:claude" | "raw:codex" | "raw:opencode" -> the matching direct-CLI
-//       target id ("claude" / "codex" / "opencode"). These are the only values
-//       that name a SELF-CONTAINED launch target (a direct binary needs no extra
-//       model choice), so they are the values that can short-circuit the
-//       launch-target picker.
-//   "ask" | "" | null | undefined -> null. The user asked to be prompted every
-//       time, so the caller falls through to the Model Selection Mode logic.
-//   anything else (the bare ollama-tool names "claude" / "codex" / "chatgpt" /
-//       "hermes" / "opencode" / "copilot", or a stray legacy value) -> null.
-//       These are launch TOOLS, not self-contained launch targets — they still
-//       need an ollama model (chosen in the pill picker / Model Selection Mode),
-//       so they cannot be applied as a single target. Returning null makes the
-//       caller fall through to the normal Model Selection Mode logic, which
-//       preserves the pre-existing behavior for those values.
-//
-// resolveSessionModel consults this BEFORE its mode branches so a saved default
-// is applied on session start instead of re-asking every time (the launch-pick
-// bug): the orchestrator kept showing the pill picker even after the user pinned
-// a default agent.
-function cliDefaultToTargetId(value) {
-  if (!value || value === "ask") return null;
-  if (typeof value !== "string") return null;
-  if (value.indexOf("raw:") === 0) {
-    const id = value.slice(4);
-    return id || null;
-  }
-  return null;
+// v1.28 value space: "ask" | "opencode" | "claude-code" | "codex". Legacy
+// values from older builds are migrated so a saved default survives the
+// update: bare tool names ("claude" → claude-code; "codex"/"opencode" map to
+// themselves) and raw-binary values ("raw:claude" → claude-code, etc.).
+// Ollama-model ids and anything else no longer name a launchable agent, so
+// they fall back to "ask" (the user re-picks once from the new dropdown).
+function normalizeCliDefault(value) {
+  if (!value || typeof value !== "string") return "ask";
+  const v = value.trim();
+  if (!v || v === "ask") return "ask";
+  if (v.startsWith("raw:")) return normalizeCliDefault(v.slice(4));
+  if (v === "claude" || v === "claude-code") return "claude-code";
+  if (v === "codex" || v === "opencode") return v;
+  return "ask";
 }
 
 // Build the list of { label, value } options for the pill/rect askChoice picker
 // and for any <select> that should offer the same choices. value is the stable
-// target id so the picker result maps straight back to a launch target.
+// model id so the picker result maps straight back to a launch target.
 function launchTargetChoiceOptions() {
   return availableLaunchTargets().map((t) => ({ label: t.label, value: t.id }));
 }
@@ -241,68 +195,40 @@ function launchTargetChoiceOptions() {
 // Populate a <select> with the available model choices and select `selected`
 // (if present in the list). Renders an empty placeholder option when nothing
 // is available so the picker is never silently blank.
-//
-// Ordering is MODEL-FIRST on purpose: this section is about picking an AI model
-// for coding sessions, so ollama models come first and the direct CLIs (which
-// run their own built-in model) are the clearly-labeled secondary group. When
-// the saved value is missing/unknown the panel defaults to the FIRST OLLAMA
-// MODEL — never to a direct CLI — so the user always lands on a model choice.
 function populateModelSelect(selectEl, selected) {
   if (!selectEl) return;
-  const targets = availableLaunchTargets();
+  const models = availableSessionModels();
   selectEl.innerHTML = "";
-  if (!targets.length) {
+  if (!models.length) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "(nothing detected — run Re-scan)";
+    opt.textContent = "(no ChatOSS models — run Re-scan)";
     selectEl.appendChild(opt);
     selectEl.value = "";
     return;
   }
-  const ids = targets.map((t) => t.id);
-  const direct = targets.filter((t) => t.kind === "direct");
-  const ollama = targets.filter((t) => t.kind === "ollama");
-  // AI models first — model selection is the point of this panel.
-  if (ollama.length) {
-    const grp = document.createElement("optgroup");
-    grp.label = "Ollama models";
-    for (const t of ollama) {
-      const opt = document.createElement("option");
-      opt.value = t.id;
-      opt.textContent = t.id;
-      grp.appendChild(opt);
-    }
-    selectEl.appendChild(grp);
+  for (const id of models) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = sessionModelLabel(id);
+    selectEl.appendChild(opt);
   }
-  // Direct CLIs last, clearly labeled: each runs its OWN built-in model, so
-  // choosing one is still a model choice — it just isn't an ollama model id.
-  if (direct.length) {
-    const grp = document.createElement("optgroup");
-    grp.label = "Direct CLI (runs its own model)";
-    for (const t of direct) {
-      const opt = document.createElement("option");
-      opt.value = t.id;
-      opt.textContent = t.id + "  (direct CLI)";
-      grp.appendChild(opt);
-    }
-    selectEl.appendChild(grp);
-  }
-  // Restore the saved selection if it's still available; otherwise default to
-  // the first ollama model (falling back to the first direct CLI when ollama
-  // has nothing).
-  if (selected && ids.includes(selected)) selectEl.value = selected;
-  else selectEl.value = (ollama[0] || direct[0]).id;
+  // Restore the saved selection when it's still available; otherwise land on
+  // the first ChatOSS model (and on the ChatOSS default when nothing is
+  // saved).
+  if (selected && models.includes(selected)) selectEl.value = selected;
+  else if (TC.defaultModelId && models.includes(TC.defaultModelId)) selectEl.value = TC.defaultModelId;
+  else selectEl.value = models[0];
 }
 
-// ---------- Sub-agent effort (per launch target) ----------
-// Settings → Model Selection Mode rows pair each target select with an Effort
-// select. The effort belongs to the TARGET (not the row), so it applies in
-// every selection mode — a manual pill pick of that target carries the same
+// ---------- Sub-agent effort (per model) ----------
+// Settings → Model Selection Mode rows pair each model select with an Effort
+// select. The effort belongs to the MODEL (not the row), so it applies in
+// every selection mode — a manual pill pick of that model carries the same
 // effort saved for it in Always/Complexity.
 
-// Read the saved effort for a launch-target id. For ollama-model targets the
-// value must be one of the model's current thinkLevels (or "" for default).
-// Direct CLI targets are restricted to the fixed low/medium/high set.
+// Read the saved effort for a model id. The value must be one of the model's
+// current thinkLevels (or "" for default).
 function effortForTarget(targetId) {
   if (!targetId) return null;
   const map = TC.modelSelection.subAgentEffort;
@@ -312,19 +238,10 @@ function effortForTarget(targetId) {
   return opts.some((o) => o.value === v) ? v : null;
 }
 
-// Return the effort options for a given launch target:
-//   - Direct CLI (claude/codex/opencode) → low/medium/high (the values Codex's
-//     real flag accepts; other direct agents get guidance lines).
-//   - An ollama model id with thinkLevels → those exact levels.
+// Return the effort options for a given ChatOSS model:
+//   - A model with thinkLevels → those exact levels.
 //   - Otherwise → the generic low/medium/high/extra-high/max set.
 function effortOptionsForTarget(targetId) {
-  const directIds = ["claude", "codex", "opencode"];
-  if (targetId && directIds.includes(targetId)) {
-    return [{ value: "", label: "Model default" },
-      { value: "low", label: "Low" },
-      { value: "medium", label: "Medium" },
-      { value: "high", label: "High" }];
-  }
   const m = TC.models.find((x) => x.id === targetId);
   if (m && m.thinkLevels && m.thinkLevels.length) {
     const opts = [{ value: "", label: "Model default" }];
@@ -381,8 +298,9 @@ function bindEffortSelect(effortSel, modelSel) {
 }
 
 // The task-brief guidance line appended when an effort level is set but the
-// target has no real effort flag (claude / opencode / ollama launches). Direct
-// Codex instead gets the verified --config model_reasoning_effort flag.
+// agent has no real effort flag (opencode / claude-code — anything but a codex
+// agent). Codex agent sessions instead get the verified
+// --config model_reasoning_effort flag (passed through chatoss launch).
 const EFFORT_BRIEF = {
   low: "Effort level: LOW. Work fast and pragmatically — minimal analysis, no over-engineering; prefer the simplest correct solution.",
   medium: "Effort level: MEDIUM. Balance speed and care — think through the important decisions, but don't over-engineer routine parts.",
@@ -547,12 +465,11 @@ TC.compareVersions = compareVersions;
 TC.fetchLatestVersion = fetchLatestVersion;
 TC.checkForUpdates = checkForUpdates;
 TC.openReleasesPage = openReleasesPage;
-TC.allOllamaModels = allOllamaModels;
-TC.availableOllamaModels = availableOllamaModels;
+TC.availableSessionModels = availableSessionModels;
+TC.sessionModelLabel = sessionModelLabel;
 TC.availableLaunchTargets = availableLaunchTargets;
 TC.findLaunchTarget = findLaunchTarget;
-TC.targetKind = targetKind;
-TC.cliDefaultToTargetId = cliDefaultToTargetId;
+TC.normalizeCliDefault = normalizeCliDefault;
 TC.launchTargetChoiceOptions = launchTargetChoiceOptions;
 TC.populateModelSelect = populateModelSelect;
 TC.effortForTarget = effortForTarget;

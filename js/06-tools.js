@@ -38,7 +38,7 @@ const ORCHESTRATOR_TOOLS = [
     type: "function",
     function: {
       name: "start_cli_session",
-      description: "Ask the user to start a new sub-agent CLI session in a working directory. The USER decides the launch target in a confirmation dialog — they can run the real claude or codex CLI directly (if they have a direct account), or launch through ollama with a chosen model. Call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder. This REFUSES to start a second agent in a directory that already has a live session, because two agents in one working directory clobber each other's edits — correct or close the existing agent instead.",
+      description: "Ask the user to start a new sub-agent CLI session in a working directory. The USER approves in a confirmation dialog and picks the agent — chatoss launch starts OpenCode, Claude Code, or Codex wired to ChatOSS models — and the model is chosen via Model Selection Mode. Call this when you need an agent shell to work in, then wait for the returned session id. cwd defaults to the active project folder. This REFUSES to start a second agent in a directory that already has a live session, because two agents in one working directory clobber each other's edits — correct or close the existing agent instead.",
       parameters: {
         type: "object",
         properties: {
@@ -1201,50 +1201,32 @@ async function toolHandler(name, args) {
               "  • For a genuinely separate subtask, create_worktree first and pass that new worktreePath as cwd.";
           }
         }
-        // FIX: "Remember as defaults" — when the user pinned a default launch
-        // (Settings "Default agent" picker or the spawn-modal "Remember as
-        // defaults" checkbox), the spawn modal must NOT appear again. Skip it
-        // and spawn with the saved default directly. Only direct-CLI defaults
-        // ("raw:claude" etc.) map to a concrete target without further input;
-        // anything else falls through to the modal as before.
-        //
-        // Model Selection Mode is authoritative for non-manual modes: in
-        // "always" / "complexity" the user's configured target launches
-        // DIRECTLY — a pinned Default agent must not veto it (it used to, so
-        // the orchestrator spawned Claude even when Settings said Always =
-        // <ollama model>). Manual mode keeps the remembered-default fast path.
+        // "Remember as defaults": in non-manual Model Selection Mode the saved
+        // model applies directly with NO dialog (below). In manual mode the
+        // spawn modal always appears — the user picks the agent (chatoss
+        // launch opencode / claude-code / codex) from the dropdown, with the
+        // saved Default agent preselected, then the model comes from the
+        // pill picker / Model Selection Mode.
         const msMode = (TC.modelSelection && TC.modelSelection.modelSelectionMode) || "manual";
         if (msMode !== "manual") {
-          let target = null;
+          let model = null;
           try {
-            target = await TC.resolveSessionModel(args.taskPrompt || "");
+            model = await TC.resolveSessionModel(args.taskPrompt || "");
           } catch (e) {
             if (e && e.code === "NO_MODELS") {
-              return "No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.";
+              return "No ChatOSS models available. Run Re-scan in Settings, or open ChatOSS and pick a model.";
             }
             throw e;
           }
-          if (!target) return "Cancelled by user — do not start the session; ask the user how to proceed or stop.";
-          const session = await TC.spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", target });
+          if (!model) return "Cancelled by user — do not start the session; ask the user how to proceed or stop.";
+          const session = await TC.spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", model });
           if (!session) return "Terminal permission denied. Approve it in the system prompt and try again.";
           if (session.error) return session.error;
           const rec2 = TC.sessions.get(session.id);
           if (rec2) rec2.fromOrchestrator = true;
           return "session " + session.id + " started: " + session.label + " in " + session.cwd +
-            " (launched with the configured " + (msMode === "always" ? "\"Always use a specific target\"" : "Select-by-complexity") + " target — no dialog shown). " +
+            " (launched via chatoss with the configured " + (msMode === "always" ? "\"Always use a specific model\"" : "Select-by-complexity") + " model — no dialog shown). " +
             "The app types and submits your taskPrompt automatically once the agent is ready. " +
-            "Monitor it with wait_for_session (returns when its turn finishes) — do NOT wait for the process to exit; coding CLIs are REPLs and never do.";
-        }
-        const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
-        const defTarget = defId ? TC.findLaunchTarget(defId) : null;
-        if (defTarget) {
-          const session = await TC.spawnChosen({ cli: "", cwd, prompt: args.taskPrompt || "", target: defId });
-          if (!session) return "Terminal permission denied. Approve it in the system prompt and try again.";
-          if (session.error) return session.error;
-          const rec = TC.sessions.get(session.id);
-          if (rec) rec.fromOrchestrator = true;
-          return "session " + session.id + " started: " + session.label + " in " + session.cwd +
-            " (using your saved default launch — no dialog shown). The app types and submits your taskPrompt automatically once the agent is ready. " +
             "Monitor it with wait_for_session (returns when its turn finishes) — do NOT wait for the process to exit; coding CLIs are REPLs and never do.";
         }
         const choice = await TC.openSpawnModal({
@@ -1831,37 +1813,32 @@ async function toolHandler(name, args) {
         if (tasks.length > 8) return "Error: at most 8 tasks per batch.";
         const base = p.folderPath.replace(/\/+$/, "");
         // ONE launch choice for the whole batch: in non-manual Model Selection
-        // Mode the configured target applies to every task (no dialog); in
-        // manual mode the saved default if pinned, otherwise a single spawn
-        // dialog (batchMode — no session spawned yet).
+        // Mode the configured model applies to every task (no dialog); in
+        // manual mode a single spawn dialog (batchMode — no session spawned
+        // yet) collects the agent + model for ALL of them.
         const msMode = (TC.modelSelection && TC.modelSelection.modelSelectionMode) || "manual";
         let cli = "";
-        let target = null;
+        let model = null;
         if (msMode !== "manual") {
           try {
-            target = await TC.resolveSessionModel(tasks[0] ? String(tasks[0].prompt || "") : "");
+            model = await TC.resolveSessionModel(tasks[0] ? String(tasks[0].prompt || "") : "");
           } catch (e) {
             if (e && e.code === "NO_MODELS") {
-              return "No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.";
+              return "No ChatOSS models available. Run Re-scan in Settings, or open ChatOSS and pick a model.";
             }
             throw e;
           }
-          if (!target) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
+          if (!model) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
         } else {
-          const defId = TC.cliDefaultToTargetId(TC.settings.cliDefault);
-          const defTarget = defId ? TC.findLaunchTarget(defId) : null;
-          target = defId || null;
-          if (!defTarget) {
-            const choice = await TC.openSpawnModal({
-              source: "tool",
-              cwd: base,
-              prompt: "BATCH: " + tasks.length + " parallel subtasks — pick the launch to use for ALL of them.",
-              batchMode: true,
-            });
-            if (!choice) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
-            cli = choice.cli || "";
-            target = choice.target || null;
-          }
+          const choice = await TC.openSpawnModal({
+            source: "tool",
+            cwd: base,
+            prompt: "BATCH: " + tasks.length + " parallel subtasks — pick the agent + model to use for ALL of them.",
+            batchMode: true,
+          });
+          if (!choice) return "Cancelled by user — do not start the batch; ask the user how to proceed or stop.";
+          cli = choice.cli || "";
+          model = choice.model || null;
         }
         const results = [];
         for (const t of tasks) {
@@ -1880,7 +1857,7 @@ async function toolHandler(name, args) {
           if (r.exitCode !== 0) { results.push("FAILED " + name + ": " + (r.output || "").trim().slice(0, 200)); continue; }
           TC.worktreeMeta.set(branch, { wtPath, parentBranch: mainBranch, projectPath: base });
           TC.saveWorktrees();
-          const session = await TC.spawnChosen({ cli, cwd: wtPath, prompt, target });
+          const session = await TC.spawnChosen({ cli, cwd: wtPath, prompt, model });
           if (!session) { results.push("FAILED " + name + ": terminal permission denied"); continue; }
           if (session.error) { results.push("FAILED " + name + ": " + session.error); continue; }
           const rec = TC.sessions.get(session.id);
@@ -1994,13 +1971,13 @@ async function toolHandler(name, args) {
 }
 
 // ---------- Spawn modal (the heart: ask the user every time) ----------
-// The dropdown here selects the OLLAMA LAUNCH TOOL (the agent ollama starts).
-// The actual launch TARGET — including the option to run claude/codex DIRECTLY
-// without ollama — is chosen in the model picker (resolveSessionModel) that
-// appears after Start. So this dropdown matters only when the user picks an
-// ollama model from that picker; picking "claude"/"codex" there launches the
-// real binary directly regardless of this dropdown. The raw:<bin> entries
-// below are a manual fallback for direct launching from the dropdown itself.
+// The dropdown selects the AGENT chatoss launch starts — opencode, claude-code,
+// or codex (CHATOSS_LAUNCH_TOOLS in 00-state.js is the single source of truth).
+// The MODEL is chosen through Model Selection Mode (manual pill picker, Always,
+// or Select-by-complexity) and passed to `chatoss launch <tool> --model <id>`.
+// The `chatoss` command itself must be installed from ChatOSS Settings →
+// Launch ("Install chatoss command") — without it no agent can start, and
+// spawnChosen fails fast with that guidance.
 // --- exports ---
 Object.defineProperty(TC, "ORCHESTRATOR_TOOLS", { get: () => ORCHESTRATOR_TOOLS, configurable: true });
 Object.defineProperty(TC, "LEGACY_KEY_BYTES", { get: () => LEGACY_KEY_BYTES, configurable: true });

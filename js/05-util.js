@@ -85,25 +85,12 @@ function normalizeToolCall(call) {
 }
 
 // ---------- Auto-detection (cached ~60s) ----------
-function parseOllamaModels(out) {
-  const found = [];
-  const lines = String(out || "").split("\n");
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-    if (/^NAME\b/i.test(t)) continue;
-    const first = t.split(/\s+/)[0];
-    if (first && first !== "NAME") found.push(first);
-  }
-  return [...new Set(found)];
-}
-
 async function detectTools(force = false) {
   const now = Date.now();
   if (!force && TC.detection.scannedAt && now - TC.detection.scannedAt < TC.DETECT_TTL_MS) {
     return TC.detection;
   }
-  const fresh = { codex: false, claude: false, ollama: false, opencode: false, models: [], scannedAt: now, denied: false, claudePath: null, codexPath: null, opencodePath: null };
+  const fresh = { codex: false, claude: false, chatoss: false, opencode: false, models: [], scannedAt: now, denied: false, chatossPath: null, claudePath: null, codexPath: null, opencodePath: null };
   const cwd = defaultCwd();
 
   const probe = async (cmd) => {
@@ -117,7 +104,7 @@ async function detectTools(force = false) {
     }
   };
 
-  // Helper: resolve a CLI binary's absolute path the same way ollamaPath is
+  // Helper: resolve a CLI binary's absolute path the same way chatossPath is
   // resolved — `which` first, then a login shell `which`, then well-known
   // locations. Returns the path string or null. Also sets the boolean flag
   // on `fresh` so callers know the binary is available.
@@ -142,9 +129,19 @@ async function detectTools(force = false) {
     return path;
   };
 
-  // Resolve the direct claude / codex / opencode binaries (for launching them
-  // WITHOUT going through ollama). The boolean flags stay in lockstep with the
-  // path.
+  // ── chatoss: the ONLY launch path (v1.28) ── every sub-agent session starts
+  // through `chatoss launch <tool>`. Resolve its absolute path so the spawn
+  // command survives the sandbox's minimal PATH; sessions spawn through a
+  // login shell anyway, so a null path still launches the bare command and
+  // the not-installed case is handled at spawn time with the
+  // "Install chatoss command" guidance (see spawnChosen).
+  TC.setChatossPath(await resolveCliPath("chatoss", TC.CHATOSS_GUESSES));
+  fresh.chatoss = !!TC.chatossPath;
+  fresh.chatossPath = TC.chatossPath;
+
+  // Resolve the underlying claude / codex / opencode binaries that
+  // `chatoss launch` drives. These are informational only (the Settings
+  // "Detected tools" list) — the app never spawns them directly.
   TC.setCodexPath(await resolveCliPath("codex", TC.CODEX_GUESSES));
   fresh.codex = !!TC.codexPath;
   fresh.codexPath = TC.codexPath;
@@ -155,46 +152,16 @@ async function detectTools(force = false) {
   fresh.opencode = !!TC.opencodePath;
   fresh.opencodePath = TC.opencodePath;
 
-  // Resolve ollama's absolute path — the sandbox shell has a minimal PATH, so
-  // "which ollama" may fail even though ollama is installed. Try `which`, then
-  // a login shell, then well-known locations.
-  TC.setOllamaPath(null);
-  const ollamaR = await probe("which ollama");
-  if (ollamaR !== null && ollamaR.exitCode === 0 && String(ollamaR.output || "").trim()) {
-    TC.setOllamaPath(String(ollamaR.output).trim().split("\n")[0].trim());
-  }
-  if (!TC.ollamaPath) {
-    const lr = await probe(TC.loginShell("which ollama"));
-    if (lr !== null && lr.exitCode === 0 && String(lr.output || "").trim()) {
-      TC.setOllamaPath(String(lr.output).trim().split("\n")[0].trim());
-    }
-  }
-  if (!TC.ollamaPath) {
-    for (const g of TC.OLLAMA_GUESSES) {
-      const tr = await probe("test -x " + JSON.stringify(g) + " && echo ok");
-      if (tr !== null && tr.exitCode === 0 && /ok/.test(String(tr.output))) { TC.setOllamaPath(g); break; }
-    }
-  }
-  fresh.ollama = !!TC.ollamaPath;
-
-  if (fresh.ollama) {
-    const listR = await probe(JSON.stringify(TC.ollamaPath) + " list");
-    if (listR !== null && listR.exitCode === 0) {
-      fresh.models = parseOllamaModels(listR.output);
-    }
-    if (!fresh.models.length) fresh.models = TC.FALLBACK_MODELS.slice();
-  }
-
   // `detection` is exported from 00-state.js, so it must be mutated in place
   // (the imported binding itself is read-only).
   Object.assign(TC.detection, fresh);
   TC.settings.detected = {
+    chatoss: TC.detection.chatoss,
     codex: TC.detection.codex,
     claude: TC.detection.claude,
-    ollama: TC.detection.ollama,
     opencode: TC.detection.opencode,
-    models: TC.detection.models.slice(),
     denied: TC.detection.denied,
+    chatossPath: TC.detection.chatossPath || null,
     claudePath: TC.detection.claudePath || null,
     codexPath: TC.detection.codexPath || null,
     opencodePath: TC.detection.opencodePath || null,
@@ -223,6 +190,5 @@ TC.activeConversation = activeConversation;
 TC.defaultCwd = defaultCwd;
 TC.setStatus = setStatus;
 TC.normalizeToolCall = normalizeToolCall;
-TC.parseOllamaModels = parseOllamaModels;
 TC.detectTools = detectTools;
 })();

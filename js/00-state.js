@@ -4,7 +4,8 @@
 "use strict";
 const TC = window.termCoder = window.termCoder || {};
 // Term Coder — AI agent orchestrator with live terminal squares.
-// Spawns ollama/codex/claude sub-agents — ALWAYS asks the user first (spawn modal).
+// Spawns OpenCode / Claude Code / Codex sub-agents via `chatoss launch` —
+// ALWAYS asks the user first (spawn modal).
 // Loaded by index.html as a classic <script src="js/00-state.js"> tag.
 
 const STORE_KEY = "term-coder.state";
@@ -16,42 +17,48 @@ const WORKTREES_KEY = "term-coder.worktrees";
 // produced. Restored at load (loadPersistedSessions) as read-only "ended" cards
 // alongside any live sessions created during the current run.
 const SESSIONS_KEY = "term-coder.sessions";
-const FALLBACK_MODELS = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
+// Fixed sub-agent reasoning-effort options used when a model does not enumerate
+// its own thinkLevels (see effortOptionsForTarget in 08-settings.js).
 const DETECT_TTL_MS = 60 * 1000;
 // The app's own version, used by the Settings "Check for updates" flow.
 // Keep in sync with the "version" field in app.json (the app cannot read its
 // own manifest at runtime — the sandboxed frame has no fetchable origin).
-const APP_VERSION = "1.27.0";
-// CLIs that "ollama launch" can start (from the Ollama desktop Launch screen).
-// This is the SINGLE source of truth for the ollama-launch entries offered in
-// the spawn-modal dropdown (buildCliOptions). Keeping it here and deriving the
-// dropdown from it means the constant and the UI can never drift apart (D2).
-// Only the tools below are offered; "openclaw"/"droid" were previously listed
-// but never actually wired into the dropdown, so they were removed.
-const OLLAMA_LAUNCH_TOOLS = [
-  { id: "opencode", label: "ollama launch opencode  (OpenCode)" },
-  { id: "claude", label: "ollama launch claude  (Claude Code)" },
-  { id: "codex", label: "ollama launch codex  (Codex)" },
+const APP_VERSION = "1.28.0";
+// CLIs that "chatoss launch" can start (from the ChatOSS Settings → Launch
+// screen). This is the SINGLE source of truth for the chatoss-launch entries
+// offered in the spawn-modal dropdown (buildCliOptions) and in the Settings
+// "Default agent" picker. Keeping it here and deriving both UIs from it means
+// the constant and the UI can never drift apart (D2).
+//
+// v1.28: chatoss launch is the ONLY launch path. The old "ollama launch <tool>"
+// options and the direct-binary (raw:) options are gone — every sub-agent
+// session starts through the `chatoss` command line wrapper, which wires the
+// CLI's model provider at ChatOSS's local model server. The `tool` field is
+// the argument chatoss launch takes (note: Claude Code's tool name is
+// "claude-code", not "claude").
+const CHATOSS_LAUNCH_TOOLS = [
+  { id: "opencode", tool: "opencode", label: "chatoss launch opencode  (OpenCode)" },
+  { id: "claude-code", tool: "claude-code", label: "chatoss launch claude-code  (Claude Code)" },
+  { id: "codex", tool: "codex", label: "chatoss launch codex  (Codex)" },
 ];
 
-// Resolved absolute path to the ollama binary (found at detect time). The
-// sandboxed terminal runs a NON-login shell, so PATH is minimal and "ollama"
+// Resolved absolute path to the `chatoss` command (found at detect time). The
+// sandboxed terminal runs a NON-login shell, so PATH is minimal and "chatoss"
 // often isn't on it even though it works in the user's terminal.
-let ollamaPath = null;
-const OLLAMA_GUESSES = ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/usr/bin/ollama", "/bin/ollama", "/snap/bin/ollama"];
+let chatossPath = null;
+const CHATOSS_GUESSES = ["/usr/local/bin/chatoss", "/opt/homebrew/bin/chatoss", "/usr/bin/chatoss", "/bin/chatoss", "/snap/bin/chatoss"];
 
-// ── Direct-CLI launch targets (claude / codex / opencode) ──
-// Resolved absolute paths to the real coding-CLI binaries, found at detect
-// time. When the user picks "claude", "codex", or "opencode" as a launch
-// target we spawn THESE directly via the terminal capability — NOT through
-// `ollama launch`. This is for users who have a direct account and don't want
-// to go through ollama. Like ollamaPath, the absolute path survives the
-// sandbox's minimal PATH. Stays null when the binary isn't installed.
+// ── Underlying coding-CLI binaries (claude / codex / opencode) ──
+// `chatoss launch <tool>` drives these real CLIs (Claude Code / Codex /
+// OpenCode), pointing their model provider at ChatOSS's local model server.
+// They are NOT launched directly anymore — the paths are resolved at detect
+// time purely so the Settings "Detected tools" list can show what's installed.
+// Stays null when the binary isn't installed.
 let claudePath = null;
 let codexPath = null;
 let opencodePath = null;
 // Well-known locations to fall back to when `which` fails under the minimal
-// sandbox PATH (same rationale as OLLAMA_GUESSES).
+// sandbox PATH (same rationale as CHATOSS_GUESSES).
 const CLAUDE_GUESSES = ["/usr/local/bin/claude", "/opt/homebrew/bin/claude", "/usr/bin/claude", "/bin/claude"];
 const CODEX_GUESSES = ["/usr/local/bin/codex", "/opt/homebrew/bin/codex", "/usr/bin/codex", "/bin/codex"];
 const OPENCODE_GUESSES = ["/usr/local/bin/opencode", "/opt/homebrew/bin/opencode", "/usr/bin/opencode", "/bin/opencode"];
@@ -78,15 +85,18 @@ let state = {
   currentBranch: null, // active project's current git branch (last known), refreshed on demand
 };
 let settings = {
-  cliDefault: "ask",       // 'ask' | 'ollama' | 'codex' | 'claude' | 'raw:claude' | 'raw:codex' | 'raw:opencode' | ...
-  modelDefault: "ask",     // 'ask' | <ollama model name>
+  cliDefault: "ask",       // 'ask' | 'opencode' | 'claude-code' | 'codex' — which
+                           // agent `chatoss launch` starts. Legacy values
+                           // ('claude', 'raw:*', ollama models) are normalized at
+                           // load (normalizeCliDefault in 08-settings.js).
+  modelDefault: "ask",     // 'ask' | <model id> (legacy field, kept for shape)
   cwdDefault: "",
   // Wake the orchestrator automatically when a delegated agent finishes its turn
   // or exits. Coding CLIs are REPLs that never exit, so without this the
   // orchestrator has nothing to react to and the user has to prod it by hand
   // after every subtask.
   autoFollow: true,
-  detected: { codex: false, claude: false, ollama: false, models: [], denied: false },
+  detected: { chatoss: false, codex: false, claude: false, opencode: false, denied: false },
   editorWidth: 380,          // code editor column width (px) when open
 };
 // Model Selection Mode — single source of truth for how sub-agent sessions
@@ -100,19 +110,19 @@ let modelSelection = {
   complexityModelLow: "",
   complexityModelMedium: "",
   complexityModelHigh: "",
-  // Per-TARGET effort levels for sub-agent sessions: { [launchTargetId]: "low" | "medium" | "high" }.
+  // Per-TARGET effort levels for sub-agent sessions: { [modelId]: "low" | "medium" | "high" | … }.
   // Empty/absent = model default. Applies in every selection mode (manual picks
-  // included): whatever target launches carries its saved effort. Codex targets
-  // get the real --config model_reasoning_effort flag; agents without an effort
-  // flag get a guidance line appended to the task brief (see spawnChosen).
+  // included): whatever model launches carries its saved effort. Codex agent
+  // sessions get the real --config model_reasoning_effort flag; other agents
+  // get a guidance line appended to the task brief (see spawnChosen).
   subAgentEffort: {},
 };
 // The scopedData keys that back each model-selection field (top-level keys).
 const MS_KEYS = ["modelSelectionMode", "alwaysModel", "complexityModelLow", "complexityModelMedium", "complexityModelHigh", "subAgentEffort"];
 
-// Fixed option list for direct CLI targets (claude/codex/opencode) and for
-// ollama models whose model list entry hasn't arrived yet. Direct Codex has a
-// real --config model_reasoning_effort flag that accepts these exact values.
+// Fixed option list for sub-agent effort selects when a model does not enumerate
+// its own thinkLevels. Codex agent sessions have a real
+// --config model_reasoning_effort flag that accepts these exact values.
 const SUBAGENT_EFFORT_OPTIONS_BASE = [
   { value: "", label: "Model default" },
   { value: "low", label: "Low" },
@@ -167,11 +177,15 @@ let _lastBreakdown = null;
 let _lastMax = 0;
 
 // Auto-detection cache (refreshed every ~60s).
-//   claudePath / codexPath: resolved absolute path to the direct CLI binary
-//   (mirrors ollamaPath). The sandboxed terminal runs a non-login shell with a
-//   minimal PATH, so storing the absolute path lets us launch the real CLI
-//   directly even when bare "claude"/"codex" wouldn't resolve.
-let detection = { codex: false, claude: false, ollama: false, opencode: false, models: [], scannedAt: 0, denied: false, claudePath: null, codexPath: null, opencodePath: null };
+//   chatossPath: resolved absolute path to the `chatoss` command — REQUIRED:
+//   every sub-agent launches through `chatoss launch <tool>`, and that command
+//   only exists after the user clicks "Install chatoss command" in ChatOSS
+//   Settings → Launch. When it is missing, spawn shows the install guidance.
+//   claudePath / codexPath / opencodePath: the underlying CLI binaries
+//   (informational only — they are never launched directly). The sandboxed
+//   terminal runs a non-login shell with a minimal PATH, so absolute paths let
+//   the Settings "Detected tools" list show real installs.
+let detection = { codex: false, claude: false, chatoss: false, opencode: false, models: [], scannedAt: 0, denied: false, chatossPath: null, claudePath: null, codexPath: null, opencodePath: null };
 
 // Sessions registry: sessionId -> { id, cmd, args, cwd, label, active, exitCode?, squareEl, mountEl, dispose?, expanded }
 const sessions = new Map();
@@ -255,7 +269,7 @@ const ERROR_LOOP_THRESHOLD = 3;
 // (state, settings, detection, models, sessions, deadSessions) are instead
 // mutated IN PLACE at the call sites (Object.assign / splice), which is legal
 // for importers and keeps every module's view of them live.
-function setOllamaPath(v) { ollamaPath = v; }
+function setChatossPath(v) { chatossPath = v; }
 function setClaudePath(v) { claudePath = v; }
 function setCodexPath(v) { codexPath = v; }
 function setOpencodePath(v) { opencodePath = v; }
@@ -270,11 +284,10 @@ Object.defineProperty(TC, "STORE_KEY", { get: () => STORE_KEY, configurable: tru
 Object.defineProperty(TC, "SETTINGS_KEY", { get: () => SETTINGS_KEY, configurable: true });
 Object.defineProperty(TC, "WORKTREES_KEY", { get: () => WORKTREES_KEY, configurable: true });
 Object.defineProperty(TC, "SESSIONS_KEY", { get: () => SESSIONS_KEY, configurable: true });
-Object.defineProperty(TC, "FALLBACK_MODELS", { get: () => FALLBACK_MODELS, configurable: true });
 Object.defineProperty(TC, "DETECT_TTL_MS", { get: () => DETECT_TTL_MS, configurable: true });
 Object.defineProperty(TC, "APP_VERSION", { get: () => APP_VERSION, configurable: true });
-Object.defineProperty(TC, "OLLAMA_LAUNCH_TOOLS", { get: () => OLLAMA_LAUNCH_TOOLS, configurable: true });
-Object.defineProperty(TC, "OLLAMA_GUESSES", { get: () => OLLAMA_GUESSES, configurable: true });
+Object.defineProperty(TC, "CHATOSS_LAUNCH_TOOLS", { get: () => CHATOSS_LAUNCH_TOOLS, configurable: true });
+Object.defineProperty(TC, "CHATOSS_GUESSES", { get: () => CHATOSS_GUESSES, configurable: true });
 Object.defineProperty(TC, "CLAUDE_GUESSES", { get: () => CLAUDE_GUESSES, configurable: true });
 Object.defineProperty(TC, "CODEX_GUESSES", { get: () => CODEX_GUESSES, configurable: true });
 Object.defineProperty(TC, "OPENCODE_GUESSES", { get: () => OPENCODE_GUESSES, configurable: true });
@@ -298,7 +311,7 @@ Object.defineProperty(TC, "NUDGE_COOLDOWN_MS", { get: () => NUDGE_COOLDOWN_MS, c
 Object.defineProperty(TC, "NUDGE_TEXT", { get: () => NUDGE_TEXT, configurable: true });
 Object.defineProperty(TC, "AGENT_ERROR_PATTERNS", { get: () => AGENT_ERROR_PATTERNS, configurable: true });
 Object.defineProperty(TC, "ERROR_LOOP_THRESHOLD", { get: () => ERROR_LOOP_THRESHOLD, configurable: true });
-Object.defineProperty(TC, "ollamaPath", { get: () => ollamaPath, set: (v) => { ollamaPath = v; }, configurable: true });
+Object.defineProperty(TC, "chatossPath", { get: () => chatossPath, set: (v) => { chatossPath = v; }, configurable: true });
 Object.defineProperty(TC, "claudePath", { get: () => claudePath, set: (v) => { claudePath = v; }, configurable: true });
 Object.defineProperty(TC, "codexPath", { get: () => codexPath, set: (v) => { codexPath = v; }, configurable: true });
 Object.defineProperty(TC, "opencodePath", { get: () => opencodePath, set: (v) => { opencodePath = v; }, configurable: true });
@@ -315,7 +328,7 @@ Object.defineProperty(TC, "_lastBreakdown", { get: () => _lastBreakdown, set: (v
 Object.defineProperty(TC, "_lastMax", { get: () => _lastMax, set: (v) => { _lastMax = v; }, configurable: true });
 Object.defineProperty(TC, "detection", { get: () => detection, set: (v) => { detection = v; }, configurable: true });
 TC.loginShell = loginShell;
-TC.setOllamaPath = setOllamaPath;
+TC.setChatossPath = setChatossPath;
 TC.setClaudePath = setClaudePath;
 TC.setCodexPath = setCodexPath;
 TC.setOpencodePath = setOpencodePath;

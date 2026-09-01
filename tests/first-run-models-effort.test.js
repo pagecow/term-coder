@@ -136,11 +136,11 @@ test("subagent effort: effortForTarget validates against the target's current op
   assert(!/v === "low" \|\| v === "medium" \|\| v === "high"/.test(fn), "must not hardcode low/medium/high whitelist");
 });
 
-test("subagent effort: effortOptionsForTarget uses ollama model thinkLevels, otherwise generic expanded set", () => {
+test("subagent effort: effortOptionsForTarget uses model thinkLevels, otherwise generic expanded set", () => {
   const fn = SRC.slice(SRC.indexOf("function effortOptionsForTarget"), SRC.indexOf("function populateEffortSelect"));
   assert(/TC\.models\.find\(\(x\) => x\.id === targetId\)/.test(fn), "must look up the model by target id");
   assert(/m\.thinkLevels \u0026\u0026 m\.thinkLevels\.length/.test(fn), "must use model thinkLevels when present");
-  assert(/directIds\.includes\(targetId\)/.test(fn), "must fall back to fixed options for direct CLI targets");
+  assert(!/directIds\.includes\(targetId\)/.test(fn), "the direct-CLI branch is gone (targets are model ids now)");
   assert(/extra-high/.test(fn) && /max/.test(fn), "generic fallback must include extra-high and max");
 });
 

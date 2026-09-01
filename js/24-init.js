@@ -70,20 +70,33 @@ async function init() {
   await TC.loadPlatformSessions();
   // Imported binding — mutate the exported detection object in place.
   Object.assign(TC.detection, {
+    chatoss: !!(TC.settings.detected && TC.settings.detected.chatoss),
     codex: !!(TC.settings.detected && TC.settings.detected.codex),
     claude: !!(TC.settings.detected && TC.settings.detected.claude),
-    ollama: !!(TC.settings.detected && TC.settings.detected.ollama),
     opencode: !!(TC.settings.detected && TC.settings.detected.opencode),
-    models: (TC.settings.detected && TC.settings.detected.models) || [],
     scannedAt: 0, // force a fresh scan at startup
     denied: !!(TC.settings.detected && TC.settings.detected.denied),
-    // Restore the resolved direct-CLI paths so the launch-target picker can
-    // list claude/codex/opencode immediately on a cold start, before the fresh
-    // scan finishes. detectTools refreshes these with live values shortly after.
+    // Restore the resolved paths so Settings can show them immediately on a
+    // cold start, before the fresh scan finishes. detectTools refreshes these
+    // with live values shortly after. chatossPath is the REQUIRED one — every
+    // agent launches through it.
+    chatossPath: (TC.settings.detected && TC.settings.detected.chatossPath) || null,
     claudePath: (TC.settings.detected && TC.settings.detected.claudePath) || null,
     codexPath: (TC.settings.detected && TC.settings.detected.codexPath) || null,
     opencodePath: (TC.settings.detected && TC.settings.detected.opencodePath) || null,
   });
+
+  // v1.28 migration: cliDefault now holds a chatoss launch tool id ("opencode" |
+  // "claude-code" | "codex"). Legacy values from older builds ("claude",
+  // "raw:*", ollama model ids) are normalized once here so the Settings
+  // "Default agent" picker and the spawn modal preselect show a real value.
+  if (TC.settings.cliDefault != null) {
+    const norm = TC.normalizeCliDefault(TC.settings.cliDefault);
+    if (norm !== TC.settings.cliDefault) {
+      TC.settings.cliDefault = norm;
+      TC.saveSettings();
+    }
+  }
 
   // Load the model list, retrying in the background when it comes back empty.
   // On a FRESH INSTALL the OS model service can still be warming up on the very
@@ -245,7 +258,11 @@ async function init() {
 
   TC.el.rescanBtn.addEventListener("click", async () => {
     TC.el.detectedList.innerHTML = "<div class='detected-scanning'>Scanning…</div>";
+    // Re-probe the chatoss command + coding CLIs, and reload the ChatOSS model
+    // list (the sub-agent model pickers read it — the placeholder tells the
+    // user to Re-scan when it's empty).
     await TC.detectTools(true);
+    await TC.loadModels();
     TC.renderDetectedList();
     // refresh the model pickers with the newly detected models, preserving
     // the saved selections where the model is still available.

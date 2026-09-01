@@ -11,41 +11,38 @@ window.termCoder.getModelSelectionConfig = function () {
     complexityModelLow: TC.modelSelection.complexityModelLow || "",
     complexityModelMedium: TC.modelSelection.complexityModelMedium || "",
     complexityModelHigh: TC.modelSelection.complexityModelHigh || "",
-    availableModels: TC.availableOllamaModels(),
-    // Unified launch targets: direct CLIs (claude/codex/opencode) + ollama
-    // models. The session-startup integration can read these to know everything
-    // launchable.
+    availableModels: TC.availableSessionModels(),
+    // Launch targets are ChatOSS MODELS now — each one is passed to
+    // `chatoss launch <tool> --model <id>`. The session-startup integration can
+    // read these to know every model launchable as a sub-agent.
     availableTargets: TC.availableLaunchTargets(),
-    // The persisted "default launch" (Settings "Default agent" / spawn-modal
-    // "Remember as default"). resolveSessionModel applies it automatically on
-    // session start so the orchestrator does not re-ask every time.
-    cliDefault: TC.settings.cliDefault || "ask",
+    // The persisted "Default agent" (Settings "Default agent" / spawn-modal
+    // "Remember as defaults") — which chatoss tool to launch. Normalized so
+    // legacy values from older builds resolve to a real tool (or "ask").
+    cliDefault: TC.normalizeCliDefault(TC.settings.cliDefault || "ask"),
   };
 };
 
 // ---------- Session model resolution (Model Selection Mode) ----------
 // Encapsulates all three Model Selection Modes so the session-startup code
-// calls a single helper and gets back the launch target to use (or null to
-// cancel).
+// calls a single helper and gets back the model to use (or null to cancel).
 //
 //   window.termCoder.resolveSessionModel(taskPrompt) -> Promise<string|null>
 //
-// The returned string is a LAUNCH TARGET id — either a direct CLI ("claude" /
-// "codex", launched directly via the terminal capability) or an ollama model
-// name (launched through `ollama launch`). spawnChosen reads the id back with
-// findLaunchTarget()/targetKind() to build the right spawn command, so this
-// function stays pure and knows nothing about how the binary is launched.
+// The returned string is a CHATOSS MODEL id. spawnChosen passes it to
+// `chatoss launch <tool> --model <id>` (the tool itself comes from the
+// spawn-modal dropdown / the saved Default agent), so this function stays pure
+// and knows nothing about how the agent is launched.
 //
-//   - "manual"     -> prompt via askChoice (pill style) offering every launch
-//                     target (claude, codex, ollama models), wait, return the
-//                     chosen target id (or null if dismissed — caller cancels).
-//   - "always"     -> return cfg.alwaysModel automatically (now also accepts a
-//                     direct-CLI id); if it's unset/empty, fall back to the
-//                     pill picker so the user can still pick a target.
+//   - "manual"     -> prompt via askChoice (pill style) offering every
+//                     available ChatOSS model, wait, return the chosen model
+//                     id (or null if dismissed — caller cancels).
+//   - "always"     -> return cfg.alwaysModel automatically; if it's unset/empty,
+//                     fall back to the pill picker so the user can still pick.
 //   - "complexity" -> assess the task prompt's complexity (low/medium/high),
-//                     return the corresponding configured target automatically
+//                     return the corresponding configured model automatically
 //                     (no prompt). Falls back through the other levels, then to
-//                     the first available target if the assessed level is unset.
+//                     the first available model if the assessed level is unset.
 //
 // Keep this pure — it knows nothing about the spawn modal. The caller decides
 // whether/how to hide the modal while the pill picker is on screen.
@@ -124,51 +121,35 @@ function assessComplexity(taskPrompt) {
 }
 
 // Single helper that routes through the configured Model Selection Mode.
-// Returns a launch-target id to apply (direct CLI name or ollama model), or
+// Returns the ChatOSS MODEL id to pass to `chatoss launch <tool> --model`, or
 // null to cancel the session.
 window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPrompt) {
   const cfg = window.termCoder.getModelSelectionConfig();
-  // Unified launch targets (direct CLIs + ollama models) — supersedes the
-  // ollama-only `availableModels` list so the picker can offer
-  // claude/codex/opencode directly alongside ollama models.
+  // Available launch targets are ChatOSS models. `availableModels` carries the
+  // bare ids (legacy field kept for the session-startup integration).
   const targets = Array.isArray(cfg.availableTargets) && cfg.availableTargets.length
     ? cfg.availableTargets
-    : (Array.isArray(cfg.availableModels) ? cfg.availableModels.map((m) => ({ kind: "ollama", id: m, label: m, model: m })) : []);
+    : (Array.isArray(cfg.availableModels) ? cfg.availableModels.map((m) => ({ kind: "chatoss", id: m, label: m, model: m })) : []);
   // Bare id list for membership checks and "always"/"complexity" validation.
   const ids = targets.map((t) => t.id);
   const opts = targets.map((t) => ({ label: t.label, value: t.id }));
 
-  // ---- Saved default launch applies ONLY in Manual mode. ----
-  // The "Default agent" Settings picker + the spawn-modal "Remember as default"
-  // checkbox persist into settings.cliDefault (exposed here as cfg.cliDefault).
-  // It is a manual-mode convenience ("remember my pick so the picker doesn't
-  // re-ask"), NOT a master override: when the user explicitly chose Always or
-  // Select-by-complexity in Settings, that choice must win — previously a
-  // pinned default silently vetoed the Always model, so "Always use a
-  // specific model" appeared to ignore the model the user picked. Manual
-  // mode keeps the short-circuit (no re-asking every session); "Ask me every
-  // time" and values that don't map to a concrete target fall through.
-  if (cfg.mode === "manual") {
-    const defId = TC.cliDefaultToTargetId(cfg.cliDefault);
-    if (defId && ids.includes(defId)) return defId;
-  }
-
-  // ---- Always: use the configured fixed target, no prompt. ----
+  // ---- Always: use the configured fixed model, no prompt. ----
   if (cfg.mode === "always") {
     if (cfg.alwaysModel) return cfg.alwaysModel;
-    // No always-target configured yet — fall back to a pill picker so the
+    // No always-model configured yet — fall back to a pill picker so the
     // session can still start, and hint that Settings has the real config.
     if (opts.length) {
       return await window.termCoder.askChoice({
-        prompt: "No \"always\" target is configured yet — pick one for this session (or set it in Settings):",
+        prompt: "No \"always\" model is configured yet — pick one for this session (or set it in Settings):",
         options: opts,
         style: "pill",
       });
     }
-    // B3: no models/targets detected at all — distinguish from a user cancel
+    // B3: no ChatOSS models available at all — distinguish from a user cancel
     // (null) so the caller can show an actionable message instead of silently
     // dismissing the spawn modal. Throw a recognizable error.
-    const e = new Error("No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.");
+    const e = new Error("No ChatOSS models available. Run Re-scan in Settings, or open ChatOSS and pick a model.");
     e.code = "NO_MODELS";
     throw e;
   }
@@ -185,19 +166,19 @@ window.termCoder.resolveSessionModel = async function resolveSessionModel(taskPr
     const target = map[level] || map.medium || map.low || map.high;
     if (target) return target;
     if (ids.length) return ids[0]; // last-resort default
-    const e = new Error("No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.");
+    const e = new Error("No ChatOSS models available. Run Re-scan in Settings, or open ChatOSS and pick a model.");
     e.code = "NO_MODELS";
     throw e;
   }
 
   // ---- Manual (default): prompt via pills and wait for the pick. ----
   if (!opts.length) {
-    const e = new Error("No launch targets detected. Run Re-scan in Settings, install ollama/a CLI, or switch Model Selection Mode.");
+    const e = new Error("No ChatOSS models available. Run Re-scan in Settings, or open ChatOSS and pick a model.");
     e.code = "NO_MODELS";
     throw e;
   }
   return await window.termCoder.askChoice({
-    prompt: "Select a launch target for this session:",
+    prompt: "Select a ChatOSS model for this session:",
     options: opts,
     style: "pill",
   });

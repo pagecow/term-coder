@@ -202,19 +202,33 @@ test("T1: fallback chain order is raw first, contents second, releases last", ()
 // T2 — Settings accuracy fixes
 // ---------------------------------------------------------------------------
 
-test("T2: openSettings falls back to 'ask' for a legacy cliDefault not in the select", () => {
-  // Verbatim from app.js (openSettings): the saved default is applied only when
-  // it is among the select's current options, else "ask".
-  const cliValues = ["ask", "claude", "codex", "chatgpt", "hermes", "opencode", "copilot"];
-  const pick = (saved) => (cliValues.includes(saved) ? saved : "ask");
+test("T2: openSettings normalizes a legacy cliDefault into the chatoss value space", () => {
+  // The saved default is normalized (legacy "claude" / "raw:*" / ollama model
+  // ids map to a chatoss tool id or "ask"), so the select is never blank and
+  // Save never silently clears the default.
+  const cliValues = ["ask", "opencode", "claude-code", "codex"];
+  const normalize = (saved) => {
+    if (!saved || typeof saved !== "string") return "ask";
+    const v = saved.trim();
+    if (v.startsWith("raw:")) return normalize(v.slice(4));
+    if (v === "claude" || v === "claude-code") return "claude-code";
+    if (v === "codex" || v === "opencode") return v;
+    return "ask";
+  };
+  const pick = (saved) => {
+    const n = normalize(saved);
+    return cliValues.includes(n) ? n : "ask";
+  };
   assert.strictEqual(pick("codex"), "codex", "valid saved default must be kept");
-  assert.strictEqual(pick("ask"), "ask");
+  assert.strictEqual(pick("claude"), "claude-code", "legacy 'claude' migrates to claude-code");
+  assert.strictEqual(pick("raw:claude"), "claude-code", "legacy raw:claude migrates to claude-code");
   assert.strictEqual(pick("ollama"), "ask", "legacy 'ollama' value must fall back to ask (blank select bug)");
+  assert.strictEqual(pick("qwen3:30b"), "ask", "a saved model id is not an agent — ask");
   assert.strictEqual(pick(""), "ask", "empty value must fall back to ask");
   assert.strictEqual(pick(undefined), "ask", "undefined value must fall back to ask");
-  // The source must contain the fallback wiring.
-  assert(/cliValues\.includes\(TC\.settings\.cliDefault\) \? TC\.settings\.cliDefault : "ask"/.test(SRC),
-    "openSettings setCli fallback wiring missing");
+  // The source must contain the normalize wiring.
+  assert(/TC\.el\.setCli\.value = TC\.normalizeCliDefault\(TC\.settings\.cliDefault\) \|\| "ask";/.test(SRC),
+    "openSettings setCli normalize wiring missing");
 });
 
 test("T2: applyModelSelectionModeToUi falls back to Manual for an invalid persisted mode", () => {
@@ -230,150 +244,69 @@ test("T2: applyModelSelectionModeToUi falls back to Manual for an invalid persis
 });
 
 // ---------------------------------------------------------------------------
-// T3 — Ollama model detection unification
-// ---------------------------------------------------------------------------
-
-// Verbatim from app.js (allOllamaModels): merge terminal-detected models with
-// the local models from the ChatOSS chat model list (the same source the model
-// picker at the top of the AI chat section uses), deduped by id.
-function allOllamaModels(detection, models) {
-  const seen = new Set();
-  const out = [];
-  const push = (m) => {
-    if (m && !seen.has(m)) { seen.add(m); out.push(m); }
-  };
-  for (const m of (detection && detection.models) || []) push(m);
-  for (const m of models) {
-    if (m && m.source === "local" && m.id) push(m.id);
-  }
-  return out;
-}
-// Verbatim from app.js (availableOllamaModels): fall back to FALLBACK_MODELS
-// only when the merged list is empty.
-function availableOllamaModels(detection, models, FALLBACK_MODELS) {
-  const m = allOllamaModels(detection, models);
-  return m.length ? m : FALLBACK_MODELS.slice();
-}
-
-test("T3: allOllamaModels merges terminal detection with the chat picker's local models", () => {
-  // The bug: the terminal probe saw only 5 models while the chat model picker
-  // (chat.listModels) saw all 10 local models. The merged list must show all.
-  const detection = { models: ["a:1", "b:1", "c:1", "d:1", "e:1"] };
-  const chatModels = [
-    { id: "a:1", name: "A", source: "local" },
-    { id: "b:1", name: "B", source: "local" },
-    { id: "c:1", name: "C", source: "local" },
-    { id: "d:1", name: "D", source: "local" },
-    { id: "e:1", name: "E", source: "local" },
-    { id: "f:1", name: "F", source: "local" },
-    { id: "g:1", name: "G", source: "local" },
-    { id: "h:1", name: "H", source: "local" },
-    { id: "i:1", name: "I", source: "local" },
-    { id: "j:1", name: "J", source: "local" },
-    { id: "cloud-1", name: "Cloud", source: "cloud" },
-    { id: "custom-1", name: "Custom", source: "custom" },
-  ];
-  const merged = allOllamaModels(detection, chatModels);
-  assert.strictEqual(merged.length, 10, "merged list must contain all 10 local models, got: " + JSON.stringify(merged));
-  for (const id of ["a:1", "b:1", "c:1", "d:1", "e:1", "f:1", "g:1", "h:1", "i:1", "j:1"]) {
-    assert(merged.includes(id), "missing model " + id);
-  }
-  assert(!merged.includes("cloud-1"), "cloud models must not become ollama launch targets");
-  assert(!merged.includes("custom-1"), "custom models must not become ollama launch targets");
-  assert.strictEqual(new Set(merged).size, merged.length, "merged list must be deduped");
-});
-
-test("T3: allOllamaModels handles empty/partial sources", () => {
-  // In the app, `models` is always an array (module-level `let models = []`),
-  // so the verbatim loop over it is safe; only `detection` can be null.
-  assert.deepStrictEqual(allOllamaModels(null, []), [], "null detection + no chat models -> empty");
-  assert.deepStrictEqual(allOllamaModels({ models: [] }, []), [], "empty detection + no chat models -> empty");
-  assert.deepStrictEqual(allOllamaModels(null, [{ id: "x:1", source: "local" }]), ["x:1"], "chat-only local models survive");
-  assert.deepStrictEqual(allOllamaModels({ models: ["x:1"] }, []), ["x:1"], "detection-only models survive");
-  // Chat model entries without an id or a non-local source are skipped.
-  assert.deepStrictEqual(allOllamaModels(null, [{ name: "no-id", source: "local" }]), [], "local entry without id skipped");
-});
-
-// ---------------------------------------------------------------------------
-// T3b — ollama CLOUD models must be merged (v1.26.2 regression)
-// ---------------------------------------------------------------------------
+// T3 — ChatOSS model list unification (v1.28)
 //
-// User report: the Model Selection dropdowns did not list the GLM 5.3 models.
-// Root cause proven by a LIVE PROBE of the running app: chat.listModels()
-// returns 9 models with sources {cloud: 7, local: 1, custom: 1} and DOES
-// contain glm-5.3:cloud / glm-5.3-flash:cloud (source "cloud") — but
-// allOllamaModels merged only source==="local" entries, so every ollama CLOUD
-// model was dropped. (`ollama list` locally only registers a cloud model
-// after it has been pulled — glm-5.2:cloud yes, glm-5.3:cloud no.)
-//
-// This test executes the REAL allOllamaModels from js/08-settings.js against
-// that exact live environment as the fixture.
+// availableSessionModels() is the ONE source for every sub-agent model picker
+// (Always / complexity selects, the manual pill picker). It lists every
+// AVAILABLE ChatOSS model — local, cloud, and custom all qualify now, because
+// `chatoss launch <tool> --model <id>` serves the same model list ChatOSS's
+// chat picker serves. Unavailable rows are skipped. There is NO fallback
+// hardcoded model list anymore: when ChatOSS reports nothing usable, the
+// pickers show a placeholder and spawnChosen omits --model.
+// ---------------------------------------------------------------------------
 const SETTINGS_SRC = fs.readFileSync(path.join(__dirname, "..", "js", "08-settings.js"), "utf8");
 
-function runAllOllamaModelsReal(detection, models) {
-  const m = SETTINGS_SRC.match(/function allOllamaModels\(\) \{([\s\S]*?)\n\}/);
-  if (!m) throw new Error("allOllamaModels not found in 08-settings.js");
-  const TC = {
-    detection: detection,
-    models: models,
-  };
-  const fn = new Function("TC", m[1] + "\nreturn allOllamaModels();");
+function runAvailableSessionModelsReal(models) {
+  const m = SETTINGS_SRC.match(/function availableSessionModels\(\) \{([\s\S]*?)\n\}/);
+  if (!m) throw new Error("availableSessionModels not found in 08-settings.js");
+  const TC = { models: models };
+  // eslint-disable-next-line no-new-func
+  const fn = new Function("TC", m[1] + "\nreturn availableSessionModels();");
   return fn(TC);
 }
 
-test("T3b: ollama CLOUD chat models (glm-5.3) are merged from the live model list", () => {
+test("T3: availableSessionModels lists every AVAILABLE model from any source", () => {
   // EXACT shape captured from the real environment on 2026-09-01 (probe of the
-  // running app): sources {cloud:7, local:1, custom:1}.
-  const detection = {
-    models: ["kimi-k3:cloud", "deepseek-v4-pro:cloud", "deepseek-v4-flash:cloud", "glm-5.2:cloud", "kimi-k2.7-code:cloud", "qwen3.5:9b"],
-  };
+  // running app): sources {cloud:7, local:1, custom:1} — now all mergeable.
   const chatModels = [
-    { id: "kimi-k3:cloud", name: "Kimi K3", source: "cloud" },
-    { id: "deepseek-v4-pro:cloud", name: "DeepSeek V4 Pro", source: "cloud" },
-    { id: "deepseek-v4-flash:cloud", name: "DeepSeek V4 Flash", source: "cloud" },
-    { id: "glm-5.2:cloud", name: "GLM 5.2", source: "cloud" },
-    { id: "kimi-k2.7-code:cloud", name: "Kimi K2.7 Code", source: "cloud" },
-    { id: "glm-5.3-flash:cloud", name: "GLM 5.3 Flash", source: "cloud" },
-    { id: "glm-5.3:cloud", name: "GLM 5.3", source: "cloud" },
-    { id: "qwen3.5:9b", name: "Qwen 3.5 9B", source: "local" },
-    { id: "some-custom-model", name: "Custom", source: "custom" },
+    { id: "kimi-k3:cloud", name: "Kimi K3", source: "cloud", available: true },
+    { id: "deepseek-v4-pro:cloud", name: "DeepSeek V4 Pro", source: "cloud", available: true },
+    { id: "glm-5.2:cloud", name: "GLM 5.2", source: "cloud", available: true },
+    { id: "glm-5.3:cloud", name: "GLM 5.3", source: "cloud", available: true },
+    { id: "qwen3.5:9b", name: "Qwen 3.5 9B", source: "local", available: true },
+    { id: "some-custom-model", name: "Custom", source: "custom", available: true },
+    { id: "broken-model", name: "Broken", source: "local", available: false },
   ];
-  const merged = runAllOllamaModelsReal(detection, chatModels);
-  assert(merged.includes("glm-5.3:cloud"), "glm-5.3:cloud (source cloud, ollama cloud id) MUST be listed");
-  assert(merged.includes("glm-5.3-flash:cloud"), "glm-5.3-flash:cloud MUST be listed");
-  assert(merged.includes("qwen3.5:9b"), "local models still merged");
-  assert(!merged.includes("some-custom-model"), "custom-source models are skipped (not ollama-runnable)");
-  // A cloud-TAGGED model whose id is NOT ollama-shaped stays out.
-  assert(!merged.includes("totally-other-provider"), "cloud source without an ollama ':cloud' id is skipped");
-  assert.strictEqual(new Set(merged).size, merged.length, "merged list must be deduped");
+  const list = runAvailableSessionModelsReal(chatModels);
+  assert(list.includes("glm-5.3:cloud"), "cloud models are chatoss-launchable now and MUST be listed");
+  assert(list.includes("qwen3.5:9b"), "local models still listed");
+  assert(list.includes("some-custom-model"), "custom models are chatoss-launchable now and MUST be listed");
+  assert(!list.includes("broken-model"), "unavailable rows are skipped");
+  assert.strictEqual(new Set(list).size, list.length, "list must be deduped");
 });
 
-test("T3: availableOllamaModels falls back to FALLBACK_MODELS only when both sources are empty", () => {
-  const FALLBACK = ["qwen3:30b", "qwen3:14b", "llama3.2:latest", "mistral:latest"];
-  assert.deepStrictEqual(availableOllamaModels(null, [], FALLBACK), FALLBACK, "empty sources -> fallback list");
-  assert.deepStrictEqual(
-    availableOllamaModels({ models: ["a:1"] }, [], FALLBACK),
-    ["a:1"],
-    "detected models must win over the fallback");
-  assert.deepStrictEqual(
-    availableOllamaModels(null, [{ id: "a:1", source: "local" }], FALLBACK),
-    ["a:1"],
-    "chat-local models must win over the fallback");
+test("T3: availableSessionModels handles empty/edge inputs", () => {
+  assert.deepStrictEqual(runAvailableSessionModelsReal([]), [], "no chat models -> empty");
+  assert.deepStrictEqual(runAvailableSessionModelsReal([{ name: "no-id", available: true }]), [], "entry without id skipped");
+  assert.deepStrictEqual(runAvailableSessionModelsReal([{ id: "x:1", available: true }]), ["x:1"], "available model survives");
 });
 
-test("T3: Settings consumes the live detection + merged list (source wiring)", () => {
-  // renderDetectedList must read the LIVE `detection` object — the same source
-  // the launch-target pickers use — not the persisted settings.detected
-  // snapshot (the stale/limited list that caused the 5-vs-all mismatch).
+test("T3: Settings consumes the live model list + chatoss detection (source wiring)", () => {
+  // renderDetectedList must read the LIVE `detection` object, not the persisted
+  // settings.detected snapshot.
   assert(!/const d = settings\.detected/.test(SRC), "renderDetectedList still reads the stale settings.detected snapshot");
-  assert(/const d = TC\.detection \|\| \{ codex: false/.test(SRC), "renderDetectedList must read the live detection object");
-  // The detected list must show the merged model list.
-  assert(/const ollamaModels = TC\.allOllamaModels\(\);/.test(SRC), "renderDetectedList must use allOllamaModels()");
-  // availableOllamaModels (the pickers' source) must consume the merged list.
-  assert(/const m = allOllamaModels\(\);/.test(SRC), "availableOllamaModels must consume allOllamaModels()");
-  // detectTools/parseOllamaModels themselves must be untouched by this fix.
-  assert(/function parseOllamaModels\(out\)/.test(SRC), "parseOllamaModels declaration missing");
-  assert(/fresh\.models = parseOllamaModels\(listR\.output\);/.test(SRC), "detectTools parse wiring missing");
+  assert(/const d = TC\.detection \|\| \{ chatoss: false/.test(SRC), "renderDetectedList must read the live detection object");
+  // The REQUIRED chatoss command leads the detected list and shows install
+  // guidance when missing.
+  assert(/row\("chatoss \(required\)", !!d\.chatoss\);/.test(SRC), "detected list leads with chatoss (required)");
+  assert(/chatossMissingMessage\(\)/.test(SRC), "detected list shows the install guidance when chatoss is missing");
+  // The pickers consume availableSessionModels.
+  assert(/const models = availableSessionModels\(\);/.test(SRC), "populateModelSelect must consume availableSessionModels()");
+  assert(/availableSessionModels\(\)\.map\(\(id\) => \(\{/.test(SRC), "availableLaunchTargets derives from the model list");
+  // The old ollama machinery is gone.
+  assert(!/function parseOllamaModels/.test(SRC), "parseOllamaModels is gone (no more `ollama list` probing)");
+  assert(!/function allOllamaModels/.test(SRC), "allOllamaModels is gone");
+  assert(!/FALLBACK_MODELS/.test(SRC), "the hardcoded fallback model list is gone");
 });
 
 run();
