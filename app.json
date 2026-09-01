@@ -1,7 +1,7 @@
 {
   "id": "com.thetjmccarty.termcoder",
   "name": "Term Coder",
-  "version": "1.28.2",
+  "version": "1.28.3",
   "description": "AI agent orchestrator with live terminal squares — decomposes tasks into parallel sub-agents, each in its own git worktree, and merges the results.",
   "icon": "icon.svg",
   "entry": "index.html",

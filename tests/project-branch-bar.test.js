@@ -156,8 +156,15 @@ test("css: bar + popover styles exist and use theme variables", () => {
 // ---------------------------------------------------------------------------
 
 test("wiring: branch selector loads branches from git and pins main", () => {
-  assert(/git for-each-ref --format=%\(refname:short\) refs\/heads/.test(SRC),
-    "must list branches via git for-each-ref");
+  // Regression (v1.28.3): the format string MUST be single-quoted inside the
+  // command. loginShell wraps commands in `zsh -lic "…"` and those outer double
+  // quotes are stripped before zsh parses the line, so a bare %(refname:short)
+  // was a zsh parse error ("missing end of string", exit 1) — every repo then
+  // reported "Not a git repository" and the branch selector was dead.
+  assert(/git for-each-ref --format='%\(refname:short\)' refs\/heads/.test(SRC),
+    "must list branches via git for-each-ref with the format single-quoted (zsh-safe)");
+  assert(!/for-each-ref --format=%\\\(refname/.test(SRC) || /format='%\(refname:short\)'/.test(SRC),
+    "an unquoted %(refname:short) format breaks under zsh -lic");
   assert(/git branch --show-current/.test(SRC), "must read the current branch");
   assert(/orderBranches\(/.test(SRC), "must order branches (main first)");
   assert(/filterBranches\(/.test(SRC), "must filter branches by search query");

@@ -104,7 +104,12 @@ async function pbFetchBranches() {
   const p = TC.getProject(TC.state.activeProjectId);
   if (!p || !p.folderPath) return null;
   const current = await pbGit("git branch --show-current");
-  const raw = await pbGit("git for-each-ref --format=%(refname:short) refs/heads");
+  // The --format value is single-quoted INSIDE the command string. loginShell
+  // wraps commands in `zsh -lic "…"`, and those outer double quotes are stripped
+  // before zsh parses the line — so a bare %(refname:short) is a zsh parse error
+  // ("missing end of string", exit 1), which made every repo report "Not a git
+  // repository". Quoting the format survives every shell layer.
+  const raw = await pbGit("git for-each-ref --format='%(refname:short)' refs/heads");
   if (raw === null) return null;
   const branches = raw.split("\n").map((s) => s.trim()).filter(Boolean);
   return { current: current || null, branches };
