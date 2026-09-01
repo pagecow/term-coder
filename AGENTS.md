@@ -556,3 +556,21 @@ Small single-purpose utilities may omit the pattern, but it is the default. The 
 - **Merges, commits, pushes, releases, and small direct file edits are the orchestrator's own job — never a sub-agent's.** The orchestrator has the tools for all of them: `merge_worktree`, `git_status`, `git_commit`, `git_push`, `version_bump`, `create_release`, `read_file`, `write_file`, `edit_file`. Sub-agents exist for implementation work in worktrees; release operations and release-metadata edits are done directly by the orchestrator. Never spawn a sub-agent to do a commit, push, release, or doc edit.
 - **Version bumps are release metadata, not implementation.** Use `version_bump` (bump: major|minor|patch) — it edits the `"version"` field in app.json AND the matching `APP_VERSION` constant in app.js (near line 19) together, so the two strings can never drift. MINOR bump for a batch with features/fixes, PATCH bump for a single tiny fix.
 - **Release flow, in order:** `version_bump` → `git_commit` → `git_push` → `create_release`. `create_release` runs `gh release create vX.Y.Z --target main`, builds the .aip (zip ONLY the app's runtime files: app.json, entry HTML, JS/CSS, icon, libs/ — EXCLUDE tests/, docs, .git, *.md, old .aip/.zip files) plus a .zip copy, and uploads both with `gh release upload`. A release without a .aip/.zip asset breaks ChatOSS's update flow ("This release has no .aip file to install").
+
+## Release builds — hard rules (learned from v1.28.0 and v1.28.1, both broken)
+
+Two releases shipped broken because the .aip was built from a hand-written copy list. These rules exist so that never happens again:
+
+1. **ALWAYS build the .aip with `scripts/build-aip.sh`** — never hand-write the file list. The script derives the list from `index.html` (every local `href`/`src` it references) plus `app.json`'s `entry` and `icon` fields, and fails hard if anything is missing. v1.28.0 shipped without `style.css` (unstyled app); v1.28.1 shipped without `index.html` (update failed: "The entry file index.html is missing from the archive").
+2. **The archive MUST contain, at its root:** the entry file named in app.json's `"entry"` (default `index.html`), `app.json`, the icon named in `"icon"`, and every local asset `index.html` references (stylesheets, scripts, libs). The script verifies all of this before finishing.
+3. **ALWAYS verify the built archive by hand before uploading:** `unzip -l <file>.aip` — confirm the entry file, `style.css`, and `app.json` are listed, and that no `tests/`, `*.md`, or `.git` entries leaked in.
+4. **Run the test suite before releasing** — `tests/release-assets.test.js` pins the release contract (entry file staged, stylesheet staged, end-to-end build check) and `tests/detection-quiet.test.js` pins the no-console-noise contract. A release that fails these tests must not ship.
+5. **Version bump = two edits that must match:** `"version"` in app.json AND `APP_VERSION` in js/00-state.js. `tests/release-assets.test.js` fails if they drift.
+6. **Never leave a broken release as "latest".** If a release ships broken, cut a patch release with the fix and edit the broken release's notes to say it is superseded (⚠️ BROKEN BUILD — install the newer one).
+
+## Console noise — hard rule
+
+The preview's problem counter counts `console.warn`/`console.error` lines. Expected outcomes must NOT warn:
+
+- **Detection probes** (`which`, `test -x`, login-shell probes in `detectTools`) fail routinely — the terminal capability may be off (preview sandbox, permission not granted) or the CLI simply isn't installed. That is a normal result, not an error: stay silent, set `fresh.denied`, and short-circuit the rest of the scan (v1.28.1 logged 25 warnings per scan in the preview). The Settings "Detected tools" list already surfaces the outcome to the user.
+- Only warn/error for things the user can act on and that are genuinely unexpected (e.g. a storage write failure).

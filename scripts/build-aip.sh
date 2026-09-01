@@ -14,16 +14,24 @@ set -eu
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-# --- version + icon from app.json (single source of truth) -------------------
+# --- version + icon + entry from app.json (single source of truth) -----------
 VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' app.json | head -1)
 [ -n "$VERSION" ] || { echo "ERROR: could not read version from app.json" >&2; exit 1; }
 ICON=$(sed -n 's/.*"icon"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' app.json | head -1)
+ENTRY=$(sed -n 's/.*"entry"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' app.json | head -1)
+[ -n "$ENTRY" ] || ENTRY="index.html"
 OUT="${1:-term-coder-v${VERSION}.aip}"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 cp app.json "$STAGE/"
+# The ENTRY FILE is the one file the OS requires at the archive root — v1.28.1
+# shipped without index.html (the script extracted refs FROM it but never
+# copied it) and the update failed with "The entry file index.html is missing
+# from the archive." Copy it explicitly, from app.json's "entry" field.
+[ -f "$ENTRY" ] || { echo "ERROR: app.json entry '$ENTRY' not found" >&2; exit 1; }
+cp "$ENTRY" "$STAGE/"
 if [ -n "$ICON" ]; then
   [ -f "$ICON" ] || { echo "ERROR: app.json icon '$ICON' not found" >&2; exit 1; }
   cp "$ICON" "$STAGE/"
@@ -59,9 +67,13 @@ case "$OUT" in
   *)  (cd "$STAGE" && zip -r -q "$ROOT/$OUT" .) ;;
 esac
 
-# --- verify: app.json at the archive root, no tests/docs leaked --------------
-if ! unzip -l "$OUT" | grep -q "app.json"; then
+# --- verify: entry file + app.json at the archive root, no tests/docs leaked --
+if ! unzip -l "$OUT" | awk '{print $NF}' | grep -qx "app.json"; then
   echo "ERROR: built archive is missing app.json" >&2
+  exit 1
+fi
+if ! unzip -l "$OUT" | awk '{print $NF}' | grep -qx "$ENTRY"; then
+  echo "ERROR: built archive is missing the entry file $ENTRY (the OS refuses to install it)" >&2
   exit 1
 fi
 if unzip -l "$OUT" | grep -Ei "tests/|\.md$|\.git" >/dev/null; then

@@ -99,7 +99,14 @@ async function detectTools(force = false) {
       if (r === null) { fresh.denied = true; return null; }
       return r;
     } catch (e) {
-      console.warn("probe failed:", cmd, e);
+      // Expected outcomes, NOT errors: the terminal capability may be off
+      // (preview sandbox, permission not granted) or the command simply isn't
+      // installed. v1.28.1 logged a console.warn per failed probe — 25
+      // warnings per scan in the preview, which reads as "25 problems in this
+      // app". The detection state + the Settings "Detected tools" list already
+      // surface the outcome, so stay silent and mark the scan denied so the
+      // remaining probes are skipped.
+      fresh.denied = true;
       return null;
     }
   };
@@ -107,15 +114,19 @@ async function detectTools(force = false) {
   // Helper: resolve a CLI binary's absolute path the same way chatossPath is
   // resolved — `which` first, then a login shell `which`, then well-known
   // locations. Returns the path string or null. Also sets the boolean flag
-  // on `fresh` so callers know the binary is available.
+  // on `fresh` so callers know the binary is available. A denied/unavailable
+  // terminal short-circuits the whole scan (every further probe would fail
+  // the same way).
   const resolveCliPath = async (name, guesses) => {
     let path = null;
     const wr = await probe("which " + name);
+    if (fresh.denied) return null;
     if (wr !== null && wr.exitCode === 0 && String(wr.output || "").trim()) {
       path = String(wr.output).trim().split("\n")[0].trim();
     }
     if (!path) {
       const lr = await probe(TC.loginShell("which " + name));
+      if (fresh.denied) return null;
       if (lr !== null && lr.exitCode === 0 && String(lr.output || "").trim()) {
         path = String(lr.output).trim().split("\n")[0].trim();
       }
@@ -123,6 +134,7 @@ async function detectTools(force = false) {
     if (!path) {
       for (const g of guesses) {
         const tr = await probe("test -x " + JSON.stringify(g) + " && echo ok");
+        if (fresh.denied) return null;
         if (tr !== null && tr.exitCode === 0 && /ok/.test(String(tr.output))) { path = g; break; }
       }
     }
@@ -141,16 +153,20 @@ async function detectTools(force = false) {
 
   // Resolve the underlying claude / codex / opencode binaries that
   // `chatoss launch` drives. These are informational only (the Settings
-  // "Detected tools" list) — the app never spawns them directly.
-  TC.setCodexPath(await resolveCliPath("codex", TC.CODEX_GUESSES));
-  fresh.codex = !!TC.codexPath;
-  fresh.codexPath = TC.codexPath;
-  TC.setClaudePath(await resolveCliPath("claude", TC.CLAUDE_GUESSES));
-  fresh.claude = !!TC.claudePath;
-  fresh.claudePath = TC.claudePath;
-  TC.setOpencodePath(await resolveCliPath("opencode", TC.OPENCODE_GUESSES));
-  fresh.opencode = !!TC.opencodePath;
-  fresh.opencodePath = TC.opencodePath;
+  // "Detected tools" list) — the app never spawns them directly. When the
+  // terminal capability is denied/unavailable, every probe fails the same
+  // way, so skip the rest of the scan (one probe instead of 25).
+  if (!fresh.denied) {
+    TC.setCodexPath(await resolveCliPath("codex", TC.CODEX_GUESSES));
+    fresh.codex = !!TC.codexPath;
+    fresh.codexPath = TC.codexPath;
+    TC.setClaudePath(await resolveCliPath("claude", TC.CLAUDE_GUESSES));
+    fresh.claude = !!TC.claudePath;
+    fresh.claudePath = TC.claudePath;
+    TC.setOpencodePath(await resolveCliPath("opencode", TC.OPENCODE_GUESSES));
+    fresh.opencode = !!TC.opencodePath;
+    fresh.opencodePath = TC.opencodePath;
+  }
 
   // `detection` is exported from 00-state.js, so it must be mutated in place
   // (the imported binding itself is read-only).

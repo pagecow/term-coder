@@ -59,7 +59,6 @@ test("scripts/build-aip.sh derives the archive file list from index.html", () =>
   const script = fs.readFileSync(scriptPath, "utf8");
   // The fix: refs are grepped out of index.html, not hand-listed.
   assert(/grep -oE '\(href\|src\)=/.test(script), "the script must extract href/src from index.html");
-  assert(/style\.css/.test(script) === false || true, "no hard-coded style.css requirement");
   // The copy list that shipped the broken v1.28.0 must be gone.
   assert(!/cp -R app\.json index\.html icon\.svg js libs/.test(script),
     "the broken hand-written copy list must not return");
@@ -68,6 +67,46 @@ test("scripts/build-aip.sh derives the archive file list from index.html", () =>
   assert(/app\.json/.test(script) && /zip -r/.test(script), "must stage app.json and zip");
   // Executable bit set (runs as ./scripts/build-aip.sh).
   assert(fs.statSync(scriptPath).mode & 0o111, "build script must be executable");
+});
+
+test("scripts/build-aip.sh stages the ENTRY file from app.json (v1.28.1 regression)", () => {
+  // v1.28.1 shipped WITHOUT index.html: the script extracted refs FROM it but
+  // never copied it, and the update failed with "The entry file index.html is
+  // missing from the archive." The script must copy app.json's "entry" file
+  // explicitly and verify it is in the finished archive.
+  const script = fs.readFileSync(path.join(ROOT, "scripts", "build-aip.sh"), "utf8");
+  assert(/ENTRY=\$\(sed -n 's\/\.\*"entry"/.test(script),
+    "the script must read the entry file name from app.json");
+  assert(/cp "\$ENTRY" "\$STAGE\/"/.test(script),
+    "the script must copy the entry file into the staging dir");
+  assert(/missing the entry file \$ENTRY/.test(script),
+    "the script must verify the entry file is in the finished archive");
+  assert(/grep -qx "\$ENTRY"/.test(script),
+    "the verification must match the entry file name exactly");
+});
+
+test("end-to-end: the build script produces an archive with entry + stylesheet + app.json", () => {
+  // Run the REAL script and inspect the REAL archive. Skipped only when the
+  // zip/unzip binaries are unavailable (the script needs them anyway).
+  const { execSync } = require("child_process");
+  let zipOk = true;
+  try { execSync("which zip >/dev/null 2>&1 && which unzip >/dev/null 2>&1", { shell: "/bin/sh" }); }
+  catch (e) { zipOk = false; }
+  if (!zipOk) { console.log("  (skipped: zip/unzip not available)"); return; }
+  const out = path.join(ROOT, "term-coder-test-build.aip");
+  try {
+    execSync("sh scripts/build-aip.sh " + JSON.stringify(out), { cwd: ROOT, stdio: "pipe" });
+    const listing = execSync("unzip -l " + JSON.stringify(out), { cwd: ROOT }).toString();
+    const names = listing.split("\n").map((l) => l.trim().split(/\s+/).pop()).filter(Boolean);
+    assert(names.includes("index.html"), "archive must contain the entry file index.html");
+    assert(names.includes("style.css"), "archive must contain style.css");
+    assert(names.includes("app.json"), "archive must contain app.json at the root");
+    assert(names.includes("icon.svg"), "archive must contain the icon");
+    assert(names.includes("js/00-state.js") && names.includes("js/24-init.js"), "archive must contain the js modules");
+    assert(!names.some((n) => /^tests\//.test(n) || /\.md$/.test(n)), "archive must not contain tests/docs");
+  } finally {
+    try { fs.unlinkSync(out); } catch (e) { /* ignore */ }
+  }
 });
 
 test("executing the real derivation stages style.css (v1.28.0 regression, replayed)", () => {

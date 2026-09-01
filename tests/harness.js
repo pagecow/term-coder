@@ -6,11 +6,12 @@ const assert = require("assert");
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
-function run() {
+async function run() {
   let passed = 0, failed = 0;
   for (const t of tests) {
     try {
-      t.fn();
+      const r = t.fn();
+      if (r && typeof r.then === "function") await r; // async tests are awaited
       passed++;
       console.log("  \u2713 " + t.name);
     } catch (e) {
